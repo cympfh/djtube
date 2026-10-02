@@ -2,6 +2,10 @@ import { EQ_BANDS, clampEqUnit, eqGainDb, eqUnitFromMidi } from "./eq.js";
 import { deckGains } from "./gains.js";
 import { clampRate, rateFromMidi } from "./rate.js";
 
+// Tighter than one FLX4 jog tick (0.05s). A wider window treats that tick as
+// already landed and the next wheel step seeks to the same place.
+const JOG_CATCH_UP = 0.03;
+
 export function freshDeck() {
   return {
     gen: 0,
@@ -234,7 +238,7 @@ export function createActions(deps) {
     const pending = deckState?.jogCommand;
     if (!pending || !audio) return;
     const live = playhead(audio);
-    if (Number.isFinite(live) && Math.abs(live - pending.at) <= 0.35) deckState.jogCommand = null;
+    if (Number.isFinite(live) && Math.abs(live - pending.at) <= JOG_CATCH_UP) deckState.jogCommand = null;
   }
 
   function cue(deck) {
@@ -354,7 +358,7 @@ export function createActions(deps) {
     const stillStale =
       pending &&
       Math.abs(live - pending.from) <= 0.35 &&
-      Math.abs(live - pending.at) > 0.35;
+      Math.abs(live - pending.at) > JOG_CATCH_UP;
     const base = stillStale ? pending.at : live;
     let next = base + step;
     if (next < 0) next = 0;
