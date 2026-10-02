@@ -1,21 +1,105 @@
-// Pioneer DDJ-FLX4 is intentionally not mapped.
-// Keyboard and a future controller both call the same action functions.
+// Pioneer DDJ-FLX4 MIDI, from the official message list (E1) and the Mixxx
+// Pioneer-DDJ-FLX4 mapping. Channels in this file are 0–15.
+// Deck 1 is channel 0, deck 2 is channel 1, the mixer and browse encoder
+// are channel 6 (status 0xB6 / 0x96).
 //
-// Key format, once real DDJ-FLX4 numbers are known:
-//   "note:<channel 0-15>:<note number>"
-//   "cc:<channel 0-15>:<controller number>"
-// Value is note velocity or CC 0–127.
-// A crossfader entry should call setCrossfaderFromController with passValue true.
-// That action takes the raw MIDI value 0–127. This file does not guess those numbers.
-// Jog is actions.jog(deck, seconds) and is not mapped here either.
-// Tempo is setRate, nudgeRate, resetRate, and setRateFromController. It is not mapped here.
-// EQ is setEq, nudgeEq, resetEq, and setEqFromController. It is not mapped here.
+// Key format:
+//   "note:<channel>:<note>"
+//   "cc:<channel>:<controller>"
+// Buttons are note-on with velocity > 0. Note-on velocity 0 is a release and
+// is ignored. Jog wheels report a relative CC centered on 64 (65 is +1).
+// The browse encoder is a 7-bit signed step (1 is +1, 127 is -1).
+// The crossfader MSB is CC 31 and goes to setCrossfaderFromController as 0–127.
+// Tempo MSB is CC 0 on the deck channel and goes to setRateFromController.
+// EQ MSB is CC 7 / 11 / 15 (HI / MID / LOW) and goes to setEqFromController.
+// The LSB companions (CC 32, 39, 43, 47) are not mapped.
 
-/** @type {Record<string, {action: string, args?: unknown[], passValue?: boolean}>} */
-export const FLX4_MAP = {};
+const DECK_A = 0;
+const DECK_B = 1;
+const MIXER = 6;
+
+const PLAY = 0x0b;
+const CUE = 0x0c;
+const LOAD_A = 0x46;
+const LOAD_B = 0x47;
+const JOG_SIDE = 0x21;
+const JOG_VINYL = 0x22;
+const JOG_BEND = 0x23;
+const JOG_SEARCH = 0x29;
+const CROSSFADER = 0x1f;
+const BROWSE = 0x40;
+const TEMPO = 0x00;
+const EQ_HI = 0x07;
+const EQ_MID = 0x0b;
+const EQ_LOW = 0x0f;
+
+/** Seconds of seek for one jog tick (value 65 or 63). */
+export const JOG_STEP_SECONDS = 0.05;
+/** Shift+platter uses its own CC and seeks faster. */
+export const JOG_SEARCH_STEP_SECONDS = 0.5;
+
+export const MIDI_STATUS_IDLE = "未接続 — MIDI を開く（要 HTTPS）";
+
+function binding(action, args, extra) {
+  const spec = { action };
+  if (args) spec.args = args;
+  if (extra) Object.assign(spec, extra);
+  return spec;
+}
+
+function deckTone(channel, deck) {
+  const tempo = { passValue: true };
+  const eq = { passValue: true };
+  return {
+    [`cc:${channel}:${TEMPO}`]: binding("setRateFromController", [deck], tempo),
+    [`cc:${channel}:${EQ_HI}`]: binding("setEqFromController", [deck, "high"], eq),
+    [`cc:${channel}:${EQ_MID}`]: binding("setEqFromController", [deck, "mid"], eq),
+    [`cc:${channel}:${EQ_LOW}`]: binding("setEqFromController", [deck, "low"], eq),
+  };
+}
+
+function deckJog(channel, deck) {
+  const fine = { relative: "center64", scale: JOG_STEP_SECONDS };
+  const search = { relative: "center64", scale: JOG_SEARCH_STEP_SECONDS };
+  return {
+    [`cc:${channel}:${JOG_SIDE}`]: binding("jog", [deck], fine),
+    [`cc:${channel}:${JOG_VINYL}`]: binding("jog", [deck], fine),
+    [`cc:${channel}:${JOG_BEND}`]: binding("jog", [deck], fine),
+    [`cc:${channel}:${JOG_SEARCH}`]: binding("jog", [deck], search),
+  };
+}
+
+/** @type {Record<string, {action: string, args?: unknown[], passValue?: boolean, relative?: string, scale?: number}>} */
+export const FLX4_MAP = {
+  [`note:${DECK_A}:${PLAY}`]: binding("togglePlay", ["A"]),
+  [`note:${DECK_B}:${PLAY}`]: binding("togglePlay", ["B"]),
+  [`note:${DECK_A}:${CUE}`]: binding("cue", ["A"]),
+  [`note:${DECK_B}:${CUE}`]: binding("cue", ["B"]),
+  [`note:${MIXER}:${LOAD_A}`]: binding("loadSelected", ["A"]),
+  [`note:${MIXER}:${LOAD_B}`]: binding("loadSelected", ["B"]),
+  [`cc:${MIXER}:${CROSSFADER}`]: binding("setCrossfaderFromController", undefined, { passValue: true }),
+  [`cc:${MIXER}:${BROWSE}`]: binding("moveSelection", undefined, { relative: "signed7", scale: 1 }),
+  ...deckJog(DECK_A, "A"),
+  ...deckJog(DECK_B, "B"),
+  ...deckTone(DECK_A, "A"),
+  ...deckTone(DECK_B, "B"),
+};
 
 export function controllerEventKey(msg) {
   return `${msg.type}:${msg.channel}:${msg.number}`;
+}
+
+export function relativeMidiTicks(value, mode) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 0;
+  const midi = Math.round(numeric);
+  if (mode === "center64") return midi - 64;
+  if (mode === "signed7") {
+    if (midi <= 0 || midi >= 128 || midi === 64) return 0;
+    if (midi < 64) return midi;
+    return midi - 128;
+  }
+  return 0;
 }
 
 export function messageFromMidi(data) {
@@ -37,19 +121,46 @@ export function dispatchControllerEvent(msg, actions, map = FLX4_MAP) {
   const fn = actions[spec.action];
   if (typeof fn !== "function") return false;
   const args = Array.isArray(spec.args) ? spec.args.slice() : [];
-  if (spec.passValue) args.push(msg.value);
+  if (spec.relative) {
+    const ticks = relativeMidiTicks(msg.value, spec.relative);
+    if (!ticks) return true;
+    const scale = Number(spec.scale);
+    const amount = ticks * (Number.isFinite(scale) ? scale : 1);
+    if (!amount) return true;
+    args.push(amount);
+  } else if (spec.passValue) {
+    args.push(msg.value);
+  }
   fn(...args);
   return true;
 }
 
+export function controllerStatusText(status) {
+  if (!status || status.state === "idle") return MIDI_STATUS_IDLE;
+  if (status.state === "unsupported") return "Web MIDI 非対応";
+  if (status.state === "insecure") return "未接続 — HTTPS が必要です";
+  if (status.state === "denied") return "MIDI が拒否されました";
+  if (status.state === "open" && status.names?.length) return `接続: ${status.names.join("、")}`;
+  if (status.state === "opening") return "MIDI を開いています…";
+  return "未接続";
+}
+
 export async function connectController(actions, onStatus) {
-  if (typeof navigator === "undefined" || !navigator.requestMIDIAccess) {
-    onStatus?.({ state: "unsupported", names: [], ignored: 0 });
+  const nav = typeof navigator === "undefined" ? undefined : navigator;
+  const secure = typeof window === "undefined" || window.isSecureContext !== false;
+  if (!nav?.requestMIDIAccess) {
+    onStatus?.({
+      state: secure ? "unsupported" : "insecure",
+      names: [],
+      ignored: 0,
+      connected: false,
+      mapped: Object.keys(FLX4_MAP).length,
+    });
     return;
   }
   let ignored = 0;
   try {
-    const access = await navigator.requestMIDIAccess();
+    const access = await nav.requestMIDIAccess();
     const bind = () => {
       const names = [];
       for (const input of access.inputs.values()) {
@@ -63,6 +174,7 @@ export async function connectController(actions, onStatus) {
             state: "open",
             names,
             ignored,
+            connected: names.length > 0,
             mapped: Object.keys(FLX4_MAP).length,
           });
         };
@@ -71,12 +183,19 @@ export async function connectController(actions, onStatus) {
         state: "open",
         names,
         ignored,
+        connected: names.length > 0,
         mapped: Object.keys(FLX4_MAP).length,
       });
     };
     bind();
     access.onstatechange = bind;
   } catch {
-    onStatus?.({ state: "denied", names: [], ignored: 0 });
+    onStatus?.({
+      state: "denied",
+      names: [],
+      ignored: 0,
+      connected: false,
+      mapped: Object.keys(FLX4_MAP).length,
+    });
   }
 }

@@ -53,7 +53,7 @@ def create_app() -> FastAPI:
             "ok": True,
             "search": search_mode(),
             "prefix": PUBLIC_PREFIX,
-            "flx4": "unmapped",
+            "flx4": "mapped",
             "playback": "ytdlp-stream",
         }
 

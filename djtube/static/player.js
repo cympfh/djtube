@@ -4,6 +4,7 @@
 import { EQ_BANDS, EQ_FILTERS, connectEqGraph } from "./eq.js";
 import { publicPrefix } from "./prefix.js";
 import { clampRate } from "./rate.js";
+import { commandedSeekLanded } from "./seekland.js";
 
 export function createDeckPlayer(deck, elementId) {
   const audio = typeof document === "undefined" ? null : document.createElement("audio");
@@ -22,6 +23,7 @@ export function createDeckPlayer(deck, elementId) {
     paused: true,
     videoId: "",
     _time: 0,
+    _seekFrom: 0,
     _seekPending: false,
     _volume: 1,
     _rate: 1,
@@ -30,16 +32,19 @@ export function createDeckPlayer(deck, elementId) {
     _filters: null,
     _graphFailed: false,
     _attached: false,
-    get currentTime() {
-      let reported = NaN;
+    _reportedTime() {
       try {
         const time = this.audio?.currentTime;
-        if (Number.isFinite(time)) reported = time;
+        if (Number.isFinite(time)) return time;
       } catch {
         /* element has no media yet */
       }
+      return NaN;
+    },
+    get currentTime() {
+      const reported = this._reportedTime();
       if (this._seekPending && Number.isFinite(this._time)) {
-        if (!Number.isFinite(reported) || Math.abs(reported - this._time) > 0.35) return this._time;
+        if (!commandedSeekLanded(this._seekFrom, this._time, reported)) return this._time;
         this._seekPending = false;
         this.onSeekLanded?.();
       }
@@ -48,6 +53,10 @@ export function createDeckPlayer(deck, elementId) {
     },
     set currentTime(value) {
       const next = Number(value) || 0;
+      if (!this._seekPending) {
+        const reported = this._reportedTime();
+        this._seekFrom = Number.isFinite(reported) ? reported : this._time;
+      }
       this._time = next;
       this._seekPending = true;
       if (!this.audio) return;
@@ -56,6 +65,9 @@ export function createDeckPlayer(deck, elementId) {
       } catch {
         /* ignore seek before metadata */
       }
+    },
+    cancelPendingSeek() {
+      this._seekPending = false;
     },
     get duration() {
       try {
@@ -91,6 +103,10 @@ export function createDeckPlayer(deck, elementId) {
     },
     _ensureGraph() {
       if (this._graphFailed || !this.audio) return false;
+      if (typeof window === "undefined") {
+        this._graphFailed = true;
+        return false;
+      }
       const Ctx = window.AudioContext || window.webkitAudioContext;
       if (!Ctx) {
         this._graphFailed = true;
@@ -135,6 +151,7 @@ export function createDeckPlayer(deck, elementId) {
     loadVideo(id) {
       this.videoId = id;
       this._time = 0;
+      this._seekFrom = 0;
       this._seekPending = false;
       this.paused = true;
       if (!this.audio) return false;
