@@ -40,6 +40,7 @@ def test_index_uses_public_asset_prefix():
     assert 'id="disc-A"' in html
     assert 'id="disc-B"' in html
     assert 'class="deck-disc-ring"' in html
+    assert 'class="deck-disc-mark"' in html
     assert 'fill-rule="evenodd"' in html
     assert 'id="yt-A"' not in html
     assert "<iframe" not in html

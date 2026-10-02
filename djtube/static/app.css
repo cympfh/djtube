@@ -467,7 +467,14 @@ button:disabled { opacity: 0.45; cursor: default; }
 
 .deck-disc[hidden] { display: none; }
 
-.deck-disc-ring { fill: rgba(255, 255, 255, 0.46); }
+.deck-disc-ring { fill: rgba(255, 255, 255, 0.34); }
+
+.deck-disc-mark {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.88);
+  stroke-width: 2.6;
+  stroke-linecap: round;
+}
 
 .deck-audio {
   position: absolute;
