@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import logging
+import sys
+import types
+from pathlib import Path
+
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -8,10 +14,14 @@ from djtube.audio import (
     AudioError,
     AudioExpired,
     AudioSource,
+    _format_summary,
+    _redact,
+    _signal_labels,
     clear_audio_cache,
     content_type_for,
     host_allowed,
     open_audio,
+    open_upstream,
     resolve_audio,
     select_audio_format,
 )
@@ -96,8 +106,9 @@ def test_open_audio_retries_when_the_media_url_expires(monkeypatch):
         calls["n"] += 1
         return AudioSource(url=f"{MEDIA}&n={calls['n']}", content_type="audio/mp4", headers={})
 
-    def upstream(source, range_header):
+    def upstream(source, range_header, video_id):
         assert range_header == "bytes=0-1"
+        assert video_id == VIDEO_ID
         if calls["n"] == 1:
             raise AudioExpired("音源を取得できませんでした")
         return source.url
@@ -142,6 +153,253 @@ def test_audio_route_proxies_bytes_and_hides_the_upstream(monkeypatch):
     missing = client.get("/api/audio/not-an-id")
     assert missing.status_code == 404
     assert "googlevideo" not in missing.text
+
+
+SIGNED = MEDIA + "&sig=supersecret&lsig=aaa"
+NASTY = (
+    "ERROR: [youtube] abcdefghijk: Sign in to confirm you're not a bot. "
+    "Use --cookies-from-browser or --cookies for the authentication. "
+    "See https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp for how to manually pass cookies. "
+    "HTTP Error 403: Forbidden "
+    f"{SIGNED} "
+    "Cookie: VISITOR_INFO1_LIVE=secretcookie; SAPISID=otherscret "
+    "consent.youtube.com/m?continue=1 "
+    "AIzaSyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA "
+    "Before you continue to YouTube"
+)
+SECRETS = ("supersecret", "secretcookie", "otherscret", "AIzaSy", "videoplayback", "googlevideo", "github.com")
+
+
+class _Resp:
+    def __init__(self, status_code, headers=None):
+        self.status_code = status_code
+        self.headers = headers or {}
+
+    def close(self):
+        return None
+
+
+@pytest.fixture
+def audio_logs():
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = Capture()
+    handler.setLevel(logging.INFO)
+    logger = logging.getLogger("djtube.audio")
+    logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+
+
+def _text(records) -> str:
+    return "\n".join(records)
+
+
+def _install_ytdlp(monkeypatch, extract_info):
+    class FakeYDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def extract_info(self, url, download=False):
+            return extract_info(self, url, download)
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeYDL))
+
+
+def test_signal_labels_distinguish_bot_consent_and_403():
+    assert _signal_labels("Sign in to confirm your age") == ""
+    assert _signal_labels("Sign in to confirm you're not a bot") == "Bot判定"
+    assert _signal_labels("Before you continue to YouTube") == "同意画面"
+    assert _signal_labels("HTTP Error 403: Forbidden") == "403"
+    assert _signal_labels("YouTube is requiring a captcha challenge") == "Bot判定"
+
+
+def test_redact_keeps_failure_words_and_drops_secrets():
+    cleaned = _redact(NASTY)
+    assert "not a bot" in cleaned
+    assert "HTTP Error 403" in cleaned
+    assert "Before you continue to YouTube" in cleaned
+    assert "for the authentication" in cleaned
+    for secret in SECRETS:
+        assert secret not in cleaned
+    summary = _format_summary(_fmt(ext=SIGNED, format_id="140"))
+    assert "format_id=140" in summary
+    assert "supersecret" not in summary
+    assert "videoplayback" not in summary
+
+
+def test_playback_error_text_stays_on_screen():
+    source = (Path(__file__).resolve().parents[1] / "djtube" / "static" / "app.js").read_text(encoding="utf-8")
+    assert 'deckState.error = "音源を再生できませんでした"' in source
+
+
+def test_audio_logger_reaches_stderr():
+    logger = logging.getLogger("djtube.audio")
+    assert logger.level <= logging.INFO
+    assert logger.propagate is False
+    assert any(handler.name == "djtube-audio" for handler in logger.handlers)
+
+
+def test_ytdlp_failure_logs_exit_and_hides_secrets(monkeypatch, audio_logs, capsys):
+    clear_audio_cache()
+
+    def extract_info(ydl, url, download):
+        assert download is False
+        assert url == watch_url(VIDEO_ID)
+        assert ydl.options["quiet"] is True
+        assert ydl.options["skip_download"] is True
+        logger = ydl.options.get("logger")
+        assert logger is not None
+        logger.debug(SIGNED)
+        logger.error(NASTY)
+        try:
+            raise OSError(f"HTTP Error 403: Forbidden {SIGNED}")
+        except OSError as inner:
+            err = RuntimeError("extractor failed")
+            err.exc_info = (type(inner), inner, None)
+            raise err
+
+    _install_ytdlp(monkeypatch, extract_info)
+    with pytest.raises(AudioError) as caught:
+        resolve_audio(VIDEO_ID)
+    assert str(caught.value) == "音源を取得できませんでした"
+    assert caught.value.status == 502
+    text = _text(audio_logs)
+    assert f"video={VIDEO_ID}" in text
+    assert "path=ytdlp" in text
+    assert "event=start" in text
+    assert "event=ended" in text
+    assert "exit=RuntimeError,OSError" in text
+    assert "signals=Bot判定,同意画面,403" in text
+    assert "not a bot" in text
+    assert "HTTP Error 403" in text
+    assert "Before you continue to YouTube" in text
+    for secret in SECRETS:
+        assert secret not in text
+    captured = capsys.readouterr()
+    for secret in SECRETS:
+        assert secret not in captured.err
+        assert secret not in captured.out
+
+
+def test_ytdlp_success_logs_format_summary_without_the_url(monkeypatch, audio_logs):
+    clear_audio_cache()
+    calls = {"n": 0}
+
+    def extract_info(ydl, url, download):
+        calls["n"] += 1
+        assert ydl.options.get("logger") is not None
+        ydl.options["logger"].warning(f"HTTP Error 403: Forbidden {SIGNED}")
+        return {"formats": [_fmt(format_id="140", url=SIGNED)], "http_headers": {"User-Agent": "djtube-test"}}
+
+    _install_ytdlp(monkeypatch, extract_info)
+    source = resolve_audio(VIDEO_ID)
+    assert source.url == SIGNED
+    assert source.headers["User-Agent"] == "djtube-test"
+    again = resolve_audio(VIDEO_ID)
+    assert again.url == source.url
+    assert calls["n"] == 1
+    text = _text(audio_logs)
+    assert "path=ytdlp" in text
+    assert "event=selected" in text
+    assert "exit=ok" in text
+    assert "ext=m4a" in text
+    assert "acodec=mp4a.40.2" in text
+    assert "abr=128" in text
+    assert "protocol=https" in text
+    assert "mime=audio/mp4" in text
+    assert "format_id=140" in text
+    assert "event=note" in text
+    assert "signals=403" in text
+    assert "path=cache" in text
+    assert "event=hit" in text
+    for secret in SECRETS:
+        assert secret not in text
+
+
+def test_open_audio_logs_upstream_403_without_the_media_url(monkeypatch, audio_logs):
+    clear_audio_cache()
+    state = {"n": 0}
+
+    def extract_info(ydl, url, download):
+        state["n"] += 1
+        return {"formats": [_fmt(url=f"{SIGNED}&n={state['n']}", format_id="140")]}
+
+    _install_ytdlp(monkeypatch, extract_info)
+
+    def send(client, url, headers):
+        if "n=1" in url:
+            return _Resp(403)
+        return _Resp(206)
+
+    monkeypatch.setattr("djtube.audio._send", send)
+    opened = open_audio(VIDEO_ID, None)
+    opened.close()
+    assert state["n"] == 2
+    text = _text(audio_logs)
+    assert "path=ytdlp" in text
+    assert "event=selected" in text
+    assert "ext=m4a" in text
+    assert "path=upstream" in text
+    assert "exit=403" in text
+    assert "signals=403" in text
+    assert "event=retry" in text
+    assert "exit=206" in text
+    for secret in SECRETS:
+        assert secret not in text
+
+
+def test_upstream_hides_redirect_target_and_transport_url(monkeypatch, audio_logs):
+    source = AudioSource(url=SIGNED, content_type="audio/mp4", headers={})
+
+    def reject(client, url, headers):
+        return _Resp(302, {"location": "https://evil.example/secret-audio?sig=supersecret"})
+
+    monkeypatch.setattr("djtube.audio._send", reject)
+    with pytest.raises(AudioError) as rejected:
+        open_upstream(source, None, VIDEO_ID)
+    assert str(rejected.value) == "音源を取得できませんでした"
+    assert "exit=redirect-rejected" in _text(audio_logs)
+    assert "evil.example" not in _text(audio_logs)
+
+    audio_logs.clear()
+
+    def follow(client, url, headers):
+        if url == SIGNED:
+            return _Resp(302, {"location": SIGNED + "&redirect=1"})
+        return _Resp(206)
+
+    monkeypatch.setattr("djtube.audio._send", follow)
+    opened = open_upstream(source, "bytes=0-1", VIDEO_ID)
+    opened.close()
+    assert "exit=206" in _text(audio_logs)
+    for secret in SECRETS:
+        assert secret not in _text(audio_logs)
+
+    audio_logs.clear()
+
+    def boom(client, url, headers):
+        raise httpx.TransportError(f"failed {url}")
+
+    monkeypatch.setattr("djtube.audio._send", boom)
+    with pytest.raises(AudioError) as failed:
+        open_upstream(source, None, VIDEO_ID)
+    assert str(failed.value) == "音源を取得できませんでした"
+    assert "path=upstream" in _text(audio_logs)
+    for secret in SECRETS:
+        assert secret not in _text(audio_logs)
 
 
 def test_audio_route_reports_resolve_failure(monkeypatch):
