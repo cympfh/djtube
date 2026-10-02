@@ -280,6 +280,59 @@ test("jog seeks the deck and does not move cue or the crossfader", () => {
   });
 });
 
+test("+ seeks deck B backward about 10 seconds from the commanded position", () => {
+  const { state, audios, actions } = harness();
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 120 }];
+  return actions.loadSelected("B").then(() => {
+    let reported = 40;
+    let commanded = 40;
+    Object.defineProperty(audios.B, "currentTime", {
+      configurable: true,
+      get() {
+        return reported;
+      },
+      set(value) {
+        commanded = value;
+      },
+    });
+    audios.B.duration = 120;
+    const cue = state.decks.B.cue;
+    const fader = state.crossfader;
+    const jogKeys = Object.fromEntries(
+      legendGroups()
+        .find((group) => group.name === "ジョグ")
+        .items.map((item) => [item.label, item.keys]),
+    );
+    assert.equal(jogKeys["デッキ A を戻す"], "[");
+    assert.equal(jogKeys["デッキ A を進める"], "]");
+    assert.equal(jogKeys["デッキ A を大きく戻す"], "Shift+[");
+    assert.equal(jogKeys["デッキ A を大きく進める"], "Shift+]");
+    assert.equal(jogKeys["デッキ B を戻す"], ";");
+    assert.equal(jogKeys["デッキ B を進める"], "'");
+    assert.equal(jogKeys["デッキ B を大きく戻す"], "Shift+; +");
+    assert.equal(jogKeys["デッキ B を大きく進める"], "Shift+'");
+
+    assert.equal(handleKeydown(keyEvent("+", bodyTarget()), actions), false);
+    assert.equal(commanded, 40);
+    assert.equal(handleKeydown(keyEvent("+", searchTarget(), { shiftKey: true }), actions), false);
+    assert.equal(commanded, 40);
+
+    assert.equal(handleKeydown(keyEvent("+", bodyTarget(), { shiftKey: true }), actions), true);
+    assert.equal(commanded, 30);
+    assert.equal(state.decks.B.jogCommand.at, 30);
+    assert.equal(reported, 40);
+    assert.equal(handleKeydown(keyEvent("+", bodyTarget(), { shiftKey: true }), actions), true);
+    assert.equal(commanded, 20);
+    assert.equal(state.decks.B.jogCommand.at, 20);
+    assert.equal(reported, 40);
+    assert.equal(handleKeydown(keyEvent(":", bodyTarget(), { shiftKey: true }), actions), true);
+    assert.equal(commanded, 10);
+    assert.equal(state.decks.B.cue, cue);
+    assert.equal(state.crossfader, fader);
+    assert.equal(audios.A.currentTime, 0);
+  });
+});
+
 test("jog keeps adding while the player still reports the old time", () => {
   const { state, audios, actions } = harness();
   state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 120 }];
