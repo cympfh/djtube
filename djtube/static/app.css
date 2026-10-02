@@ -486,4 +486,12 @@ kbd {
   .stage, .deck-row, .legend, .top { display: flex; flex-direction: column; }
   .health { margin-left: 0; }
   .results { max-height: 280px; }
+  .player-frame {
+    flex: none;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 16 / 9;
+    min-height: 0;
+    max-height: none;
+  }
 }
