@@ -10,8 +10,9 @@
 // is ignored. Jog wheels report a relative CC centered on 64 (65 is +1).
 // The browse encoder is a 7-bit signed step (1 is +1, 127 is -1).
 // The crossfader MSB is CC 31 and goes to setCrossfaderFromController as 0–127.
-// Tempo (setRate, nudgeRate, resetRate, setRateFromController) is not mapped here.
-// EQ is setEq, nudgeEq, resetEq, and setEqFromController. It is not mapped here.
+// Tempo MSB is CC 0 on the deck channel and goes to setRateFromController.
+// EQ MSB is CC 7 / 11 / 15 (HI / MID / LOW) and goes to setEqFromController.
+// The LSB companions (CC 32, 39, 43, 47) are not mapped.
 
 const DECK_A = 0;
 const DECK_B = 1;
@@ -27,6 +28,10 @@ const JOG_BEND = 0x23;
 const JOG_SEARCH = 0x29;
 const CROSSFADER = 0x1f;
 const BROWSE = 0x40;
+const TEMPO = 0x00;
+const EQ_HI = 0x07;
+const EQ_MID = 0x0b;
+const EQ_LOW = 0x0f;
 
 /** Seconds of seek for one jog tick (value 65 or 63). */
 export const JOG_STEP_SECONDS = 0.05;
@@ -40,6 +45,17 @@ function binding(action, args, extra) {
   if (args) spec.args = args;
   if (extra) Object.assign(spec, extra);
   return spec;
+}
+
+function deckTone(channel, deck) {
+  const tempo = { passValue: true };
+  const eq = { passValue: true };
+  return {
+    [`cc:${channel}:${TEMPO}`]: binding("setRateFromController", [deck], tempo),
+    [`cc:${channel}:${EQ_HI}`]: binding("setEqFromController", [deck, "high"], eq),
+    [`cc:${channel}:${EQ_MID}`]: binding("setEqFromController", [deck, "mid"], eq),
+    [`cc:${channel}:${EQ_LOW}`]: binding("setEqFromController", [deck, "low"], eq),
+  };
 }
 
 function deckJog(channel, deck) {
@@ -65,6 +81,8 @@ export const FLX4_MAP = {
   [`cc:${MIXER}:${BROWSE}`]: binding("moveSelection", undefined, { relative: "signed7", scale: 1 }),
   ...deckJog(DECK_A, "A"),
   ...deckJog(DECK_B, "B"),
+  ...deckTone(DECK_A, "A"),
+  ...deckTone(DECK_B, "B"),
 };
 
 export function controllerEventKey(msg) {

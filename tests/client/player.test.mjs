@@ -152,6 +152,14 @@ test("FLX4 map sends notes and CCs to deck actions", async () => {
     "cc:0:41": ["jog", ["A"]],
     "cc:1:41": ["jog", ["B"]],
     "cc:6:64": ["moveSelection", undefined],
+    "cc:0:0": ["setRateFromController", ["A"]],
+    "cc:1:0": ["setRateFromController", ["B"]],
+    "cc:0:7": ["setEqFromController", ["A", "high"]],
+    "cc:0:11": ["setEqFromController", ["A", "mid"]],
+    "cc:0:15": ["setEqFromController", ["A", "low"]],
+    "cc:1:7": ["setEqFromController", ["B", "high"]],
+    "cc:1:11": ["setEqFromController", ["B", "mid"]],
+    "cc:1:15": ["setEqFromController", ["B", "low"]],
   };
   for (const [key, [action, args]] of Object.entries(expected)) {
     assert.equal(FLX4_MAP[key]?.action, action, key);
@@ -163,7 +171,9 @@ test("FLX4 map sends notes and CCs to deck actions", async () => {
   assert.equal(FLX4_MAP["cc:1:41"].scale, JOG_SEARCH_STEP_SECONDS);
   assert.ok(JOG_SEARCH_STEP_SECONDS > JOG_STEP_SECONDS);
   assert.equal(FLX4_MAP["cc:6:64"].relative, "signed7");
-  for (const key of ["note:0:14", "note:0:72", "note:0:54", "cc:0:19", "cc:6:63", "cc:0:0"]) {
+  assert.equal(FLX4_MAP["cc:0:0"].passValue, true);
+  assert.equal(FLX4_MAP["cc:1:15"].passValue, true);
+  for (const key of ["note:0:14", "note:0:72", "note:0:54", "cc:0:19", "cc:6:63", "cc:0:4", "cc:0:32", "cc:0:39", "cc:0:43", "cc:0:47", "cc:1:32"]) {
     assert.equal(FLX4_MAP[key], undefined, key);
   }
 
@@ -203,6 +213,29 @@ test("FLX4 map sends notes and CCs to deck actions", async () => {
   await Promise.resolve();
   assert.equal(state.decks.B.id, "abcdefghijk");
   assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0x90, 0x0e, 0x7f])), actions), false);
+
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb0, 0x00, 64])), actions), true);
+  assert.equal(state.decks.A.rate, rateFromMidi(64));
+  assert.equal(audios.A.playbackRate, rateFromMidi(64));
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb0, 0x00, 0])), actions), true);
+  assert.equal(state.decks.A.rate, 0.5);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb1, 0x00, 127])), actions), true);
+  assert.equal(state.decks.B.rate, 2);
+  assert.equal(state.decks.A.rate, 0.5);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb0, 0x20, 0])), actions), false);
+
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb0, 0x07, 64])), actions), true);
+  assert.equal(state.decks.A.eq.high, eqUnitFromMidi(64));
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb0, 0x0b, 0])), actions), true);
+  assert.equal(state.decks.A.eq.mid, 0);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb0, 0x0f, 127])), actions), true);
+  assert.equal(state.decks.A.eq.low, 1);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb1, 0x07, 0])), actions), true);
+  assert.equal(state.decks.B.eq.high, 0);
+  assert.equal(state.decks.A.eq.high, eqUnitFromMidi(64));
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb0, 0x27, 0])), actions), false);
+  assert.equal(state.crossfader, 0);
+  assert.equal(state.decks.A.cue, cue);
 
   assert.match(controllerStatusText(), /未接続/);
   assert.match(controllerStatusText({ state: "insecure" }), /HTTPS/);
@@ -993,6 +1026,7 @@ test("eq gain mapping drives the filter and the shared actions", () => {
   assert.equal(handleKeydown(keyEvent("[", bodyTarget()), actions), true);
   assert.equal(state.decks.A.eq.low, before);
 
+  const mapBefore = { ...FLX4_MAP };
   const cc = messageFromMidi(new Uint8Array([0xb0, 7, 0]));
   assert.equal(
     dispatchControllerEvent(cc, actions, {
@@ -1010,8 +1044,9 @@ test("eq gain mapping drives the filter and the shared actions", () => {
   );
   assert.equal(state.decks.B.eq.low, 0.5);
   assert.equal(audios.B.eqDb.low, 0);
-  assert.equal(FLX4_MAP["cc:0:7"], undefined);
-  assert.equal(FLX4_MAP["cc:0:0"], undefined);
+  assert.equal(FLX4_MAP["cc:0:7"].action, "setEqFromController");
+  assert.deepEqual(FLX4_MAP["cc:0:7"].args, ["A", "high"]);
+  assert.deepEqual(FLX4_MAP, mapBefore);
 
   audios.A.eqLive = false;
   actions.setEq("A", "mid", 1);

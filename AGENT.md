@@ -87,7 +87,7 @@ docker compose up --build
 
 Web MIDI は安全なページで、「MIDI を開く」を押したときだけ接続する。公開サイトは https://s.cympfh.cc/djtube/ 。画面上部に未接続か、接続したデバイス名が出る。
 
-ジョグは `actions.jog(deck, seconds)`。準備完了のデッキだけ、再生位置を秒数ぶん動かす。テンポはキーボードの `setRate`、`nudgeRate`、`resetRate` と、MIDI 値を受ける `setRateFromController`（0–127、64 が 1.0、0 が 0.5、127 が 2.0）。イコライザーは `setEq`、`nudgeEq`、`resetEq`、`setEqFromController`。`setEqFromController` はバンド名と MIDI 0–127 を受け、64 が 0 dB、0 がカット、127 がブーストです。FLX4 のテンポスライダーと EQ はこのマップには入っていない。
+ジョグは `actions.jog(deck, seconds)`。準備完了のデッキだけ、再生位置を秒数ぶん動かす。テンポはキーボードの `setRate`、`nudgeRate`、`resetRate` と、MIDI 値を受ける `setRateFromController`（0–127、64 が 1.0、0 が 0.5、127 が 2.0）。イコライザーは `setEq`、`nudgeEq`、`resetEq`、`setEqFromController`。`setEqFromController` はバンド名と MIDI 0–127 を受け、64 が 0 dB、0 がカット、127 がブーストです。FLX4 のテンポは各デッキの CC 0（MSB）、EQ は HI が CC 7、MID が CC 11、LOW が CC 15。LSB はマップしていない。曲を載せても、そのデッキのテンポは 1.0 には戻さない。
 
 割り当てている操作:
 
@@ -98,12 +98,14 @@ Web MIDI は安全なページで、「MIDI を開く」を押したときだけ
 - ジョグ側面・プラッター（ch 0/1、CC 33 / 34 / 35）: 1 目盛り約 0.05 秒
 - Shift+プラッター（ch 0/1、CC 41）: 1 目盛り約 0.5 秒
 - BROWSE 回転（ch 6、CC 64）: 検索結果を上下
+- テンポスライダー MSB（ch 0/1、CC 0）: そのデッキの再生速度
+- EQ HI / MID / LOW MSB（ch 0/1、CC 7 / 11 / 15）: そのデッキの HIGH / MID / LOW
 
 未実装の操作:
 
 - Shift+PLAY/PAUSE、Shift+CUE
 - ジョグのタッチ
-- テンポスライダー、TRIM、EQ、フィルター
+- テンポと EQ の LSB、TRIM、フィルター
 - チャンネルフェーダーとその LSB、クロスフェーダーの LSB
 - ヘッドホン、MASTER、マイク
 - パッド、ループ、BEAT SYNC、エフェクト、SMART CFX、SMART FADER
