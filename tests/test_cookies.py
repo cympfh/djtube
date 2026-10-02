@@ -394,7 +394,10 @@ def test_paste_persists_and_ytdlp_uses_it(tmp_path, monkeypatch, caplog, capsys)
     empty = post_paste(client, "   \n")
     assert empty.status_code == 400
     assert "選んでください" in empty.json()["detail"]
-    oversized = post_paste(client, "x" * (1024 * 1024 + 1))
+    oversized = client.post(
+        "/api/cookies",
+        files={"file": ("big.txt", b"x" * (1024 * 1024 + 1), "text/plain")},
+    )
     assert oversized.status_code == 400
     assert "大きすぎます" in oversized.json()["detail"]
     for response in (rejected, no_youtube, empty, oversized):
