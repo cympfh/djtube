@@ -64,8 +64,8 @@ docker compose up --build
 
 環境変数名は `YOUTUBE_API_KEY`。YouTube Data API v3 のキーを、実行時だけ渡します。
 
-- キーがあるとき、検索はサーバが Data API を呼ぶ
-- キーが無い、または API が失敗したときは yt-dlp の検索に落ちる
+- キーがあるとき、検索はサーバが Data API を呼ぶ。`safeSearch` は `none`。既定の moderate は、YouTube が年齢確認にする語を 0 件にする
+- キーが無い、API が失敗した、または API が 0 件のときは yt-dlp の検索に落ちる
 - キーはクライアントの JS / HTML に埋め込まない。レスポンスにも載せない
 
 ## キーボード
