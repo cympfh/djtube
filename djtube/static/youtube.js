@@ -9,19 +9,28 @@ export function createDeckPlayer(deck, elementId) {
     paused: true,
     videoId: "",
     _time: 0,
+    _seekPending: false,
     _volume: 1,
     get currentTime() {
+      let reported = NaN;
       try {
         const time = this.player?.getCurrentTime?.();
-        if (Number.isFinite(time)) return time;
+        if (Number.isFinite(time)) reported = time;
       } catch {
         /* player has no video yet */
       }
+      if (this._seekPending && Number.isFinite(this._time)) {
+        if (!Number.isFinite(reported) || Math.abs(reported - this._time) > 0.35) return this._time;
+        this._seekPending = false;
+        this.onSeekLanded?.();
+      }
+      if (Number.isFinite(reported)) return reported;
       return this._time;
     },
     set currentTime(value) {
       const next = Number(value) || 0;
       this._time = next;
+      this._seekPending = true;
       try {
         this.player?.seekTo?.(next, true);
       } catch {
@@ -72,6 +81,7 @@ export function createDeckPlayer(deck, elementId) {
     loadVideo(id) {
       this.videoId = id;
       this._time = 0;
+      this._seekPending = false;
       this.paused = true;
       if (!this.player || !this.apiReady) return false;
       this.player.cueVideoById(id);

@@ -126,11 +126,11 @@ test("FLX4 map is empty and dispatch uses the shared actions", () => {
 
 test("keyboard map covers deck operations and skips typed search", async () => {
   const labels = legendGroups().flatMap((group) => group.items.map((item) => item.label));
-  for (const label of ["検索にフォーカス", "デッキ A へロード", "デッキ B へロード", "デッキ A 再生/停止", "デッキ B キュー", "フェーダーを A へ", "ロード先を切り替え"]) {
+  for (const label of ["検索にフォーカス", "デッキ A へロード", "デッキ B へロード", "デッキ A 再生/停止", "デッキ B キュー", "デッキ A を戻す", "デッキ B を進める", "フェーダーを A へ", "ロード先を切り替え"]) {
     assert.ok(labels.includes(label), label);
   }
   const actionsInMap = new Set(BINDINGS.map((binding) => binding.action));
-  for (const name of ["focusSearch", "onEnter", "moveSelection", "loadSelected", "togglePlay", "cue", "nudgeCrossfader", "toggleLoadTarget"]) {
+  for (const name of ["focusSearch", "onEnter", "moveSelection", "loadSelected", "togglePlay", "cue", "jog", "nudgeCrossfader", "toggleLoadTarget"]) {
     assert.ok(actionsInMap.has(name), name);
   }
 
@@ -216,6 +216,148 @@ test("second enter loads the targeted deck", async () => {
   assert.equal(calls.search, 1);
   assert.equal(audios.A.videoId, "abcdefghijk");
   assert.equal(state.loadTarget, "A");
+});
+
+test("jog seeks the deck and does not move cue or the crossfader", () => {
+  const { state, audios, actions } = harness();
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 120 }];
+  return actions.loadSelected("A").then(() => {
+    state.decks.A.cue = 3;
+    state.decks.B.status = "ready";
+    state.decks.B.id = "zzzzzzzzzzz";
+    audios.A.currentTime = 20;
+    audios.A.duration = 120;
+    audios.B.currentTime = 8;
+    audios.B.duration = 30;
+    const fader = state.crossfader;
+
+    assert.equal(handleKeydown(keyEvent("[", bodyTarget()), actions), true);
+    assert.equal(audios.A.currentTime, 19);
+    assert.equal(handleKeydown(keyEvent("]", bodyTarget()), actions), true);
+    assert.equal(audios.A.currentTime, 20);
+    assert.equal(handleKeydown(keyEvent("]", bodyTarget(), { shiftKey: true }), actions), true);
+    assert.equal(audios.A.currentTime, 30);
+    assert.equal(handleKeydown(keyEvent("}", bodyTarget(), { shiftKey: true }), actions), true);
+    assert.equal(audios.A.currentTime, 40);
+
+    assert.equal(handleKeydown(keyEvent(";", bodyTarget()), actions), true);
+    assert.equal(audios.B.currentTime, 7);
+    assert.equal(handleKeydown(keyEvent("'", bodyTarget()), actions), true);
+    assert.equal(audios.B.currentTime, 8);
+    assert.equal(handleKeydown(keyEvent('"', bodyTarget(), { shiftKey: true }), actions), true);
+    assert.equal(audios.B.currentTime, 18);
+
+    audios.A.currentTime = 115;
+    actions.jog("A", 10);
+    assert.equal(audios.A.currentTime, 120);
+    actions.jog("A", -1000);
+    assert.equal(audios.A.currentTime, 0);
+    audios.A.duration = Number.NaN;
+    audios.A.currentTime = 50;
+    actions.jog("A", 10);
+    assert.equal(audios.A.currentTime, 60);
+
+    const before = audios.A.currentTime;
+    state.decks.A.status = "preparing";
+    actions.jog("A", 1);
+    assert.equal(audios.A.currentTime, before);
+    assert.equal(handleKeydown(keyEvent("[", searchTarget()), actions), false);
+    assert.equal(audios.A.currentTime, before);
+
+    assert.equal(state.decks.A.cue, 3);
+    assert.equal(state.decks.B.cue, 0);
+    assert.equal(state.crossfader, fader);
+    assert.deepEqual(FLX4_MAP, {});
+    assert.equal(
+      dispatchControllerEvent({ type: "note", channel: 0, number: 1, value: 1 }, actions, {
+        "note:0:1": { action: "jog", args: ["B", -1] },
+      }),
+      true,
+    );
+    assert.equal(audios.B.currentTime, 17);
+    assert.equal(state.crossfader, fader);
+    assert.deepEqual(FLX4_MAP, {});
+  });
+});
+
+test("jog keeps adding while the player still reports the old time", () => {
+  const { state, audios, actions } = harness();
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 120 }];
+  return actions.loadSelected("A").then(() => {
+    let reported = 10;
+    let commanded = 10;
+    Object.defineProperty(audios.A, "currentTime", {
+      configurable: true,
+      get() {
+        return reported;
+      },
+      set(value) {
+        commanded = value;
+      },
+    });
+    audios.A.duration = 80;
+    actions.jog("A", 1);
+    assert.equal(commanded, 11);
+    actions.jog("A", 1);
+    assert.equal(commanded, 12);
+    actions.jog("A", 10);
+    assert.equal(commanded, 22);
+    reported = 22;
+    actions.syncJog("A");
+    assert.equal(state.decks.A.jogCommand, null);
+    actions.jog("A", 1);
+    assert.equal(commanded, 23);
+    assert.equal(state.decks.A.cue, 0);
+  });
+});
+
+test("cue back near the pre-jog time does not jump to the old jog target", () => {
+  const { state, audios, actions } = harness();
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 120 }];
+  return actions.loadSelected("A").then(() => {
+    let reported = 10;
+    let commanded = 10;
+    let seekPending = false;
+    Object.defineProperty(audios.A, "currentTime", {
+      configurable: true,
+      get() {
+        if (seekPending && Math.abs(reported - commanded) > 0.35) return commanded;
+        seekPending = false;
+        return reported;
+      },
+      set(value) {
+        commanded = value;
+        seekPending = true;
+      },
+    });
+    state.decks.A.cue = 10;
+    actions.jog("A", 10);
+    assert.equal(commanded, 20);
+    assert.equal(state.decks.A.jogCommand.at, 20);
+    actions.cue("A");
+    assert.equal(commanded, 10);
+    assert.equal(state.decks.A.jogCommand, null);
+    actions.jog("A", 1);
+    assert.equal(commanded, 11);
+  });
+});
+
+test("a position bar seek drops the stored jog target", () => {
+  const { state, audios, actions } = harness();
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 120 }];
+  return actions.loadSelected("A").then(() => {
+    audios.A.currentTime = 10;
+    audios.A.duration = 80;
+    actions.jog("A", 10);
+    assert.equal(audios.A.currentTime, 20);
+    actions.seek("A", 10);
+    assert.equal(audios.A.currentTime, 10);
+    assert.equal(state.decks.A.jogCommand, null);
+    actions.jog("A", 1);
+    assert.equal(audios.A.currentTime, 11);
+    assert.equal(state.decks.A.cue, 0);
+    assert.equal(state.crossfader, 0.5);
+  });
 });
 
 test("cue while playing returns and pauses", () => {

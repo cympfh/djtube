@@ -7,6 +7,7 @@
 // Value is note velocity or CC 0–127.
 // A crossfader entry should call setCrossfaderFromController with passValue true.
 // That action takes the raw MIDI value 0–127. This file does not guess those numbers.
+// Jog is actions.jog(deck, seconds) and is not mapped here either.
 
 /** @type {Record<string, {action: string, args?: unknown[], passValue?: boolean}>} */
 export const FLX4_MAP = {};

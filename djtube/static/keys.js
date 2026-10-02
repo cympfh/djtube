@@ -1,5 +1,7 @@
 export const FADER_STEP = 0.04;
 export const FADER_STEP_LARGE = 0.12;
+export const JOG_STEP = 1;
+export const JOG_STEP_LARGE = 10;
 
 export const BINDINGS = [
   { keys: ["/"], action: "focusSearch", label: "検索にフォーカス", group: "検索" },
@@ -17,6 +19,14 @@ export const BINDINGS = [
   { keys: ["x"], action: "cue", args: ["B"], label: "デッキ B キュー", group: "デッキ" },
   { keys: ["z"], action: "setCue", args: ["A"], shift: true, label: "デッキ A のキュー位置", group: "デッキ" },
   { keys: ["x"], action: "setCue", args: ["B"], shift: true, label: "デッキ B のキュー位置", group: "デッキ" },
+  { keys: ["["], action: "jog", args: ["A", -JOG_STEP], label: "デッキ A を戻す", group: "ジョグ" },
+  { keys: ["]"], action: "jog", args: ["A", JOG_STEP], label: "デッキ A を進める", group: "ジョグ" },
+  { keys: ["["], action: "jog", args: ["A", -JOG_STEP_LARGE], shift: true, label: "デッキ A を大きく戻す", group: "ジョグ" },
+  { keys: ["]"], action: "jog", args: ["A", JOG_STEP_LARGE], shift: true, label: "デッキ A を大きく進める", group: "ジョグ" },
+  { keys: [";"], action: "jog", args: ["B", -JOG_STEP], label: "デッキ B を戻す", group: "ジョグ" },
+  { keys: ["'"], action: "jog", args: ["B", JOG_STEP], label: "デッキ B を進める", group: "ジョグ" },
+  { keys: [";"], action: "jog", args: ["B", -JOG_STEP_LARGE], shift: true, label: "デッキ B を大きく戻す", group: "ジョグ" },
+  { keys: ["'"], action: "jog", args: ["B", JOG_STEP_LARGE], shift: true, label: "デッキ B を大きく進める", group: "ジョグ" },
   {
     keys: ["ArrowLeft", ","],
     action: "nudgeCrossfader",
@@ -95,10 +105,28 @@ export function legendGroups() {
   return order.map((name) => ({ name, items: items.get(name) }));
 }
 
+const SHIFT_ALIASES = {
+  "[": "{",
+  "]": "}",
+  ";": ":",
+  "'": '"',
+};
+
+function sameKey(bindingKey, event) {
+  if (event.key === bindingKey) return true;
+  if (event.shiftKey && SHIFT_ALIASES[bindingKey] === event.key) return true;
+  return (
+    bindingKey.length === 1 &&
+    event.key.length === 1 &&
+    bindingKey.toLowerCase() === event.key.toLowerCase()
+  );
+}
+
 export function bindingFor(event) {
   if (event.metaKey || event.ctrlKey || event.altKey) return null;
   return (
-    BINDINGS.find((binding) => binding.keys.includes(event.key) && !!binding.shift === !!event.shiftKey) || null
+    BINDINGS.find((binding) => !!binding.shift === !!event.shiftKey && binding.keys.some((key) => sameKey(key, event))) ||
+    null
   );
 }
 

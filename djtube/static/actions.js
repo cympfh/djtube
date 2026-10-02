@@ -155,6 +155,7 @@ export function createActions(deps) {
     deckState.playError = "";
     deckState.cue = 0;
     deckState.playing = false;
+    deckState.jogCommand = null;
     audio.pause();
     const loaded = audio.loadVideo(track.id);
     if (deckState.gen !== gen) return;
@@ -202,10 +203,31 @@ export function createActions(deps) {
     }
   }
 
+  function playhead(audio) {
+    try {
+      const raw = audio.player?.getCurrentTime?.();
+      if (Number.isFinite(raw)) return raw;
+    } catch {
+      /* player has no video yet */
+    }
+    const value = Number(audio.currentTime);
+    return Number.isFinite(value) ? value : NaN;
+  }
+
+  function syncJog(deck) {
+    const deckState = deckOf(state, deck);
+    const audio = audios[deck];
+    const pending = deckState?.jogCommand;
+    if (!pending || !audio) return;
+    const live = playhead(audio);
+    if (Number.isFinite(live) && Math.abs(live - pending.at) <= 0.35) deckState.jogCommand = null;
+  }
+
   function cue(deck) {
     const deckState = deckOf(state, deck);
     const audio = audios[deck];
     if (!deckState || deckState.status !== "ready") return;
+    deckState.jogCommand = null;
     const atCue = Math.abs((audio.currentTime || 0) - deckState.cue) < 0.08;
     if (!audio.paused) {
       audio.pause();
@@ -230,6 +252,44 @@ export function createActions(deps) {
     scheduleRender();
   }
 
+  function seek(deck, seconds) {
+    const deckState = deckOf(state, deck);
+    const audio = audios[deck];
+    if (!deckState || deckState.status !== "ready" || !audio) return;
+    let next = Number(seconds);
+    if (!Number.isFinite(next)) return;
+    if (next < 0) next = 0;
+    const duration = Number(audio.duration);
+    if (Number.isFinite(duration) && duration > 0 && next > duration) next = duration;
+    deckState.jogCommand = null;
+    audio.currentTime = next;
+    scheduleRender();
+  }
+
+  function jog(deck, delta) {
+    const deckState = deckOf(state, deck);
+    const audio = audios[deck];
+    if (!deckState || deckState.status !== "ready" || !audio) return;
+    const step = Number(delta);
+    if (!Number.isFinite(step) || step === 0) return;
+    syncJog(deck);
+    const reported = Number(audio.currentTime);
+    const live = Number.isFinite(reported) ? reported : 0;
+    const pending = deckState.jogCommand;
+    const stillStale =
+      pending &&
+      Math.abs(live - pending.from) <= 0.35 &&
+      Math.abs(live - pending.at) > 0.35;
+    const base = stillStale ? pending.at : live;
+    let next = base + step;
+    if (next < 0) next = 0;
+    const duration = Number(audio.duration);
+    if (Number.isFinite(duration) && duration > 0 && next > duration) next = duration;
+    deckState.jogCommand = { at: next, from: live };
+    audio.currentTime = next;
+    scheduleRender();
+  }
+
   return {
     focusSearch,
     blurSearch,
@@ -244,6 +304,9 @@ export function createActions(deps) {
     togglePlay,
     cue,
     setCue,
+    seek,
+    jog,
+    syncJog,
     nudgeCrossfader,
     setCrossfader,
     setCrossfaderFromController,
