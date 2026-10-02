@@ -12,13 +12,13 @@ YouTube の曲を 2 デッキで再生する。検索はサーバ側で行い、
 - 検索語を入れると結果からデッキへ載せる
 - 検索はこれまでどおり。再生は YouTube IFrame ではなく、サーバが yt-dlp で音声 URL を解決して中継する
 - デッキに曲が載っているあいだ、検索結果の `thumbnail` を静止画で出す。無いときはその枠を空にする。動画 ID から絵は作らない
-- テンポは audio 要素の `playbackRate`。範囲は 0.5 から 2.0、操作は 0.25 刻み。画面の数値を `playbackRate` に渡す。曲を載せると、載せたデッキだけ 1.0 に戻す
+- テンポは audio 要素の `playbackRate`。範囲は 0.5 から 2.0、操作は 0.25 刻み。画面の数値を `playbackRate` に渡す。曲を載せると、載せたデッキのテンポだけ 1.0 に戻し、そのデッキの HIGH / MID / LOW も 0 dB に戻す
 - キーボードだけで一通り操作できる
 - Pioneer DDJ-FLX4 の再生、キュー、ロード、クロスフェーダー、ジョグ、ブラウズは MIDI。それ以外の操作は未実装
 
 YouTube の iframe は音声を Web Audio に渡せない。HIGH / MID / LOW を実際にかけるため、デッキは `/api/audio/{id}` の音声を再生する。yt-dlp は progressive な音声 URL を取るだけで、ファイルは保存しない。別のダウンロードサイトは使わない。署名付き URL はブラウザに返さない。データセンターの IP では取得に失敗することがあり、そのときはデッキにエラーが出る。
 
-イコライザーは `MediaElementAudioSourceNode` のあと、HIGH（highshelf 10 kHz）、MID（peaking 1 kHz）、LOW（lowshelf 100 Hz）の順。中央 0.5 が 0 dB、0 が -36 dB、1 が +12 dB。グラフを作れないときはスライダーの数値とは別に「イコライザーを音声に接続できませんでした」と出す。
+イコライザーは `MediaElementAudioSourceNode` のあと、HIGH（highshelf 10 kHz）、MID（peaking 1 kHz）、LOW（lowshelf 100 Hz）の順。中央 0.5 が 0 dB、0 が -36 dB、1 が +12 dB。曲を載せると、載せたデッキの 3 バンドを 0 dB に戻す。もう一方のデッキはそのまま。グラフを作れないときはスライダーの数値とは別に「イコライザーを音声に接続できませんでした」と出す。
 
 ## パス
 
@@ -88,7 +88,7 @@ docker compose up --build
 
 Web MIDI は安全なページで、「MIDI を開く」を押したときだけ接続する。公開サイトは https://s.cympfh.cc/djtube/ 。画面上部に未接続か、接続したデバイス名が出る。
 
-ジョグは `actions.jog(deck, seconds)`。準備完了のデッキだけ、再生位置を秒数ぶん動かす。テンポはキーボードの `setRate`、`nudgeRate`、`resetRate` と、MIDI 値を受ける `setRateFromController`（0–127、64 が 1.0、0 が 0.5、127 が 2.0）。イコライザーは `setEq`、`nudgeEq`、`resetEq`、`setEqFromController`。`setEqFromController` はバンド名と MIDI 0–127 を受け、64 が 0 dB、0 がカット、127 がブーストです。FLX4 のテンポは各デッキの CC 0（MSB）、EQ は HI が CC 7、MID が CC 11、LOW が CC 15。LSB はマップしていない。曲を載せると、載せたデッキのテンポだけ 1.0 に戻る。
+ジョグは `actions.jog(deck, seconds)`。準備完了のデッキだけ、再生位置を秒数ぶん動かす。テンポはキーボードの `setRate`、`nudgeRate`、`resetRate` と、MIDI 値を受ける `setRateFromController`（0–127、64 が 1.0、0 が 0.5、127 が 2.0）。イコライザーは `setEq`、`nudgeEq`、`resetEq`、`setEqFromController`。`setEqFromController` はバンド名と MIDI 0–127 を受け、64 が 0 dB、0 がカット、127 がブーストです。FLX4 のテンポは各デッキの CC 0（MSB）、EQ は HI が CC 7、MID が CC 11、LOW が CC 15。LSB はマップしていない。曲を載せると、載せたデッキのテンポだけ 1.0 に戻り、そのデッキの HIGH / MID / LOW は 0 dB に戻る。
 
 割り当てている操作:
 

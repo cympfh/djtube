@@ -176,6 +176,7 @@ export function createActions(deps) {
     audio.cancelPendingSeek?.();
     audio.pause();
     audio.playbackRate = 1;
+    resetEq(deck);
     const loaded = audio.loadVideo(track.id);
     if (deckState.gen !== gen) return;
     deckState.status = loaded === false ? "preparing" : "ready";
