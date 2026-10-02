@@ -1,15 +1,15 @@
 export const RATE_MIN = 0.5;
 export const RATE_MAX = 2;
-export const RATE_STEP = 0.25;
+/** Keyboard nudge. The deck slider and the FLX4 tempo fader are not snapped to this. */
+export const RATE_STEP = 0.01;
 
 export function clampRate(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return 1;
-  const clamped = Math.min(RATE_MAX, Math.max(RATE_MIN, numeric));
-  return Math.round(clamped * 100) / 100;
+  return Math.min(RATE_MAX, Math.max(RATE_MIN, numeric));
 }
 
-/** MIDI 64 is 1.0, 0 is 0.5, and 127 is 2.0. */
+/** MIDI 64 is 1.0, 0 is 0.5, and 127 is 2.0. In-between values stay on that line. */
 export function rateFromMidi(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return 1;

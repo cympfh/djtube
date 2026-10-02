@@ -12,7 +12,7 @@ YouTube の曲を 2 デッキで再生する。検索はサーバ側で行い、
 - 検索語を入れると結果からデッキへ載せる
 - 検索はこれまでどおり。再生は YouTube IFrame ではなく、サーバが yt-dlp で音声 URL を解決して中継する
 - デッキに曲が載っているあいだ、検索結果の `thumbnail` を静止画で出す。無いときはその枠を空にする。動画 ID から絵は作らない
-- テンポは audio 要素の `playbackRate`。範囲は 0.5 から 2.0、操作は 0.25 刻み。画面の数値を `playbackRate` に渡す。曲を載せると、載せたデッキのテンポだけ 1.0 に戻し、そのデッキの HIGH / MID / LOW も 0 dB に戻す
+- テンポは audio 要素の `playbackRate`。範囲は 0.5 から 2.0。スライダーと FLX4 のテンポは、その範囲の速度をそのまま渡す。キーボードの上げ下げは 0.01。画面の数値を `playbackRate` に渡す。曲を載せると、載せたデッキのテンポだけ 1.0 に戻し、そのデッキの HIGH / MID / LOW も 0 dB に戻す
 - キーボードだけで一通り操作できる
 - Pioneer DDJ-FLX4 の再生、キュー、ロード、クロスフェーダー、ジョグ、ブラウズは MIDI。それ以外の操作は未実装
 
@@ -109,7 +109,7 @@ docker run --rm -p 8098:8098 -e YOUTUBE_API_KEY -e DJTUBE_PLAYLISTS=/app/data/pl
 
 Web MIDI は安全なページで、「MIDI を開く」を押したときだけ接続する。公開サイトは https://s.cympfh.cc/djtube/ 。画面上部に未接続か、接続したデバイス名が出る。
 
-ジョグは `actions.jog(deck, seconds)`。準備完了のデッキだけ、再生位置を秒数ぶん動かす。テンポはキーボードの `setRate`、`nudgeRate`、`resetRate` と、MIDI 値を受ける `setRateFromController`（0–127、64 が 1.0、0 が 0.5、127 が 2.0）。イコライザーは `setEq`、`nudgeEq`、`resetEq`、`setEqFromController`。`setEqFromController` はバンド名と MIDI 0–127 を受け、64 が 0 dB、0 がカット、127 がブーストです。FLX4 のテンポは各デッキの CC 0（MSB）、EQ は HI が CC 7、MID が CC 11、LOW が CC 15。LSB はマップしていない。曲を載せると、載せたデッキのテンポだけ 1.0 に戻り、そのデッキの HIGH / MID / LOW は 0 dB に戻る。
+ジョグは `actions.jog(deck, seconds)`。準備完了のデッキだけ、再生位置を秒数ぶん動かす。テンポはキーボードの `setRate`、`nudgeRate`、`resetRate` と、MIDI 値を受ける `setRateFromController`（0–127、64 が 1.0、0 が 0.5、127 が 2.0）。イコライザーは `setEq`、`nudgeEq`、`resetEq`、`setEqFromController`。`setEqFromController` はバンド名と MIDI 0–127 を受け、64 が 0 dB、0 がカット、127 がブーストです。FLX4 のテンポはチャンネル 0 がデッキ A、チャンネル 1 がデッキ B の CC 0（MSB）。その CC 値は 0.5 から 2.0 の直線上の `playbackRate` になり、0.25 には丸めない。EQ は HI が CC 7、MID が CC 11、LOW が CC 15。LSB はマップしていない。曲を載せると、載せたデッキのテンポだけ 1.0 に戻り、そのデッキの HIGH / MID / LOW は 0 dB に戻る。
 
 割り当てている操作:
 
