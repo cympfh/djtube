@@ -299,14 +299,18 @@ export function createActions(deps) {
     scheduleRender();
   }
 
-  function setRate(deck, value) {
+  function applyRate(deck, rate) {
     const deckState = deckOf(state, deck);
     const audio = audios[deck];
     if (!deckState || !audio) return;
-    const rate = clampRate(value);
     deckState.rate = rate;
     audio.playbackRate = rate;
     scheduleRender();
+  }
+
+  function setRate(deck, value) {
+    const clamped = clampRate(value);
+    applyRate(deck, Math.round(clamped * 100) / 100);
   }
 
   function nudgeRate(deck, delta) {
@@ -324,7 +328,7 @@ export function createActions(deps) {
   function setRateFromController(deck, value) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return;
-    setRate(deck, rateFromMidi(numeric));
+    applyRate(deck, rateFromMidi(numeric));
   }
 
   function setEq(deck, band, value) {

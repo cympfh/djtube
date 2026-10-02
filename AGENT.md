@@ -109,7 +109,7 @@ docker run --rm -p 8098:8098 -e YOUTUBE_API_KEY -e DJTUBE_PLAYLISTS=/app/data/pl
 
 Web MIDI は安全なページで、「MIDI を開く」を押したときだけ接続する。公開サイトは https://s.cympfh.cc/djtube/ 。画面上部に未接続か、接続したデバイス名が出る。
 
-ジョグは `actions.jog(deck, seconds)`。準備完了のデッキだけ、再生位置を秒数ぶん動かす。テンポはキーボードの `setRate`、`nudgeRate`、`resetRate` と、MIDI 値を受ける `setRateFromController`（0–127、64 が 1.0、0 が 0.5、127 が 2.0）。イコライザーは `setEq`、`nudgeEq`、`resetEq`、`setEqFromController`。`setEqFromController` はバンド名と MIDI 0–127 を受け、64 が 0 dB、0 がカット、127 がブーストです。FLX4 のテンポは各デッキの CC 0（MSB）、EQ は HI が CC 7、MID が CC 11、LOW が CC 15。LSB はマップしていない。曲を載せると、載せたデッキのテンポだけ 1.0 に戻り、そのデッキの HIGH / MID / LOW は 0 dB に戻る。
+ジョグは `actions.jog(deck, seconds)`。準備完了のデッキだけ、再生位置を秒数ぶん動かす。テンポはキーボードの `setRate`、`nudgeRate`、`resetRate` と、MIDI 値を受ける `setRateFromController`（0–127、64 が 1.0、0 が 0.5、127 が 2.0）。イコライザーは `setEq`、`nudgeEq`、`resetEq`、`setEqFromController`。`setEqFromController` はバンド名と MIDI 0–127 を受け、64 が 0 dB、0 がカット、127 がブーストです。FLX4 のテンポはチャンネル 0 がデッキ A、チャンネル 1 がデッキ B の CC 0（MSB）。その CC 値は 0.5 から 2.0 の直線上の `playbackRate` になり、0.25 には丸めない。EQ は HI が CC 7、MID が CC 11、LOW が CC 15。LSB はマップしていない。曲を載せると、載せたデッキのテンポだけ 1.0 に戻り、そのデッキの HIGH / MID / LOW は 0 dB に戻る。
 
 割り当てている操作:
 
