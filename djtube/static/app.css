@@ -110,6 +110,8 @@ button:hover { border-color: #5c564b; }
   border-color: var(--a);
 }
 
+.midi-status.is-connected { color: var(--cue); }
+
 .stage {
   min-height: 0;
   display: grid;

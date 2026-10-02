@@ -1,5 +1,5 @@
 import { createActions, freshState } from "./actions.js";
-import { connectController } from "./controller.js";
+import { connectController, controllerStatusText } from "./controller.js";
 import { deckGains } from "./gains.js";
 import { eqGainDb, formatEqDb } from "./eq.js";
 import { formatTime } from "./format.js";
@@ -333,12 +333,11 @@ for (const deck of ["A", "B"]) {
 
 window.addEventListener("keydown", (event) => handleKeydown(event, actions), true);
 
-function midiStatusText(status) {
-  if (!status || status.state === "idle") return "DDJ-FLX4 の割り当ては未実装です。";
-  if (status.state === "unsupported") return "このブラウザは Web MIDI に未対応です。DDJ-FLX4 の割り当ては未実装です。";
-  if (status.state === "denied") return "MIDI の使用が拒否されました。割り当ては未実装です。";
-  const names = status.names?.length ? status.names.join("、") : "入力なし";
-  return `MIDI 入力: ${names}。割り当て ${status.mapped || 0} 件。未割り当て信号 ${status.ignored || 0} 件。DDJ-FLX4 のマップは未実装です。`;
+function showMidiStatus(status) {
+  const node = document.getElementById("midi-status");
+  const text = controllerStatusText(status);
+  if (node.textContent !== text) node.textContent = text;
+  node.classList.toggle("is-connected", !!(status?.connected || (status?.state === "open" && status.names?.length)));
 }
 
 const midiButton = document.getElementById("midi-button");
@@ -348,12 +347,11 @@ function paintMidiButton(status) {
 }
 
 midiButton.addEventListener("click", () => {
-  const node = document.getElementById("midi-status");
-  node.textContent = "MIDI を開いています…";
+  showMidiStatus({ state: "opening", names: [], connected: false });
   midiButton.dataset.midi = "wait";
   connectController(actions, (status) => {
     paintMidiButton(status);
-    node.textContent = midiStatusText(status);
+    showMidiStatus(status);
   });
 });
 
