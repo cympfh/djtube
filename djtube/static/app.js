@@ -186,6 +186,7 @@ function renderResults() {
     }
 
     const text = document.createElement("div");
+    text.className = "result-copy";
     const title = document.createElement("p");
     title.className = "result-title";
     title.textContent = track.title || track.id;
@@ -443,6 +444,7 @@ function renderPlaylists() {
     }
 
     const text = document.createElement("div");
+    text.className = "result-copy";
     const title = document.createElement("p");
     title.className = "result-title";
     title.textContent = track.title || track.id;
