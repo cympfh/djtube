@@ -16,7 +16,7 @@ import { EQ_BOOST_DB, EQ_CUT_DB, EQ_STEP, connectEqGraph, eqGainDb, eqUnitFromMi
 import { deckGains } from "../../djtube/static/gains.js";
 import { BINDINGS, handleKeydown, legendGroups } from "../../djtube/static/keys.js";
 import { RATE_STEP, clampRate, formatRate, rateFromMidi } from "../../djtube/static/rate.js";
-import { cookiePanelOpen } from "../../djtube/static/cookies.js";
+import { cookiePanelOpen, cookiePanelShown, nextChosenOpen } from "../../djtube/static/cookies.js";
 import { createDeckPlayer } from "../../djtube/static/player.js";
 
 function fakeAudio() {
@@ -1552,6 +1552,19 @@ test("cookie panel follows the server flag, not the yt-dlp sentence", async () =
   assert.equal(cookiePanelOpen(state.decks), false);
   state.decks.B.cookies = true;
   assert.equal(cookiePanelOpen(state.decks), true);
+});
+
+test("cookie replace stays reachable without a playback failure", () => {
+  const decks = { A: { cookies: false }, B: { cookies: false } };
+  assert.equal(cookiePanelOpen(decks), false);
+  assert.equal(cookiePanelShown(false, false), false);
+  assert.equal(nextChosenOpen(false, false), true);
+  assert.equal(cookiePanelShown(false, true), true);
+  assert.equal(nextChosenOpen(false, true), false);
+  assert.equal(cookiePanelShown(true, false), true);
+  assert.equal(nextChosenOpen(true, false), false);
+  assert.equal(cookiePanelShown(true, true), true);
+  assert.equal(nextChosenOpen(true, true), true);
 });
 
 test("cue while playing returns and pauses", () => {

@@ -81,6 +81,18 @@ button:hover { border-color: #5c564b; }
 
 .health { margin-left: auto; }
 
+.cookie-open {
+  flex: none;
+  align-self: flex-end;
+  font-weight: 700;
+}
+
+.cookie-open[aria-expanded="true"] {
+  background: var(--text);
+  color: #16140f;
+  border-color: var(--text);
+}
+
 .midi-button {
   width: 36px;
   height: 36px;
