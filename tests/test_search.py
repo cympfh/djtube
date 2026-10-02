@@ -8,6 +8,7 @@ from djtube.search import (
     parse_iso8601_duration,
     search_tracks,
     search_youtube_api,
+    search_ytdlp,
     tracks_from_ytdlp_info,
 )
 
@@ -178,6 +179,82 @@ def test_without_key_skips_data_api(monkeypatch):
     assert source == "ytdlp"
     assert tracks == []
     assert called["api"] == 0
+
+
+def _video_item(video_id: str) -> dict:
+    return {
+        "id": video_id,
+        "snippet": {
+            "title": video_id,
+            "channelTitle": "棚",
+            "thumbnails": {"medium": {"url": "https://i.ytimg.com/a.jpg"}},
+        },
+        "contentDetails": {"duration": "PT1M"},
+    }
+
+
+def test_search_pages_until_fifty():
+    pages = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            pages.append(request.url.params.get("pageToken"))
+            assert request.url.params["maxResults"] == "50"
+            assert request.url.params["safeSearch"] == "none"
+            if "pageToken" not in request.url.params:
+                items = [{"id": {"videoId": f"{index:011d}"}} for index in range(30)]
+                return httpx.Response(200, json={"items": items, "nextPageToken": "page-2"})
+            items = [{"id": {"videoId": f"{index:011d}"}} for index in range(30, 55)]
+            return httpx.Response(200, json={"items": items})
+        requested = request.url.params["id"].split(",")
+        assert len(requested) == 50
+        return httpx.Response(200, json={"items": [_video_item(video_id) for video_id in requested]})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        tracks = search_youtube_api("city pop", "test-key", client)
+    assert pages == [None, "page-2"]
+    assert [track.id for track in tracks] == [f"{index:011d}" for index in range(50)]
+
+
+def test_search_stops_after_a_full_page():
+    calls = {"search": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            calls["search"] += 1
+            items = [{"id": {"videoId": f"{index:011d}"}} for index in range(50)]
+            return httpx.Response(200, json={"items": items, "nextPageToken": "unused"})
+        requested = request.url.params["id"].split(",")
+        return httpx.Response(200, json={"items": [_video_item(video_id) for video_id in requested]})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        tracks = search_youtube_api("city pop", "test-key", client)
+    assert calls["search"] == 1
+    assert len(tracks) == 50
+
+
+def test_ytdlp_asks_for_fifty(monkeypatch):
+    seen = {}
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            seen["playlistend"] = options["playlistend"]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, url, download=False):
+            seen["url"] = url
+            assert download is False
+            return {"entries": [{"id": "abcdefghijk", "title": "曲", "channel": "人"}]}
+
+    monkeypatch.setattr("yt_dlp.YoutubeDL", FakeYoutubeDL)
+    tracks = search_ytdlp("city pop")
+    assert tracks[0].id == "abcdefghijk"
+    assert seen == {"playlistend": 50, "url": "ytsearch50:city pop"}
 
 
 def test_blank_query():
