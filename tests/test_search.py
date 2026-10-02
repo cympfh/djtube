@@ -46,6 +46,8 @@ def test_youtube_api_preserves_search_order_and_hides_key():
         seen.append(request.url.path)
         if request.url.path.endswith("/search"):
             assert request.url.params["key"] == "test-key"
+            assert request.url.params["safeSearch"] == "none"
+            assert "videoEmbeddable" not in request.url.params
             return httpx.Response(
                 200,
                 json={
@@ -86,6 +88,64 @@ def test_youtube_api_preserves_search_order_and_hides_key():
     assert [track.title for track in tracks] == ["First", "Second"]
     assert tracks[0].duration == 61
     assert "test-key" not in repr(tracks)
+
+
+def test_age_gated_query_is_requested_unfiltered():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            assert request.url.params["q"] == "同人誌"
+            assert request.url.params["safeSearch"] == "none"
+            assert request.url.params["type"] == "video"
+            assert "videoEmbeddable" not in request.url.params
+            return httpx.Response(200, json={"items": [{"id": {"videoId": "abcdefghijk"}}]})
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    {
+                        "id": "abcdefghijk",
+                        "snippet": {
+                            "title": "同人誌を広げる",
+                            "channelTitle": "棚",
+                            "thumbnails": {"medium": {"url": "https://i.ytimg.com/a.jpg"}},
+                        },
+                        "contentDetails": {"duration": "PT3M"},
+                    }
+                ]
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        tracks = search_youtube_api("同人誌", "test-key", client)
+    assert [track.id for track in tracks] == ["abcdefghijk"]
+    assert tracks[0].title == "同人誌を広げる"
+    assert "test-key" not in repr(tracks)
+
+
+def test_api_error_object_is_not_treated_as_no_hits():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"error": {"code": 403, "message": "forbidden"}})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        try:
+            search_youtube_api("同人誌", "test-key", client)
+        except SearchError as exc:
+            assert str(exc) == "検索できませんでした"
+            assert "test-key" not in str(exc)
+        else:
+            raise AssertionError("expected SearchError")
+
+
+def test_empty_data_api_falls_back_to_ytdlp(monkeypatch):
+    monkeypatch.setenv("YOUTUBE_API_KEY", "test-key")
+    monkeypatch.setattr("djtube.search.search_youtube_api", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "djtube.search.search_ytdlp",
+        lambda _query: [Track("abcdefghijk", "同人誌を広げる", "棚", 180, None)],
+    )
+    tracks, source = search_tracks("同人誌")
+    assert source == "ytdlp"
+    assert tracks[0].title == "同人誌を広げる"
 
 
 def test_fallback_when_data_api_fails(monkeypatch):

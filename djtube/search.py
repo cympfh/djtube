@@ -168,6 +168,18 @@ def tracks_from_ytdlp_info(info: dict | None) -> list[Track]:
     return tracks
 
 
+def _youtube_json(response: httpx.Response) -> dict:
+    if response.status_code != 200:
+        raise SearchError("検索できませんでした")
+    try:
+        payload = response.json()
+    except Exception as exc:
+        raise SearchError("検索できませんでした") from exc
+    if not isinstance(payload, dict) or payload.get("error"):
+        raise SearchError("検索できませんでした")
+    return payload
+
+
 def search_youtube_api(query: str, key: str, client: httpx.Client | None = None) -> list[Track]:
     owns = client is None
     http = client or httpx.Client(timeout=15)
@@ -179,12 +191,11 @@ def search_youtube_api(query: str, key: str, client: httpx.Client | None = None)
                 "type": "video",
                 "maxResults": 8,
                 "q": query,
+                "safeSearch": "none",
                 "key": key,
             },
         )
-        if search_response.status_code != 200:
-            raise SearchError("検索できませんでした")
-        ids = tracks_from_youtube_search(search_response.json())
+        ids = tracks_from_youtube_search(_youtube_json(search_response))
         if not ids:
             return []
         videos_response = http.get(
@@ -195,9 +206,7 @@ def search_youtube_api(query: str, key: str, client: httpx.Client | None = None)
                 "key": key,
             },
         )
-        if videos_response.status_code != 200:
-            raise SearchError("検索できませんでした")
-        by_id = {track.id: track for track in tracks_from_youtube_videos(videos_response.json())}
+        by_id = {track.id: track for track in tracks_from_youtube_videos(_youtube_json(videos_response))}
         return [by_id[video_id] for video_id in ids if video_id in by_id]
     except SearchError:
         raise
@@ -236,9 +245,13 @@ def search_tracks(query: str) -> tuple[list[Track], str]:
     key = api_key()
     if key:
         try:
-            return search_youtube_api(normalized, key), "youtube"
+            tracks = search_youtube_api(normalized, key)
         except Exception:
             log.warning("YouTube Data API search failed; falling back to yt-dlp")
+        else:
+            if tracks:
+                return tracks, "youtube"
+            log.info("YouTube Data API returned no videos; falling back to yt-dlp")
     try:
         return search_ytdlp(normalized), "ytdlp"
     except SearchError:
