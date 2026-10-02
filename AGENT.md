@@ -140,3 +140,5 @@ uv run pytest -q
 node --test tests/client/player.test.mjs
 uv run black --line-length 120 .
 ```
+
+音源取得は `djtube/audio.py` のロガー `djtube.audio`。`audio resolve` に動画 ID、経路（yt-dlp またはキャッシュ）、成功した形式の概要、失敗した yt-dlp の終了、Bot 判定・同意画面・403 の文言が出る。`audio upstream` に中継の応答ステータスが出る。署名付き URL とそのクエリ、API キー、Cookie は出さない。
