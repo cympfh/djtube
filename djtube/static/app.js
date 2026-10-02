@@ -286,10 +286,18 @@ function midiStatusText(status) {
   return `MIDI 入力: ${names}。割り当て ${status.mapped || 0} 件。未割り当て信号 ${status.ignored || 0} 件。DDJ-FLX4 のマップは未実装です。`;
 }
 
-document.getElementById("midi-button").addEventListener("click", () => {
+const midiButton = document.getElementById("midi-button");
+
+function paintMidiButton(status) {
+  midiButton.dataset.midi = status && status.state === "open" ? "on" : "off";
+}
+
+midiButton.addEventListener("click", () => {
   const node = document.getElementById("midi-status");
   node.textContent = "MIDI を開いています…";
+  midiButton.dataset.midi = "wait";
   connectController(actions, (status) => {
+    paintMidiButton(status);
     node.textContent = midiStatusText(status);
   });
 });

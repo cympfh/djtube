@@ -81,7 +81,35 @@ button:hover { border-color: #5c564b; }
 
 .health { margin-left: auto; }
 
-.midi-button { white-space: nowrap; }
+.midi-button {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  flex: none;
+  line-height: 0;
+  color: var(--muted);
+  background: transparent;
+}
+
+.midi-button svg {
+  width: 20px;
+  height: 20px;
+  display: block;
+}
+
+.midi-button[data-midi="wait"] {
+  color: var(--text);
+  border-color: var(--a);
+}
+
+.midi-button[data-midi="on"] {
+  color: #16140f;
+  background: var(--a);
+  border-color: var(--a);
+}
 
 .stage {
   min-height: 0;
