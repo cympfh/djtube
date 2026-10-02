@@ -82,7 +82,7 @@ button:hover { border-color: #5c564b; }
   display: block;
   flex: none;
   height: 1cap;
-  width: 1cap;
+  width: calc(1cap * 12 / 10);
 }
 
 .health, .status, .midi-status, .deck-channel, .cue-readout, .gain-readout, .fader-readout {
