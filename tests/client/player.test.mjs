@@ -1219,6 +1219,170 @@ test("eq gain mapping drives the filter and the shared actions", () => {
   });
 });
 
+test("playlists stay off reserved keys and load through the search path", async () => {
+  function bound(key, shift = false) {
+    return BINDINGS.find((binding) => !!binding.shift === shift && binding.keys.includes(key))?.action;
+  }
+  assert.equal(bound("a"), "loadSelected");
+  assert.equal(bound("b"), "loadSelected");
+  assert.equal(bound("a", true), "loadPlaylistTrack");
+  assert.equal(bound("b", true), "loadPlaylistTrack");
+  assert.equal(bound("p"), "focusPlaylistName");
+  assert.equal(bound("l"), "addSearchHit");
+  assert.equal(bound("s"), "addDeckTrack");
+  assert.equal(bound("s", true), "addDeckTrack");
+  assert.equal(bound("g"), "movePlaylistSelection");
+  assert.equal(bound("5"), "movePlaylistTrack");
+  assert.equal(bound("6"), "movePlaylistTrack");
+  assert.equal(bound("e"), "nudgeEq");
+  assert.equal(bound("r"), "nudgeEq");
+  assert.equal(bound("4"), "resetEq");
+  assert.equal(bound("h"), "nudgeEq");
+  assert.equal(bound("7"), "resetEq");
+  assert.equal(bound("1"), "nudgeRate");
+  assert.equal(bound("/"), "focusSearch");
+  const labels = legendGroups().find((group) => group.name === "プレイリスト").items.map((item) => item.label);
+  assert.ok(labels.includes("検索の曲を追加"));
+  assert.ok(labels.includes("プレイリストをデッキ A へ"));
+
+  const db = { playlists: [] };
+  let seq = 0;
+  let nameValue = "";
+  let nameFocused = false;
+  const { state, audios, actions } = harness({
+    deps: {
+      playlistNameValue: () => nameValue,
+      setPlaylistNameValue(value) {
+        nameValue = value;
+      },
+      focusPlaylistNameElement() {
+        nameFocused = true;
+      },
+      blurPlaylistNameElement() {
+        nameFocused = false;
+      },
+      confirmDelete: () => true,
+      async createPlaylist(name) {
+        const playlist = { id: `abc${String(++seq).padStart(8, "0")}`, name, tracks: [] };
+        db.playlists.push(playlist);
+        return JSON.parse(JSON.stringify(playlist));
+      },
+      async renamePlaylist(id, name) {
+        const playlist = db.playlists.find((item) => item.id === id);
+        playlist.name = name;
+        return JSON.parse(JSON.stringify(playlist));
+      },
+      async deletePlaylist(id) {
+        db.playlists = db.playlists.filter((item) => item.id !== id);
+      },
+      async addPlaylistTrack(id, track) {
+        const playlist = db.playlists.find((item) => item.id === id);
+        const index = track.index;
+        const fields = { ...track };
+        delete fields.index;
+        playlist.tracks.splice(index, 0, fields);
+        return JSON.parse(JSON.stringify(playlist));
+      },
+      async removePlaylistTrack(id, index) {
+        const playlist = db.playlists.find((item) => item.id === id);
+        playlist.tracks.splice(index, 1);
+        return JSON.parse(JSON.stringify(playlist));
+      },
+      async movePlaylistTrack(id, from, to) {
+        const playlist = db.playlists.find((item) => item.id === id);
+        const [item] = playlist.tracks.splice(from, 1);
+        playlist.tracks.splice(to, 0, item);
+        return JSON.parse(JSON.stringify(playlist));
+      },
+    },
+  });
+
+  const search = searchTarget();
+  const nameField = { id: "playlist-name", tagName: "INPUT", type: "text", closest() { return null; } };
+  state.results = [
+    {
+      id: "abcdefghijk",
+      title: "検索曲",
+      channel: "人",
+      duration: 90,
+      thumbnail: "https://i.ytimg.com/vi/abcdefghijk/mqdefault.jpg",
+    },
+  ];
+  assert.equal(handleKeydown(keyEvent("l", search), actions), false);
+  assert.equal(handleKeydown(keyEvent("p", search), actions), false);
+  assert.equal(handleKeydown(keyEvent("5", search), actions), false);
+  assert.equal(handleKeydown(keyEvent("s", search), actions), false);
+  assert.equal(handleKeydown(keyEvent("a", search, { shiftKey: true }), actions), false);
+  assert.equal(handleKeydown(keyEvent("PageDown", search), actions), false);
+  assert.equal(handleKeydown(keyEvent("Backspace", search), actions), false);
+  assert.equal(state.playlists.length, 0);
+  assert.equal(handleKeydown(keyEvent("l", nameField), actions), false);
+  assert.equal(handleKeydown(keyEvent("5", nameField), actions), false);
+  assert.equal(handleKeydown(keyEvent("a", nameField, { shiftKey: true }), actions), false);
+
+  assert.equal(handleKeydown(keyEvent("p", bodyTarget()), actions), true);
+  assert.equal(nameFocused, true);
+  assert.equal(nameValue, "");
+  nameValue = "夜";
+  assert.equal(handleKeydown(keyEvent("Enter", nameField), actions), true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(state.playlists.length, 1);
+  assert.equal(state.playlists[0].name, "夜");
+  assert.equal(state.playlistId, state.playlists[0].id);
+
+  assert.equal(handleKeydown(keyEvent("l", bodyTarget()), actions), true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(state.playlists[0].tracks[0], {
+    id: "abcdefghijk",
+    title: "検索曲",
+    channel: "人",
+    duration: 90,
+    thumbnail: "https://i.ytimg.com/vi/abcdefghijk/mqdefault.jpg",
+  });
+
+  state.decks.B.track = { id: "zzzzzzzzzzz", title: "デッキ", channel: "店", duration: 12, thumbnail: null };
+  state.decks.B.id = "zzzzzzzzzzz";
+  assert.equal(handleKeydown(keyEvent("s", bodyTarget(), { shiftKey: true }), actions), true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(state.playlists[0].tracks[1].id, "zzzzzzzzzzz");
+  assert.equal(state.playlistIndex, 1);
+
+  assert.equal(handleKeydown(keyEvent("5", bodyTarget()), actions), true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(state.playlists[0].tracks[0].id, "zzzzzzzzzzz");
+  assert.equal(state.playlistIndex, 0);
+
+  assert.equal(handleKeydown(keyEvent("a", bodyTarget()), actions), true);
+  await Promise.resolve();
+  assert.equal(audios.A.videoId, "abcdefghijk");
+  assert.equal(handleKeydown(keyEvent("a", bodyTarget(), { shiftKey: true }), actions), true);
+  await Promise.resolve();
+  assert.equal(audios.A.videoId, "zzzzzzzzzzz");
+  assert.equal(state.decks.A.title, "デッキ");
+  assert.equal(state.decks.A.track.id, "zzzzzzzzzzz");
+  await actions.loadSelected("B");
+  assert.equal(audios.B.videoId, "abcdefghijk");
+  await actions.loadPlaylistTrack("B");
+  assert.equal(audios.B.videoId, "zzzzzzzzzzz");
+
+  assert.equal(handleKeydown(keyEvent("Delete", bodyTarget()), actions), true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(state.playlists[0].tracks.length, 1);
+  assert.equal(state.playlists[0].tracks[0].id, "abcdefghijk");
+
+  assert.equal(handleKeydown(keyEvent("p", bodyTarget(), { shiftKey: true }), actions), true);
+  assert.equal(nameValue, "夜");
+  assert.equal(state.playlistNaming, "rename");
+  nameValue = "朝";
+  assert.equal(handleKeydown(keyEvent("Enter", nameField), actions), true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(state.playlists[0].name, "朝");
+
+  assert.equal(handleKeydown(keyEvent("Backspace", bodyTarget(), { shiftKey: true }), actions), true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(state.playlists.length, 0);
+});
+
 test("cue while playing returns and pauses", () => {
   const { state, audios, actions } = harness();
   state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 10 }];

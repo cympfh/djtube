@@ -30,6 +30,7 @@
       </header>
 
       <main class="stage">
+        <div class="library">
         <section class="panel search-panel" aria-label="検索">
           <div class="panel-head">
             <h1>検索</h1>
@@ -46,6 +47,32 @@
           <p class="status" id="search-status" role="status"></p>
           <ol id="results" class="results" role="listbox" aria-label="検索結果"></ol>
         </section>
+
+        <section class="panel playlist-panel" aria-label="プレイリスト">
+          <div class="panel-head">
+            <h1>プレイリスト</h1>
+          </div>
+          <div class="playlist-name-row">
+            <label class="sr-only" for="playlist-name">プレイリストの名前</label>
+            <input id="playlist-name" type="text" placeholder="名前" maxlength="80" autocomplete="off" spellcheck="false" />
+            <button type="button" id="playlist-create">作る</button>
+            <button type="button" id="playlist-rename">変える</button>
+          </div>
+          <p class="target-note" id="playlist-name-note">Enter で作る</p>
+          <div class="playlist-pick-row">
+            <label class="sr-only" for="playlist-select">プレイリストを選ぶ</label>
+            <select id="playlist-select"></select>
+            <button type="button" id="playlist-delete">消す</button>
+          </div>
+          <div class="playlist-add-row">
+            <button type="button" id="playlist-add-search" aria-keyshortcuts="l">検索の曲</button>
+            <button type="button" id="playlist-add-a" aria-keyshortcuts="s">Aの曲</button>
+            <button type="button" id="playlist-add-b" aria-keyshortcuts="Shift+S">Bの曲</button>
+          </div>
+          <p class="status" id="playlist-status" role="status"></p>
+          <ol id="playlist-tracks" class="playlist-tracks" role="listbox" aria-label="プレイリストの曲"></ol>
+        </section>
+        </div>
 
         <section class="mixer" aria-label="ミキサー">
           <div class="deck-row">

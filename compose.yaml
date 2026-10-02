@@ -5,6 +5,9 @@ services:
       - "8098:8098"
     environment:
       YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
+      DJTUBE_PLAYLISTS: /app/data/playlists.json
+    volumes:
+      - djtube-data:/app/data
     healthcheck:
       test:
         [
@@ -17,3 +20,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+volumes:
+  djtube-data:

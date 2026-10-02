@@ -3,12 +3,14 @@ from __future__ import annotations
 import mimetypes
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict, Field
 
 from djtube.audio import AudioError, open_audio
 from djtube.ids import is_video_id
 from djtube.paths import INDEX_PATH, PUBLIC_PREFIX, STATIC_DIR
+from djtube.playlists import PlaylistError, PlaylistStore, playlist_path
 from djtube.search import SearchError, search_mode, search_tracks
 
 mimetypes.add_type("text/javascript", ".js", strict=True)
@@ -44,8 +46,22 @@ def render_index() -> str:
     return html.replace("__PUBLIC_PREFIX__", PUBLIC_PREFIX)
 
 
-def create_app() -> FastAPI:
+class PlaylistNameBody(BaseModel):
+    name: str = ""
+
+
+class MoveTrackBody(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    from_index: int = Field(alias="from")
+    to_index: int = Field(alias="to")
+
+
+def create_app(playlist_store: PlaylistStore | None = None) -> FastAPI:
     app = FastAPI(title="djtube")
+    store = playlist_store if playlist_store is not None else PlaylistStore(playlist_path())
+
+    def raise_playlist(exc: PlaylistError) -> None:
+        raise HTTPException(exc.status, str(exc)) from None
 
     @app.get("/api/health")
     def health() -> dict[str, str | bool]:
@@ -78,6 +94,57 @@ def create_app() -> FastAPI:
         except SearchError as exc:
             raise HTTPException(400 if str(exc) == "検索語を入れてください" else 502, str(exc)) from None
         return {"source": source, "tracks": [track.as_dict() for track in tracks]}
+
+    @app.get("/api/playlists")
+    def list_playlists() -> dict[str, object]:
+        return {"playlists": store.list_playlists()}
+
+    @app.post("/api/playlists")
+    def create_playlist(body: PlaylistNameBody) -> dict[str, object]:
+        try:
+            return store.create(body.name)
+        except PlaylistError as exc:
+            raise_playlist(exc)
+
+    @app.patch("/api/playlists/{playlist_id}")
+    def rename_playlist(playlist_id: str, body: PlaylistNameBody) -> dict[str, object]:
+        try:
+            return store.rename(playlist_id, body.name)
+        except PlaylistError as exc:
+            raise_playlist(exc)
+
+    @app.delete("/api/playlists/{playlist_id}")
+    def delete_playlist(playlist_id: str) -> Response:
+        try:
+            store.delete(playlist_id)
+        except PlaylistError as exc:
+            raise_playlist(exc)
+        return Response(status_code=204)
+
+    @app.post("/api/playlists/{playlist_id}/tracks")
+    async def add_playlist_track(playlist_id: str, request: Request) -> dict[str, object]:
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(400, "曲を選べません") from None
+        try:
+            return store.add_track(playlist_id, payload)
+        except PlaylistError as exc:
+            raise_playlist(exc)
+
+    @app.delete("/api/playlists/{playlist_id}/tracks/{index}")
+    def remove_playlist_track(playlist_id: str, index: int) -> dict[str, object]:
+        try:
+            return store.remove_track(playlist_id, index)
+        except PlaylistError as exc:
+            raise_playlist(exc)
+
+    @app.post("/api/playlists/{playlist_id}/tracks/move")
+    def move_playlist_track(playlist_id: str, body: MoveTrackBody) -> dict[str, object]:
+        try:
+            return store.move_track(playlist_id, body.from_index, body.to_index)
+        except PlaylistError as exc:
+            raise_playlist(exc)
 
     @app.get("/")
     def index() -> HTMLResponse:

@@ -44,6 +44,9 @@ def test_index_uses_public_asset_prefix():
     assert 'id="eq-high-A"' in html
     assert 'id="eq-low-B"' in html
     assert "クロスフェーダー" in html
+    assert 'id="playlist-name"' in html
+    assert 'id="playlist-tracks"' in html
+    assert "プレイリスト" in html
     assert "デッキ A" in html
     assert "テンポ" in html
     assert 'id="rate-A"' in html
@@ -107,16 +110,25 @@ def test_readme_and_docker_contract():
     agent = (ROOT / "AGENT.md").read_text(encoding="utf-8")
     for token in ("YOUTUBE_API_KEY", "8098", "/djtube/", "DDJ-FLX4", "docker run", "uv sync", "yt-dlp"):
         assert token in agent
+    assert "プレイリスト" in readme
+    assert "Shift+A" in readme
+    assert "DJTUBE_PLAYLISTS" not in readme
+    assert "data/playlists.json" not in readme
     assert "AIza" not in readme
     assert "AIza" not in agent
+    assert "DJTUBE_PLAYLISTS" in agent
+    assert "djtube-data" in agent
+    assert "ボリュームを付けません" in agent
     assert "未実装" in agent
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "8098" in dockerfile
     assert "YOUTUBE_API_KEY=" not in dockerfile
     assert "ffmpeg" not in dockerfile
+    assert "/app/data" in dockerfile
     compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
     assert "8098:8098" in compose
     assert "YOUTUBE_API_KEY" in compose
+    assert "djtube-data:/app/data" in compose
 
 
 def test_client_unit_tests():
