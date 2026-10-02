@@ -160,17 +160,14 @@ _LOG_HANDLER = "djtube-audio"
 _DETAIL_LIMIT = 800
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
-_BARE_HOST_RE = re.compile(
-    r"(?i)\b(?:[a-z0-9-]+\.)*(?:googlevideo|youtube|ytimg|googleusercontent|google)\.com[^\s\"'<>]*"
-)
+_BARE_MEDIA_RE = re.compile(r"(?i)\b(?:[a-z0-9-]+\.)*googlevideo\.com[^\s\"'<>]*")
+_SIGNED_MARK_RE = re.compile(r"(?i)(?:sig|signature|lsig|spc|sparams)=")
+_SECRET_URL_RE = re.compile(r"(?i)(?:api_key|apikey|youtube_api_key|access_token|key)=")
 _API_KEY_RE = re.compile(r"\bAIza[0-9A-Za-z_\-]{10,}\b")
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-+/=]+")
 _COOKIE_HEADER_RE = re.compile(r"(?i)\b(?:set-)?cookie\s*[:=]\s*\S+(?:\s*;\s*\S+)*")
 _NAMED_COOKIE_RE = re.compile(
     r"(?i)\b(?:SAPISID|HSID|SSID|APISID|SID|__Secure-[\w.-]+|VISITOR_INFO1_LIVE|LOGIN_INFO|PREF|YSC|SIDCC|SOCS)\s*=\s*[^\s;,&]+"
-)
-_PARAM_RE = re.compile(
-    r"(?i)[?&](?:sig|signature|lsig|spc|sparams|expire|ei|ip|ipbits|source|key|api_key|apiKey|access_token|pcm2|cookie|cookies)=[^&\s]+"
 )
 _LOOSE_SECRET_RE = re.compile(r"(?i)\b(?:sig|signature|lsig|spc|cookie|cookies|api_key|apikey|youtube_api_key)=[^\s&]+")
 
@@ -187,38 +184,37 @@ def _configure_audio_log() -> None:
     log.propagate = False
 
 
+def _scrub_url(match: re.Match[str]) -> str:
+    url = match.group(0)
+    if "googlevideo.com" in url.lower() or _SIGNED_MARK_RE.search(url) or _SECRET_URL_RE.search(url):
+        return "[url]"
+    return url
+
+
 def _redact(text: str, limit: int = _DETAIL_LIMIT) -> str:
     cleaned = _ANSI_RE.sub("", text or "")
-    cleaned = _URL_RE.sub("[url]", cleaned)
-    cleaned = _BARE_HOST_RE.sub("[url]", cleaned)
+    cleaned = _URL_RE.sub(_scrub_url, cleaned)
+    cleaned = _BARE_MEDIA_RE.sub("[url]", cleaned)
     cleaned = _API_KEY_RE.sub("[redacted]", cleaned)
     cleaned = _BEARER_RE.sub("[redacted]", cleaned)
     cleaned = _COOKIE_HEADER_RE.sub("cookie=[redacted]", cleaned)
     cleaned = _NAMED_COOKIE_RE.sub("[redacted]", cleaned)
-    cleaned = _PARAM_RE.sub("[redacted]", cleaned)
     cleaned = _LOOSE_SECRET_RE.sub("[redacted]", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    if re.search(r"(?i)https?://|\bsig=|signature=|\bAIza[0-9A-Za-z_\-]{10,}|cookie\s*[:=]", cleaned):
-        cleaned = re.sub(r"(?i)https?://\S+", "[url]", cleaned)
-        cleaned = re.sub(r"(?i)\b(?:sig|signature|lsig|spc)=[^\s]+", "[redacted]", cleaned)
-        cleaned = re.sub(r"\bAIza[0-9A-Za-z_\-]{10,}\b", "[redacted]", cleaned)
-        cleaned = re.sub(r"(?i)cookie\s*[:=]\s*\S+", "cookie=[redacted]", cleaned)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip()
     if len(cleaned) > limit:
         cleaned = cleaned[: limit - 3].rstrip() + "..."
     return cleaned
 
 
-def _signal_labels(text: str) -> str:
-    lowered = text.lower()
-    labels: list[str] = []
-    if re.search(r"\bbot\b", lowered) or re.search(r"\brobot\b", lowered) or "captcha" in lowered:
-        labels.append("Bot判定")
-    if "consent" in lowered or "before you continue" in lowered:
-        labels.append("同意画面")
-    if re.search(r"\b403\b", text):
-        labels.append("403")
-    return ",".join(labels)
+def _ytdlp_code(ydl: object, exc: BaseException) -> int:
+    if isinstance(exc, SystemExit) and isinstance(exc.code, int):
+        return exc.code
+    if type(exc).__name__ == "DownloadCancelled":
+        return 101
+    retcode = getattr(ydl, "_download_retcode", 0)
+    if isinstance(retcode, int) and retcode != 0:
+        return retcode
+    return 1
 
 
 def _public_token(value: object, limit: int = 80) -> str:
@@ -327,15 +323,6 @@ def _exception_chain(exc: BaseException) -> list[BaseException]:
     return found
 
 
-def _exit_name(exc: BaseException) -> str:
-    names: list[str] = []
-    for item in _exception_chain(exc):
-        name = type(item).__name__
-        if name.isidentifier() and name not in names:
-            names.append(name)
-    return ",".join(names) or "error"
-
-
 class _YtdlpCapture:
     """Hold yt-dlp warnings and errors so the process does not write them raw."""
 
@@ -377,36 +364,20 @@ def _extract(video_id: str) -> dict:
         "format": "bestaudio/best",
         "logger": captured,
     }
+    ydl = yt_dlp.YoutubeDL(options)
     try:
-        with yt_dlp.YoutubeDL(options) as ydl:
+        with ydl:
             info = ydl.extract_info(watch_url(video_id), download=False)
     except Exception as exc:
         blob = _failure_blob(*(str(item) for item in _exception_chain(exc)), *captured.messages)
-        _emit(
-            logging.WARNING,
-            video_id,
-            "ytdlp",
-            "ended",
-            exit=_exit_name(exc),
-            signals=_signal_labels(blob),
-            detail=blob,
-        )
+        _emit(logging.WARNING, video_id, "ytdlp", "ended", code=_ytdlp_code(ydl, exc), detail=blob)
         raise AudioError("音源を取得できませんでした") from None
     if not isinstance(info, dict):
-        _emit(logging.WARNING, video_id, "ytdlp", "ended", exit="invalid-info")
+        _emit(logging.WARNING, video_id, "ytdlp", "ended", code=0)
         raise AudioError("音源を取得できませんでした")
     note = _failure_blob(*captured.messages)
-    if note and (_signal_labels(note) or _redact(note)):
-        signals = _signal_labels(note)
-        _emit(
-            logging.WARNING if signals else logging.INFO,
-            video_id,
-            "ytdlp",
-            "note",
-            exit="ok",
-            signals=signals,
-            detail=note,
-        )
+    if note and _redact(note):
+        _emit(logging.WARNING, video_id, "ytdlp", "message", detail=note)
     return info
 
 
@@ -423,20 +394,20 @@ def resolve_audio(video_id: str, *, extract=_extract, now: float | None = None) 
         info = extract(video_id)
     except AudioError:
         if path != "ytdlp":
-            _emit(logging.WARNING, video_id, path, "ended", exit="AudioError")
+            _emit(logging.WARNING, video_id, path, "ended")
         raise
     fmt = select_audio_format(info) if isinstance(info, dict) else None
     if fmt is None:
-        _emit(logging.WARNING, video_id, path, "ended", exit="no-usable-format", tail=_format_counts(info))
+        _emit(logging.WARNING, video_id, path, "ended", tail=_format_counts(info))
         raise AudioError("音源を取得できませんでした")
     content_type = content_type_for(fmt)
     if content_type is None or not host_allowed(str(fmt.get("url"))):
-        _emit(logging.WARNING, video_id, path, "ended", exit="rejected-format", tail=_format_summary(fmt))
+        _emit(logging.WARNING, video_id, path, "ended", tail=_format_summary(fmt))
         raise AudioError("音源を取得できませんでした")
     headers = _header_subset(fmt.get("http_headers") or info.get("http_headers"))
     source = AudioSource(url=str(fmt["url"]), content_type=content_type, headers=headers)
     _remember(video_id, source, now)
-    _emit(logging.INFO, video_id, path, "selected", exit="ok", tail=_format_summary(fmt))
+    _emit(logging.INFO, video_id, path, "selected", tail=_format_summary(fmt))
     return source
 
 
@@ -491,35 +462,26 @@ def open_upstream(source: AudioSource, range_header: str | None, video_id: str) 
             location = response.headers.get("location") or ""
             response.close()
             if not host_allowed(location):
+                status_code = response.status_code
                 client.close()
-                _emit(logging.WARNING, video_id, "upstream", "ended", exit="redirect-rejected")
+                _emit(logging.WARNING, video_id, "upstream", "ended", status=str(status_code))
                 raise AudioError("音源を取得できませんでした")
             response = _send(client, location, headers)
         status_code = response.status_code
         if status_code not in {200, 206}:
             response.close()
             client.close()
-            signals = "403" if status_code == 403 else ""
-            _emit(logging.WARNING, video_id, "upstream", "ended", exit=str(status_code), signals=signals)
+            _emit(logging.WARNING, video_id, "upstream", "ended", status=str(status_code))
             if status_code in {403, 410}:
                 raise AudioExpired("音源を取得できませんでした")
             raise AudioError("音源を取得できませんでした")
-        _emit(logging.INFO, video_id, "upstream", "open", exit=str(status_code))
+        _emit(logging.INFO, video_id, "upstream", "open", status=str(status_code))
         return Upstream(client, response, source.content_type)
     except AudioError:
         raise
     except httpx.HTTPError as exc:
         client.close()
-        blob = str(exc)
-        _emit(
-            logging.WARNING,
-            video_id,
-            "upstream",
-            "ended",
-            exit=type(exc).__name__,
-            signals=_signal_labels(blob),
-            detail=blob,
-        )
+        _emit(logging.WARNING, video_id, "upstream", "ended", detail=str(exc))
         raise AudioError("音源を取得できませんでした") from None
 
 
@@ -536,5 +498,5 @@ def open_audio(video_id: str, range_header: str | None) -> Upstream:
             last_error = exc
             if attempt == 0:
                 _emit(logging.INFO, video_id, "upstream", "retry")
-    _emit(logging.WARNING, video_id, "upstream", "ended", exit="retry-exhausted")
+    _emit(logging.WARNING, video_id, "upstream", "retry-exhausted")
     raise last_error or AudioError("音源を取得できませんでした")

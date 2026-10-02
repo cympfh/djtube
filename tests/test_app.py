@@ -120,11 +120,8 @@ def test_readme_and_docker_contract():
     assert "DJTUBE_PLAYLISTS" in agent
     assert "djtube-data" in agent
     assert "djtube.audio" in agent
-    assert "path=ytdlp" in agent
-    assert "path=cache" in agent
-    assert "path=upstream" in agent
-    assert "Bot判定" in agent
-    assert "同意画面" in agent
+    assert "Bot判定" not in agent
+    assert "同意画面" not in agent
     assert "djtube.audio" not in readme
     assert "音源のログ" not in readme
     assert "Bot判定" not in readme
