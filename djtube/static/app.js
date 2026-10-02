@@ -12,6 +12,12 @@ const audios = {
   A: createDeckPlayer("A", "yt-A"),
   B: createDeckPlayer("B", "yt-B"),
 };
+audios.A.onSeekLanded = () => {
+  state.decks.A.jogCommand = null;
+};
+audios.B.onSeekLanded = () => {
+  state.decks.B.jogCommand = null;
+};
 const searchInput = document.getElementById("search-input");
 
 async function fetchSearch(query, musicOnly = state.musicOnly) {
@@ -174,6 +180,7 @@ function renderDeck(deck) {
 }
 
 function updateTime(deck) {
+  actions.syncJog(deck);
   const audio = audios[deck];
   const deckState = state.decks[deck];
   document.getElementById(`time-${deck}`).textContent = formatTime(audio.currentTime || 0);
@@ -264,7 +271,7 @@ for (const deck of ["A", "B"]) {
     if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
     const rect = event.currentTarget.getBoundingClientRect();
     const ratio = (event.clientX - rect.left) / rect.width;
-    audio.currentTime = Math.min(audio.duration, Math.max(0, ratio * audio.duration));
+    actions.seek(deck, ratio * audio.duration);
     updateTime(deck);
   });
 }

@@ -22,6 +22,7 @@ export function createDeckPlayer(deck, elementId) {
       if (this._seekPending && Number.isFinite(this._time)) {
         if (!Number.isFinite(reported) || Math.abs(reported - this._time) > 0.35) return this._time;
         this._seekPending = false;
+        this.onSeekLanded?.();
       }
       if (Number.isFinite(reported)) return reported;
       return this._time;

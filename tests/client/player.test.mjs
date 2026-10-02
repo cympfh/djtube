@@ -303,9 +303,60 @@ test("jog keeps adding while the player still reports the old time", () => {
     actions.jog("A", 10);
     assert.equal(commanded, 22);
     reported = 22;
+    actions.syncJog("A");
+    assert.equal(state.decks.A.jogCommand, null);
     actions.jog("A", 1);
     assert.equal(commanded, 23);
     assert.equal(state.decks.A.cue, 0);
+  });
+});
+
+test("cue back near the pre-jog time does not jump to the old jog target", () => {
+  const { state, audios, actions } = harness();
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 120 }];
+  return actions.loadSelected("A").then(() => {
+    let reported = 10;
+    let commanded = 10;
+    let seekPending = false;
+    Object.defineProperty(audios.A, "currentTime", {
+      configurable: true,
+      get() {
+        if (seekPending && Math.abs(reported - commanded) > 0.35) return commanded;
+        seekPending = false;
+        return reported;
+      },
+      set(value) {
+        commanded = value;
+        seekPending = true;
+      },
+    });
+    state.decks.A.cue = 10;
+    actions.jog("A", 10);
+    assert.equal(commanded, 20);
+    assert.equal(state.decks.A.jogCommand.at, 20);
+    actions.cue("A");
+    assert.equal(commanded, 10);
+    assert.equal(state.decks.A.jogCommand, null);
+    actions.jog("A", 1);
+    assert.equal(commanded, 11);
+  });
+});
+
+test("a position bar seek drops the stored jog target", () => {
+  const { state, audios, actions } = harness();
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 120 }];
+  return actions.loadSelected("A").then(() => {
+    audios.A.currentTime = 10;
+    audios.A.duration = 80;
+    actions.jog("A", 10);
+    assert.equal(audios.A.currentTime, 20);
+    actions.seek("A", 10);
+    assert.equal(audios.A.currentTime, 10);
+    assert.equal(state.decks.A.jogCommand, null);
+    actions.jog("A", 1);
+    assert.equal(audios.A.currentTime, 11);
+    assert.equal(state.decks.A.cue, 0);
+    assert.equal(state.crossfader, 0.5);
   });
 });
 
