@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "djtube"
 version = "0.1.0"
-description = "Two-deck YouTube DJ toy"
+description = "Two-deck YouTube DJ"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

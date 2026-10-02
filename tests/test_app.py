@@ -85,10 +85,15 @@ def test_search_route_does_not_echo_key(monkeypatch):
 
 def test_readme_and_docker_contract():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "https://s.cympfh.cc/djtube/" in readme
+    for token in ("おもちゃ", "toy", "YOUTUBE_API_KEY", "8098", "docker", "uv sync", "127.0.0.1", "yt-dlp", "DDJ-FLX4"):
+        assert token not in readme
+    agent = (ROOT / "AGENT.md").read_text(encoding="utf-8")
     for token in ("YOUTUBE_API_KEY", "8098", "/djtube/", "DDJ-FLX4", "docker run", "uv sync", "yt-dlp"):
-        assert token in readme
+        assert token in agent
     assert "AIza" not in readme
-    assert "未実装" in readme
+    assert "AIza" not in agent
+    assert "未実装" in agent
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "8098" in dockerfile
     assert "YOUTUBE_API_KEY=" not in dockerfile
