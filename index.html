@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DJTUBE</title>
+    <meta name="description" content="YouTubeの曲を2デッキで混ぜるブラウザDJトイ" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect fill='%23100f0d' width='32' height='32'/%3E%3Ccircle cx='11' cy='16' r='6' fill='%233ee0c5'/%3E%3Ccircle cx='21' cy='16' r='6' fill='%23ff6b3d'/%3E%3C/svg%3E"
+    />
+    <script type="module" src="/src/main.ts"></script>
+  </head>
+  <body>
+    <div id="app" tabindex="-1">
+      <header class="top">
+        <div class="brand">
+          <h1>DJTUBE</h1>
+          <p>YouTube 2デッキ</p>
+        </div>
+        <div class="target" role="group" aria-label="次のロード先">
+          <span class="target-label">次のロード先</span>
+          <div class="target-switch">
+            <button type="button" id="target-a" aria-pressed="true">デッキA</button>
+            <button type="button" id="target-b" aria-pressed="false">デッキB</button>
+          </div>
+        </div>
+        <div class="midi-box">
+          <p id="midi-status">DDJ-FLX4: 割り当て未実装</p>
+          <button type="button" id="midi-enable">MIDI入力を有効化</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <p id="api-error" class="api-error" hidden>
+          YouTubeプレーヤーを読み込めません。検索はできますが、再生はできません。
+        </p>
+        <section class="browser" aria-label="検索">
+          <form id="search-form">
+            <label for="search">検索</label>
+            <input
+              id="search"
+              type="search"
+              name="q"
+              placeholder="曲名やアーティスト"
+              autocomplete="off"
+              autocapitalize="off"
+              spellcheck="false"
+              role="combobox"
+              aria-autocomplete="list"
+              aria-controls="results"
+              aria-expanded="false"
+              enterkeyhint="search"
+            />
+            <button type="submit">検索</button>
+          </form>
+          <p id="status" role="status">曲名を入れて Enter</p>
+          <p id="results-empty" class="empty">検索結果がここに出ます。↑↓で選び、A / B でデッキへ。</p>
+          <ul id="results" role="listbox" aria-label="検索結果"></ul>
+        </section>
+
+        <section class="booth" aria-label="デッキ">
+          <div class="decks">
+            <article class="deck deck-a is-target" id="deck-a" data-phase="empty">
+              <header class="deck-head">
+                <span class="led" id="led-a"></span>
+                <h2>デッキ A</h2>
+                <p class="deck-state" id="state-a">空</p>
+              </header>
+              <div class="player-frame" id="frame-a">
+                <p class="player-fallback">プレーヤー待機中</p>
+                <div id="player-a"></div>
+              </div>
+              <h3 class="track-title" id="title-a">曲がロードされていません</h3>
+              <p class="track-channel" id="channel-a"></p>
+              <p class="time"><span id="time-a">--:--</span> / <span id="dur-a">--:--</span></p>
+              <div class="progress" aria-hidden="true"><div id="prog-a"></div></div>
+              <p class="cue">キュー <span id="cue-a">--:--</span></p>
+              <p class="deck-error" id="error-a"></p>
+              <div class="transport">
+                <button type="button" id="play-a" aria-keyshortcuts="Q">再生</button>
+                <button type="button" id="cue-btn-a" aria-keyshortcuts="W">キュー</button>
+                <button type="button" id="mark-btn-a" aria-keyshortcuts="Shift+W">地点</button>
+              </div>
+              <a id="open-a" hidden target="_blank" rel="noreferrer noopener">YouTubeで開く</a>
+            </article>
+
+            <article class="deck deck-b" id="deck-b" data-phase="empty">
+              <header class="deck-head">
+                <span class="led" id="led-b"></span>
+                <h2>デッキ B</h2>
+                <p class="deck-state" id="state-b">空</p>
+              </header>
+              <div class="player-frame" id="frame-b">
+                <p class="player-fallback">プレーヤー待機中</p>
+                <div id="player-b"></div>
+              </div>
+              <h3 class="track-title" id="title-b">曲がロードされていません</h3>
+              <p class="track-channel" id="channel-b"></p>
+              <p class="time"><span id="time-b">--:--</span> / <span id="dur-b">--:--</span></p>
+              <div class="progress" aria-hidden="true"><div id="prog-b"></div></div>
+              <p class="cue">キュー <span id="cue-b">--:--</span></p>
+              <p class="deck-error" id="error-b"></p>
+              <div class="transport">
+                <button type="button" id="play-b" aria-keyshortcuts="O">再生</button>
+                <button type="button" id="cue-btn-b" aria-keyshortcuts="P">キュー</button>
+                <button type="button" id="mark-btn-b" aria-keyshortcuts="Shift+P">地点</button>
+              </div>
+              <a id="open-b" hidden target="_blank" rel="noreferrer noopener">YouTubeで開く</a>
+            </article>
+          </div>
+
+          <div class="fader">
+            <div class="fader-labels">
+              <span>A</span>
+              <span id="fader-readout">中央</span>
+              <span>B</span>
+            </div>
+            <input
+              id="crossfader"
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value="0.5"
+              aria-label="クロスフェーダー"
+              aria-valuetext="中央"
+            />
+          </div>
+        </section>
+      </main>
+
+      <footer class="keymap" aria-label="キーボード操作">
+        <ul class="keys">
+          <li><kbd>/</kbd> 検索</li>
+          <li><kbd>Enter</kbd> 検索 / ロード</li>
+          <li><kbd>↑</kbd><kbd>↓</kbd> 結果</li>
+          <li><kbd>A</kbd><kbd>B</kbd> デッキへ</li>
+          <li><kbd>T</kbd> ロード先</li>
+          <li><kbd>Q</kbd><kbd>W</kbd> 再生・キュー A</li>
+          <li><kbd>O</kbd><kbd>P</kbd> 再生・キュー B</li>
+          <li><kbd>Space</kbd> ロード先の再生</li>
+          <li><kbd>←</kbd><kbd>→</kbd> フェーダー</li>
+          <li><kbd>Shift</kbd>+<kbd>W</kbd>/<kbd>P</kbd> キュー地点</li>
+          <li><kbd>Esc</kbd> 検索を抜ける</li>
+        </ul>
+        <p id="mode-hint"></p>
+      </footer>
+    </div>
+    <noscript><p class="noscript">このアプリは JavaScript が必要です。</p></noscript>
+  </body>
+</html>

@@ -1,0 +1,21 @@
+{
+  "name": "djtube",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Two-deck YouTube DJ toy for /djtube/",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 4173",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^6.2.0",
+    "vitest": "^3.0.0"
+  }
+}
