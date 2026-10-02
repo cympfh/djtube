@@ -1,10 +1,7 @@
 import { EQ_BANDS, clampEqUnit, eqGainDb, eqUnitFromMidi } from "./eq.js";
 import { deckGains } from "./gains.js";
 import { clampRate, rateFromMidi } from "./rate.js";
-
-// Tighter than one FLX4 jog tick (0.05s). A wider window treats that tick as
-// already landed and the next wheel step seeks to the same place.
-const JOG_CATCH_UP = 0.03;
+import { commandedSeekLanded } from "./seekland.js";
 
 export function freshDeck() {
   return {
@@ -166,6 +163,7 @@ export function createActions(deps) {
     deckState.playing = false;
     deckState.jogCommand = null;
     deckState.rate = 1;
+    audio.cancelPendingSeek?.();
     audio.pause();
     audio.playbackRate = 1;
     const loaded = audio.loadVideo(track.id);
@@ -223,10 +221,10 @@ export function createActions(deps) {
 
   function playhead(audio) {
     try {
-      const raw = audio.player?.getCurrentTime?.();
-      if (Number.isFinite(raw)) return raw;
+      const elementTime = audio.audio?.currentTime;
+      if (Number.isFinite(elementTime)) return elementTime;
     } catch {
-      /* player has no video yet */
+      /* element has no media yet */
     }
     const value = Number(audio.currentTime);
     return Number.isFinite(value) ? value : NaN;
@@ -238,7 +236,7 @@ export function createActions(deps) {
     const pending = deckState?.jogCommand;
     if (!pending || !audio) return;
     const live = playhead(audio);
-    if (Number.isFinite(live) && Math.abs(live - pending.at) <= JOG_CATCH_UP) deckState.jogCommand = null;
+    if (commandedSeekLanded(pending.from, pending.at, live)) deckState.jogCommand = null;
   }
 
   function cue(deck) {
@@ -246,6 +244,7 @@ export function createActions(deps) {
     const audio = audios[deck];
     if (!deckState || deckState.status !== "ready") return;
     deckState.jogCommand = null;
+    audio.cancelPendingSeek?.();
     const atCue = Math.abs((audio.currentTime || 0) - deckState.cue) < 0.08;
     if (!audio.paused) {
       audio.pause();
@@ -280,6 +279,7 @@ export function createActions(deps) {
     const duration = Number(audio.duration);
     if (Number.isFinite(duration) && duration > 0 && next > duration) next = duration;
     deckState.jogCommand = null;
+    audio.cancelPendingSeek?.();
     audio.currentTime = next;
     scheduleRender();
   }
@@ -355,16 +355,14 @@ export function createActions(deps) {
     const reported = Number(audio.currentTime);
     const live = Number.isFinite(reported) ? reported : 0;
     const pending = deckState.jogCommand;
-    const stillStale =
-      pending &&
-      Math.abs(live - pending.from) <= 0.35 &&
-      Math.abs(live - pending.at) > JOG_CATCH_UP;
-    const base = stillStale ? pending.at : live;
+    const held = pending && Number.isFinite(pending.at) && Number.isFinite(pending.from);
+    const base = held ? pending.at : live;
+    const origin = held ? pending.from : live;
     let next = base + step;
     if (next < 0) next = 0;
     const duration = Number(audio.duration);
     if (Number.isFinite(duration) && duration > 0 && next > duration) next = duration;
-    deckState.jogCommand = { at: next, from: live };
+    deckState.jogCommand = { at: next, from: origin };
     audio.currentTime = next;
     scheduleRender();
   }

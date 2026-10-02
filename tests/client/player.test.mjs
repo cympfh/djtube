@@ -364,6 +364,176 @@ test("FLX4 jog keeps adding while the playhead is stale", () => {
   });
 });
 
+function holdingDeck(state, deck) {
+  const audio = createDeckPlayer(deck, `player-${deck}`);
+  let reported = 10;
+  const element = {
+    duration: 120,
+    paused: true,
+    volume: 1,
+    playbackRate: 1,
+    src: "",
+    load() {},
+    play() {
+      this.paused = false;
+      return Promise.resolve();
+    },
+    pause() {
+      this.paused = true;
+    },
+    addEventListener() {},
+  };
+  Object.defineProperty(element, "currentTime", {
+    configurable: true,
+    get() {
+      return reported;
+    },
+    set() {},
+  });
+  audio.audio = element;
+  audio.onSeekLanded = () => {
+    state.decks[deck].jogCommand = null;
+  };
+  return {
+    audio,
+    at(seconds) {
+      reported = seconds;
+    },
+  };
+}
+
+test("jog lands when playback has left the pre-jog time toward the command", () => {
+  const { state, audios, actions } = harness();
+  const held = holdingDeck(state, "A");
+  audios.A = held.audio;
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 120 }];
+  return actions.loadSelected("A").then(() => {
+    state.decks.A.status = "ready";
+    held.at(10);
+    actions.jog("A", 1);
+    actions.jog("A", 1);
+    assert.equal(state.decks.A.jogCommand.from, 10);
+    assert.equal(state.decks.A.jogCommand.at, 12);
+    assert.equal(held.audio.currentTime, 12);
+
+    held.at(10);
+    actions.syncJog("A");
+    assert.equal(state.decks.A.jogCommand.at, 12);
+    assert.equal(held.audio.currentTime, 12);
+
+    held.at(9);
+    actions.syncJog("A");
+    assert.equal(state.decks.A.jogCommand.at, 12);
+    assert.equal(held.audio.currentTime, 12);
+
+    held.at(10.04);
+    actions.syncJog("A");
+    assert.equal(state.decks.A.jogCommand, null);
+    assert.equal(held.audio.currentTime, 10.04);
+    actions.jog("A", 1);
+    assert.equal(state.decks.A.jogCommand.at, 11.04);
+    assert.equal(state.decks.A.jogCommand.from, 10.04);
+  });
+});
+
+test("one FLX4 jog tick lands when the report reaches it", () => {
+  const { state, audios, actions } = harness();
+  const held = holdingDeck(state, "A");
+  audios.A = held.audio;
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 120 }];
+  return actions.loadSelected("A").then(() => {
+    state.decks.A.status = "ready";
+    held.at(10);
+    const tick = (value) => dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb0, 0x22, value])), actions);
+    assert.equal(tick(0x41), true);
+    assert.ok(Math.abs(state.decks.A.jogCommand.at - 10.05) < 0.0001);
+    assert.equal(state.decks.A.jogCommand.from, 10);
+    actions.syncJog("A");
+    assert.equal(state.decks.A.jogCommand.from, 10);
+    assert.ok(Math.abs(held.audio.currentTime - 10.05) < 0.0001);
+
+    held.at(state.decks.A.jogCommand.at);
+    actions.syncJog("A");
+    assert.equal(state.decks.A.jogCommand, null);
+    held.at(10.2);
+    assert.ok(Math.abs(held.audio.currentTime - 10.2) < 0.0001);
+    assert.equal(tick(0x41), true);
+    assert.ok(Math.abs(state.decks.A.jogCommand.at - 10.25) < 0.0001);
+    assert.equal(state.decks.A.jogCommand.from, 10.2);
+  });
+});
+
+test("a backward FLX4 tick lands on arrival and does not stick when playback moves forward", () => {
+  const { state, audios, actions } = harness();
+  const held = holdingDeck(state, "A");
+  audios.A = held.audio;
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 120 }];
+  return actions.loadSelected("A").then(() => {
+    state.decks.A.status = "ready";
+    held.at(10);
+    const tick = (value) => dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb0, 0x22, value])), actions);
+    assert.equal(tick(0x3f), true);
+    assert.ok(Math.abs(state.decks.A.jogCommand.at - 9.95) < 0.0001);
+    assert.equal(state.decks.A.jogCommand.from, 10);
+    assert.ok(Math.abs(held.audio.currentTime - 9.95) < 0.0001);
+
+    held.at(9.97);
+    actions.syncJog("A");
+    assert.equal(state.decks.A.jogCommand, null);
+    assert.ok(Math.abs(held.audio.currentTime - 9.97) < 0.0001);
+
+    held.at(10.2);
+    assert.ok(Math.abs(held.audio.currentTime - 10.2) < 0.0001);
+    assert.equal(tick(0x41), true);
+    assert.ok(Math.abs(state.decks.A.jogCommand.at - 10.25) < 0.0001);
+    assert.equal(state.decks.A.jogCommand.from, 10.2);
+  });
+});
+
+test("cue, the position bar, and load clear jog memory before reading or seeking", () => {
+  const { state, audios, actions } = harness();
+  const held = holdingDeck(state, "A");
+  audios.A = held.audio;
+  let cancels = 0;
+  const cancelPendingSeek = held.audio.cancelPendingSeek.bind(held.audio);
+  held.audio.cancelPendingSeek = () => {
+    cancels += 1;
+    cancelPendingSeek();
+  };
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 120 }];
+  return actions.loadSelected("A").then(() => {
+    state.decks.A.status = "ready";
+    held.at(10);
+    state.decks.A.cue = 10;
+    actions.jog("A", 5);
+    assert.equal(held.audio.currentTime, 15);
+    const beforeCue = cancels;
+    actions.cue("A");
+    assert.ok(cancels > beforeCue);
+    assert.equal(state.decks.A.jogCommand, null);
+    assert.equal(held.audio.paused, false);
+    assert.equal(held.audio.currentTime, 10);
+
+    held.audio.pause();
+    actions.jog("A", 5);
+    const beforeSeek = cancels;
+    actions.seek("A", 4);
+    assert.ok(cancels > beforeSeek);
+    assert.equal(state.decks.A.jogCommand, null);
+    assert.equal(held.audio.currentTime, 4);
+    actions.jog("A", 1);
+    assert.equal(state.decks.A.jogCommand.at, 5);
+
+    const beforeLoad = cancels;
+    return actions.loadTrack("A", { id: "abcdefghijk", title: "曲" }).then(() => {
+      assert.ok(cancels > beforeLoad);
+      assert.equal(state.decks.A.jogCommand, null);
+      held.at(3);
+      assert.equal(held.audio.currentTime, 3);
+    });
+  });
+});
+
 test("cue back near the pre-jog time does not jump to the old jog target", () => {
   const { state, audios, actions } = harness();
   state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 120 }];
@@ -663,6 +833,7 @@ test("loading a track resets only that deck tempo to 1.0", async () => {
 
   actions.setRate("A", 2);
   actions.setRate("B", 0.5);
+  const mapBefore = { ...FLX4_MAP };
   const note = messageFromMidi(new Uint8Array([0x90, 20, 40]));
   assert.equal(
     dispatchControllerEvent(note, actions, {
@@ -676,7 +847,7 @@ test("loading a track resets only that deck tempo to 1.0", async () => {
   assert.equal(state.decks.B.rate, 0.5);
   assert.equal(audios.B.playbackRate, 0.5);
   assert.equal(state.decks.A.eq.high, 0.8);
-  assert.deepEqual(FLX4_MAP, {});
+  assert.deepEqual(FLX4_MAP, mapBefore);
 
   assert.equal(handleKeydown(keyEvent("1", bodyTarget()), actions), true);
   assert.equal(state.decks.A.rate, 0.75);
@@ -839,7 +1010,8 @@ test("eq gain mapping drives the filter and the shared actions", () => {
   );
   assert.equal(state.decks.B.eq.low, 0.5);
   assert.equal(audios.B.eqDb.low, 0);
-  assert.deepEqual(FLX4_MAP, {});
+  assert.equal(FLX4_MAP["cc:0:7"], undefined);
+  assert.equal(FLX4_MAP["cc:0:0"], undefined);
 
   audios.A.eqLive = false;
   actions.setEq("A", "mid", 1);
