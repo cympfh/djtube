@@ -360,7 +360,7 @@ function paintDisc(deck) {
   const disc = document.getElementById(`disc-${deck}`);
   const deckState = state.decks[deck];
   const playing = !!deckState.playing && !!deckState.id;
-  disc.hidden = !playing;
+  disc.toggleAttribute("hidden", !playing);
   const spin = disc.querySelector(".deck-disc-spin");
   if (!playing) {
     spin.removeAttribute("transform");
