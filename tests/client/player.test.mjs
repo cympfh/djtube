@@ -475,12 +475,15 @@ test("tempo clamps, nudges, resets, and stays callable from the action table", a
   assert.equal(state.decks.A.rate, 2);
 
   state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 10 }];
+  actions.setRate("B", 0.75);
   await actions.loadSelected("A");
-  assert.equal(audios.A.playbackRate, 2);
-  assert.equal(state.decks.A.rate, 2);
+  assert.equal(audios.A.playbackRate, 1);
+  assert.equal(state.decks.A.rate, 1);
+  assert.equal(state.decks.B.rate, 0.75);
+  assert.equal(audios.B.playbackRate, 0.75);
 
   assert.equal(handleKeydown(keyEvent("2", searchTarget()), actions), false);
-  assert.equal(state.decks.A.rate, 2);
+  assert.equal(state.decks.A.rate, 1);
   actions.resetRate("A");
   assert.equal(handleKeydown(keyEvent("2", bodyTarget()), actions), true);
   assert.equal(state.decks.A.rate, 1.25);
@@ -514,6 +517,110 @@ test("tempo clamps, nudges, resets, and stays callable from the action table", a
     true,
   );
   assert.equal(state.decks.B.rate, 1);
+});
+
+test("loading a track resets only that deck tempo to 1.0", async () => {
+  const { state, audios, actions } = harness();
+  state.results = [
+    { id: "abcdefghijk", title: "曲", channel: "", duration: 10 },
+    { id: "zzzzzzzzzzz", title: "次", channel: "", duration: 12 },
+  ];
+  state.decks.A.eq.high = 0.8;
+  actions.setRate("A", 1.5);
+  actions.setRate("B", 0.75);
+
+  await actions.loadSelected("A");
+  assert.equal(state.decks.A.id, "abcdefghijk");
+  assert.equal(state.decks.A.rate, 1);
+  assert.equal(audios.A.playbackRate, 1);
+  assert.equal(state.decks.A.eq.high, 0.8);
+  assert.equal(state.decks.B.rate, 0.75);
+  assert.equal(audios.B.playbackRate, 0.75);
+
+  state.selected = 1;
+  state.loadTarget = "B";
+  actions.setRate("A", 1.25);
+  actions.setRate("B", 2);
+  await actions.onEnter();
+  assert.equal(state.decks.B.id, "zzzzzzzzzzz");
+  assert.equal(state.decks.B.rate, 1);
+  assert.equal(audios.B.playbackRate, 1);
+  assert.equal(state.decks.A.rate, 1.25);
+  assert.equal(audios.A.playbackRate, 1.25);
+
+  actions.setRate("A", 2);
+  actions.setRate("B", 0.5);
+  const note = messageFromMidi(new Uint8Array([0x90, 20, 40]));
+  assert.equal(
+    dispatchControllerEvent(note, actions, {
+      "note:0:20": { action: "loadTrack", args: ["A", { id: "yyy", title: "別" }] },
+    }),
+    true,
+  );
+  assert.equal(state.decks.A.id, "yyy");
+  assert.equal(state.decks.A.rate, 1);
+  assert.equal(audios.A.playbackRate, 1);
+  assert.equal(state.decks.B.rate, 0.5);
+  assert.equal(audios.B.playbackRate, 0.5);
+  assert.equal(state.decks.A.eq.high, 0.8);
+  assert.deepEqual(FLX4_MAP, {});
+
+  assert.equal(handleKeydown(keyEvent("1", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.rate, 0.75);
+  assert.equal(audios.A.playbackRate, 0.75);
+  assert.equal(handleKeydown(keyEvent("2", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.rate, 1);
+  assert.equal(handleKeydown(keyEvent("3", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.rate, 1);
+  assert.equal(audios.A.playbackRate, 1);
+
+  assert.equal(handleKeydown(keyEvent("9", bodyTarget()), actions), true);
+  assert.equal(state.decks.B.rate, 0.75);
+  assert.equal(audios.B.playbackRate, 0.75);
+  assert.equal(handleKeydown(keyEvent("8", bodyTarget()), actions), true);
+  assert.equal(state.decks.B.rate, 0.5);
+  assert.equal(handleKeydown(keyEvent("0", bodyTarget()), actions), true);
+  assert.equal(state.decks.B.rate, 1);
+  assert.equal(audios.B.playbackRate, 1);
+  assert.equal(state.decks.A.rate, 1);
+
+  actions.nudgeRate("A", -4);
+  assert.equal(state.decks.A.rate, 0.5);
+  assert.equal(audios.A.playbackRate, 0.5);
+  actions.nudgeRate("B", 8);
+  assert.equal(state.decks.B.rate, 2);
+  assert.equal(audios.B.playbackRate, 2);
+
+  const elementRates = [];
+  const deck = createDeckPlayer("A", "player-A");
+  deck.audio = {
+    src: "",
+    load() {},
+    pause() {},
+    set playbackRate(value) {
+      elementRates.push(value);
+    },
+  };
+  deck.playbackRate = 1.75;
+  deck.setEqGain = () => true;
+  elementRates.length = 0;
+  const played = freshState();
+  played.decks.B.rate = 0.5;
+  const other = fakeAudio();
+  other.playbackRate = 0.5;
+  const deckActions = createActions({
+    state: played,
+    audios: { A: deck, B: other },
+    scheduleRender() {},
+    queryValue: () => "",
+  });
+  await deckActions.loadTrack("A", { id: "abcdefghijk", title: "曲" });
+  assert.equal(deck.playbackRate, 1);
+  assert.equal(elementRates.at(-1), 1);
+  assert.ok(elementRates.every((value) => value === 1));
+  assert.equal(played.decks.A.rate, 1);
+  assert.equal(played.decks.B.rate, 0.5);
+  assert.equal(other.playbackRate, 0.5);
 });
 
 test("eq gain mapping drives the filter and the shared actions", () => {

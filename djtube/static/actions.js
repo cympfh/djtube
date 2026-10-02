@@ -161,7 +161,9 @@ export function createActions(deps) {
     deckState.cue = 0;
     deckState.playing = false;
     deckState.jogCommand = null;
+    deckState.rate = 1;
     audio.pause();
+    audio.playbackRate = 1;
     const loaded = audio.loadVideo(track.id);
     if (deckState.gen !== gen) return;
     deckState.status = loaded === false ? "preparing" : "ready";
