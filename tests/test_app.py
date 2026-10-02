@@ -175,7 +175,8 @@ def test_readme_and_docker_contract():
     assert "書き出す" in readme
     assert "アップロード" in readme
     assert "貼り付け" in readme
-    assert "画面上部の「Cookie」" in readme
+    assert "画面上部の丸い Cookie の印" in readme
+    assert "画面上部の「Cookie」" not in readme
     assert "再生が失敗する前でも" in readme
     assert "DJTUBE_PLAYLISTS" not in readme
     assert "DJTUBE_COOKIES" not in readme

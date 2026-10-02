@@ -408,8 +408,16 @@ def test_index_has_export_steps_and_upload(tmp_path):
     assert 'id="cookie-open"' in header
     assert 'aria-controls="cookie-panel"' in header
     assert 'aria-expanded="false"' in header
-    assert ">Cookie</button>" in header
+    assert 'aria-label="Cookie"' in header
+    opener = header.split('id="cookie-open"', 1)[1].split("</button>", 1)[0]
+    assert "<svg" in opener
+    assert 'fill-rule="evenodd"' in opener
+    assert ">Cookie</button>" not in header
     css = (Path(__file__).resolve().parents[1] / "djtube" / "static" / "app.css").read_text(encoding="utf-8")
+    cookie_button = css.split(".cookie-open {", 1)[1].split("}", 1)[0]
+    assert "border-radius: 50%" in cookie_button
+    assert "width: 36px" in cookie_button
+    assert "height: 36px" in cookie_button
     assert ".cookie-panel:not([hidden])" in css
     assert "display: flex" in css.split(".cookie-panel:not([hidden])", 1)[1].split("}", 1)[0]
     assert 'id="cookie-file"' in html
