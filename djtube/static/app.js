@@ -431,6 +431,8 @@ function renderSearchStatus() {
   node.classList.toggle("is-error", !!state.searchError && state.searchError !== "見つかりませんでした");
 }
 
+let pendingRemove = null;
+
 function renderPlaylists() {
   const select = document.getElementById("playlist-select");
   const signature = state.playlists.map((item) => `${item.id}\t${item.name}`).join("\n");
@@ -465,6 +467,9 @@ function renderPlaylists() {
 
   const playlist = state.playlists.find((item) => item.id === state.playlistId) || null;
   const tracks = playlist?.tracks || [];
+  const pendingTrack =
+    pendingRemove && pendingRemove.playlistId === playlist?.id ? tracks[pendingRemove.index] : null;
+  if (!pendingTrack || pendingTrack.id !== pendingRemove?.trackId) pendingRemove = null;
   const list = document.getElementById("playlist-tracks");
   list.replaceChildren();
   tracks.forEach((track, index) => {
@@ -511,14 +516,21 @@ function renderPlaylists() {
       });
       buttons.append(button);
     }
+    const confirming = pendingRemove?.index === index;
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "is-remove";
-    remove.textContent = "削除";
+    remove.textContent = confirming ? "本当に削除？" : "削除";
     remove.disabled = busy;
     remove.addEventListener("click", (event) => {
       event.stopPropagation();
       state.playlistIndex = index;
+      if (!confirming) {
+        pendingRemove = { playlistId: playlist.id, index, trackId: track.id };
+        renderPlaylists();
+        return;
+      }
+      pendingRemove = null;
       actions.removePlaylistTrack();
     });
     buttons.append(remove);

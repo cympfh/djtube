@@ -131,8 +131,11 @@ def test_playlist_rows_load_onto_a_deck_and_remove_is_red():
     assert "actions.loadPlaylistTrack(deck)" in body
     assert "`${deck}へ`" in body
     assert 'remove.className = "is-remove"' in body
-    assert 'remove.textContent = "削除"' in body
-    assert "actions.removePlaylistTrack()" in body
+    assert 'remove.textContent = confirming ? "本当に削除？" : "削除"' in body
+    click = body[body.index('remove.addEventListener("click"') : body.index("buttons.append(remove)")]
+    assert "if (!confirming)" in click
+    assert click.index("return") < click.index("actions.removePlaylistTrack()")
+    assert "actions.removePlaylistTrack()" in click
     assert "actions.movePlaylistTrack" not in body
     assert '"上"' not in body
     assert '"下"' not in body
@@ -174,7 +177,7 @@ def test_readme_and_docker_contract():
     assert "プレイリスト" in readme
     assert "Shift+A" in readme
     assert "各曲の「Aへ」「Bへ」で、そのデッキに載せる" in readme
-    assert "「削除」で、その曲だけ外れる" in readme
+    assert "「削除」を一度押すとボタンが「本当に削除？」になり、もう一度押すとその曲だけ外れる" in readme
     assert "`A` で選択中の曲をデッキ A へ" in readme
     assert "`B` で選択中の曲をデッキ B へ" in readme
     assert "`Enter` で検索する" in readme
