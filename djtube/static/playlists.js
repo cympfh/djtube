@@ -210,8 +210,10 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
     scheduleRender();
   }
 
-  function addTrack(track) {
-    const playlist = currentPlaylist();
+  function addTrack(track, playlistId) {
+    const playlist = playlistId
+      ? state.playlists.find((item) => item.id === playlistId) || null
+      : currentPlaylist();
     if (!playlist) {
       fail("プレイリストを作ってください");
       return;
@@ -233,6 +235,10 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
 
   function addSearchHit() {
     return addTrack(state.results[state.selected]);
+  }
+
+  function addTrackToPlaylist(playlistId, track) {
+    return addTrack(track, playlistId);
   }
 
   function deckTrack(deck) {
@@ -305,6 +311,7 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
     cyclePlaylist,
     movePlaylistSelection,
     addSearchHit,
+    addTrackToPlaylist,
     addDeckTrack,
     removePlaylistTrack,
     movePlaylistTrack,

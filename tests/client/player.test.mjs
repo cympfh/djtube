@@ -1409,6 +1409,16 @@ test("playlists stay off reserved keys and load through the search path", async 
   assert.equal(handleKeydown(keyEvent("Backspace", bodyTarget(), { shiftKey: true }), actions), true);
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(state.playlists.length, 0);
+
+  assert.equal(handleKeydown(keyEvent("p", bodyTarget()), actions), true);
+  nameValue = "昼";
+  assert.equal(handleKeydown(keyEvent("Enter", nameField), actions), true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const morning = { id: "abcdefghijk", title: "検索曲", channel: "人", duration: 90, thumbnail: null };
+  await actions.addTrackToPlaylist(state.playlists[0].id, morning);
+  assert.equal(state.playlists[0].tracks[0].id, "abcdefghijk");
+  await actions.addTrackToPlaylist("missing-id", morning);
+  assert.equal(state.playlistError, "プレイリストを作ってください");
 });
 
 test("a deck with no audio source does not start, and the other deck is left alone", async () => {
