@@ -22,7 +22,7 @@ def test_health_and_public_prefix():
     body = direct.json()
     assert body["ok"] is True
     assert body["prefix"] == "/djtube"
-    assert body["flx4"] == "unmapped"
+    assert body["flx4"] == "mapped"
     assert body["playback"] == "ytdlp-stream"
     assert body["search"] in {"youtube", "ytdlp"}
 
@@ -44,6 +44,8 @@ def test_index_uses_public_asset_prefix():
     assert "テンポ" in html
     assert 'id="rate-A"' in html
     assert 'id="rate-B"' in html
+    assert 'id="midi-status"' in html
+    assert "未接続 — MIDI を開く（要 HTTPS）" in html
     js = client.get("/djtube/static/player.js")
     assert js.status_code == 200
     assert "createMediaElementSource" in js.text
