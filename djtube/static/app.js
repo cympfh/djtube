@@ -278,7 +278,6 @@ function renderResults() {
 function renderDeck(deck) {
   const deckState = state.decks[deck];
   const root = document.getElementById(`deck-${deck}`);
-  root.classList.toggle("is-target", state.loadTarget === deck);
   root.classList.toggle("is-playing", !!deckState.playing);
   root.classList.toggle("is-busy", deckState.status === "preparing");
   root.classList.toggle("is-error", deckState.status === "error" || !!deckState.playError);
@@ -370,8 +369,6 @@ function renderFader() {
   const gains = deckGains(state.crossfader);
   document.getElementById("gain-A").textContent = String(Math.round(gains.a * 100));
   document.getElementById("gain-B").textContent = String(Math.round(gains.b * 100));
-  document.getElementById("target-A").setAttribute("aria-pressed", state.loadTarget === "A" ? "true" : "false");
-  document.getElementById("target-B").setAttribute("aria-pressed", state.loadTarget === "B" ? "true" : "false");
 }
 
 function renderSearchStatus() {
@@ -569,15 +566,6 @@ for (const deck of ["A", "B"]) {
     });
   }
 }
-document.getElementById("target-A").addEventListener("click", () => {
-  state.loadTarget = "A";
-  scheduleRender();
-});
-document.getElementById("target-B").addEventListener("click", () => {
-  state.loadTarget = "B";
-  scheduleRender();
-});
-
 const fader = document.getElementById("fader");
 fader.addEventListener("input", () => {
   actions.setCrossfader(Number(fader.value) / 1000);
