@@ -18,6 +18,7 @@ import { BINDINGS, VOLUME_STEP, handleKeydown, legendGroups } from "../../djtube
 import { RATE_STEP, clampRate, formatRate, rateFromMidi } from "../../djtube/static/rate.js";
 import { cookiePanelOpen, cookiePanelShown, nextChosenOpen } from "../../djtube/static/cookies.js";
 import { createDeckPlayer } from "../../djtube/static/player.js";
+import { DISC_DEGREES_PER_SECOND, discRotationDegrees } from "../../djtube/static/disc.js";
 
 function fakeAudio() {
   return {
@@ -1814,6 +1815,17 @@ test("cookie replace stays reachable without a playback failure", () => {
   assert.equal(nextChosenOpen(true, false), false);
   assert.equal(cookiePanelShown(true, true), true);
   assert.equal(nextChosenOpen(true, true), true);
+});
+
+test("the thumbnail ring turns with playback time and rests at zero", () => {
+  assert.equal(DISC_DEGREES_PER_SECOND, 180);
+  assert.equal(discRotationDegrees(0), 0);
+  assert.equal(discRotationDegrees(-3), 0);
+  assert.equal(discRotationDegrees(Number.NaN), 0);
+  assert.equal(discRotationDegrees(0.5), 90);
+  assert.equal(discRotationDegrees(1), 180);
+  assert.equal(discRotationDegrees(2), 0);
+  assert.equal(discRotationDegrees(2.5), 90);
 });
 
 test("cue while playing returns and pauses", () => {

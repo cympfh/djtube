@@ -457,6 +457,22 @@ button:disabled { opacity: 0.45; cursor: default; }
 
 .deck-picture[hidden] { display: none; }
 
+.deck-disc {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  height: 88%;
+  width: auto;
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  overflow: visible;
+}
+
+.deck-disc[hidden] { display: none; }
+
+.deck-disc-ring { fill: rgba(255, 255, 255, 0.38); }
+
 .deck-audio {
   position: absolute;
   width: 1px;

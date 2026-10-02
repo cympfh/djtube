@@ -7,6 +7,7 @@ import { formatRate } from "./rate.js";
 import { handleKeydown, legendGroups } from "./keys.js";
 import { createDeckPlayer, startDeckAudio } from "./player.js";
 import { bindCookies, cookiePanelOpen } from "./cookies.js";
+import { discRotationDegrees } from "./disc.js";
 import { publicPrefix } from "./prefix.js";
 
 const prefix = publicPrefix();
@@ -306,6 +307,7 @@ function renderDeck(deck) {
   renderEq(deck);
   renderVolume(deck);
   updateTime(deck);
+  paintDisc(deck);
 }
 
 function renderTempo(deck) {
@@ -350,6 +352,35 @@ function renderEq(deck) {
     error.hidden = true;
     error.textContent = "";
   }
+}
+
+let discFrame = 0;
+
+function paintDisc(deck) {
+  const disc = document.getElementById(`disc-${deck}`);
+  const deckState = state.decks[deck];
+  const playing = !!deckState.playing && !!deckState.id;
+  disc.hidden = !playing;
+  const spin = disc.querySelector(".deck-disc-spin");
+  if (!playing) {
+    spin.removeAttribute("transform");
+    return;
+  }
+  // Media time already advances with this deck's playbackRate.
+  const angle = discRotationDegrees(audios[deck].currentTime || 0);
+  spin.setAttribute("transform", `rotate(${angle.toFixed(2)} 50 50)`);
+  if (!discFrame) discFrame = requestAnimationFrame(tickDiscs);
+}
+
+function tickDiscs() {
+  discFrame = 0;
+  let live = false;
+  for (const deck of ["A", "B"]) {
+    if (!state.decks[deck].playing || !state.decks[deck].id) continue;
+    live = true;
+    paintDisc(deck);
+  }
+  if (!live) discFrame = 0;
 }
 
 function updateTime(deck) {
