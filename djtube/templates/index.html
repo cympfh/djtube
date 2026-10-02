@@ -61,6 +61,14 @@
                 <button type="button" id="play-A" aria-keyshortcuts="q">再生</button>
                 <button type="button" id="cue-btn-A" class="cue" aria-keyshortcuts="z">キュー</button>
               </div>
+              <div class="tempo">
+                <div class="tempo-head">
+                  <label for="rate-A">テンポ</label>
+                  <span class="tempo-readout" id="rate-readout-A">1.00×</span>
+                  <button type="button" id="rate-reset-A">1.0 に戻す</button>
+                </div>
+                <input id="rate-A" type="range" min="50" max="200" step="25" value="100" aria-label="デッキ A のテンポ" aria-valuemin="50" aria-valuemax="200" aria-valuenow="100" aria-valuetext="1.00×" />
+              </div>
               <p class="gain-readout">音量 <span id="gain-A">71</span>%</p>
             </article>
 
@@ -84,6 +92,14 @@
               <div class="deck-buttons">
                 <button type="button" id="play-B" aria-keyshortcuts="w">再生</button>
                 <button type="button" id="cue-btn-B" class="cue" aria-keyshortcuts="x">キュー</button>
+              </div>
+              <div class="tempo">
+                <div class="tempo-head">
+                  <label for="rate-B">テンポ</label>
+                  <span class="tempo-readout" id="rate-readout-B">1.00×</span>
+                  <button type="button" id="rate-reset-B">1.0 に戻す</button>
+                </div>
+                <input id="rate-B" type="range" min="50" max="200" step="25" value="100" aria-label="デッキ B のテンポ" aria-valuemin="50" aria-valuemax="200" aria-valuenow="100" aria-valuetext="1.00×" />
               </div>
               <p class="gain-readout">音量 <span id="gain-B">71</span>%</p>
             </article>

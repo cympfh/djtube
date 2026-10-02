@@ -6,6 +6,8 @@ import { FLX4_MAP, dispatchControllerEvent, messageFromMidi } from "../../djtube
 import { formatTime } from "../../djtube/static/format.js";
 import { deckGains } from "../../djtube/static/gains.js";
 import { BINDINGS, handleKeydown, legendGroups } from "../../djtube/static/keys.js";
+import { RATE_STEP, clampRate, formatRate, rateFromMidi } from "../../djtube/static/rate.js";
+import { createDeckPlayer } from "../../djtube/static/youtube.js";
 
 function fakeAudio() {
   return {
@@ -411,6 +413,99 @@ test("a position bar seek drops the stored jog target", () => {
     assert.equal(state.decks.A.cue, 0);
     assert.equal(state.crossfader, 0.5);
   });
+});
+
+test("tempo clamps, nudges, resets, and stays callable from the action table", async () => {
+  assert.equal(clampRate(Number.NaN), 1);
+  assert.equal(clampRate(4), 2);
+  assert.equal(clampRate(0.1), 0.5);
+  assert.equal(rateFromMidi(0), 0.5);
+  assert.equal(rateFromMidi(64), 1);
+  assert.equal(rateFromMidi(127), 2);
+  assert.equal(formatRate(1), "1.00×");
+  assert.equal(RATE_STEP, 0.25);
+
+  const labels = legendGroups().find((group) => group.name === "テンポ").items.map((item) => item.label);
+  assert.ok(labels.includes("デッキ A のテンポを上げる"));
+  assert.ok(labels.includes("デッキ B のテンポを 1.0 に戻す"));
+  const tempoKeys = BINDINGS.filter((binding) => binding.group === "テンポ").flatMap((binding) => binding.keys);
+  assert.deepEqual(tempoKeys, ["1", "2", "3", "8", "9", "0"]);
+
+  const deck = createDeckPlayer("A", "yt-A");
+  const seen = [];
+  deck.player = {
+    setPlaybackRate(value) {
+      seen.push(value);
+    },
+    cueVideoById() {},
+  };
+  deck.playbackRate = 1.25;
+  deck.playbackRate = 9;
+  deck.playbackRate = 0.1;
+  assert.equal(deck.playbackRate, 0.5);
+  assert.deepEqual(seen, [1.25, 2, 0.5]);
+  deck.apiReady = true;
+  deck.playbackRate = 1.5;
+  seen.length = 0;
+  assert.equal(deck.loadVideo("abcdefghijk"), true);
+  assert.equal(seen[seen.length - 1], 1.5);
+
+  const { state, audios, actions } = harness();
+  assert.equal(state.decks.A.rate, 1);
+  actions.setRate("A", 1.5);
+  assert.equal(state.decks.A.rate, 1.5);
+  assert.equal(audios.A.playbackRate, 1.5);
+  actions.nudgeRate("A", RATE_STEP);
+  assert.equal(state.decks.A.rate, 1.75);
+  actions.nudgeRate("A", 1);
+  assert.equal(state.decks.A.rate, 2);
+  actions.nudgeRate("B", -1);
+  assert.equal(state.decks.B.rate, 0.5);
+  actions.resetRate("B");
+  assert.equal(state.decks.B.rate, 1);
+  actions.setRate("C", 2);
+  assert.equal(state.decks.A.rate, 2);
+
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 10 }];
+  await actions.loadSelected("A");
+  assert.equal(audios.A.playbackRate, 2);
+  assert.equal(state.decks.A.rate, 2);
+
+  assert.equal(handleKeydown(keyEvent("2", searchTarget()), actions), false);
+  assert.equal(state.decks.A.rate, 2);
+  actions.resetRate("A");
+  assert.equal(handleKeydown(keyEvent("2", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.rate, 1.25);
+  assert.equal(audios.A.playbackRate, 1.25);
+  assert.equal(handleKeydown(keyEvent("1", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.rate, 1);
+  assert.equal(handleKeydown(keyEvent("3", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.rate, 1);
+  actions.setRate("B", 1.5);
+  assert.equal(handleKeydown(keyEvent("0", bodyTarget()), actions), true);
+  assert.equal(state.decks.B.rate, 1);
+  const beforeJog = state.decks.A.rate;
+  assert.equal(handleKeydown(keyEvent("[", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.rate, beforeJog);
+
+  const cc = messageFromMidi(new Uint8Array([0xb0, 40, 127]));
+  assert.equal(
+    dispatchControllerEvent(cc, actions, {
+      "cc:0:40": { action: "setRateFromController", args: ["A"], passValue: true },
+    }),
+    true,
+  );
+  assert.equal(state.decks.A.rate, 2);
+  assert.equal(audios.A.playbackRate, 2);
+  assert.deepEqual(FLX4_MAP, {});
+  const center = messageFromMidi(new Uint8Array([0xb0, 40, 64]));
+  assert.equal(
+    dispatchControllerEvent(center, actions, {
+      "cc:0:40": { action: "setRateFromController", args: ["B"], passValue: true },
+    }),
+    true,
+  );
+  assert.equal(state.decks.B.rate, 1);
 });
 
 test("cue while playing returns and pauses", () => {

@@ -8,9 +8,10 @@ YouTube の曲を 2 デッキで再生する。検索はサーバ側で行い、
 
 ## 動き
 
-- デッキ A / B、再生・一時停止、キュー、クロスフェーダー
+- デッキ A / B、再生・一時停止、キュー、テンポ、クロスフェーダー
 - 検索語を入れると結果からデッキへ載せる
 - 各デッキは YouTube IFrame Player API。音は見ているブラウザが YouTube から直接鳴らす
+- テンポは IFrame の `playbackRate`。範囲は 0.5 から 2.0、操作は 0.25 刻み。画面の数値を `setPlaybackRate` に渡す
 - キーボードだけで一通り操作できる
 - Pioneer DDJ-FLX4 の MIDI 割り当ては未実装。受信口だけある
 
@@ -84,7 +85,7 @@ docker compose up --build
 
 マップは空です。Web MIDI は「MIDI を開く」を押したときだけ接続します。来た信号は、マップに無いのでデッキを動かさず、件数だけ数えます。
 
-あとからノート番号や CC を `FLX4_MAP` に書くと、キーボードと同じ actions（再生、キュー、ジョグ、ロード、フェーダー）が呼ばれます。ジョグは `jog` で、引数はデッキ（`"A"` か `"B"`）と秒数です。デッキ側の書き換えは要りません。チャンネルは 0–15。フェーダー用の CC は `setCrossfaderFromController` に `passValue: true` を渡し、値は MIDI の 0–127。実機の番号はここには書いていません。マップは空のままです。
+あとからノート番号や CC を `FLX4_MAP` に書くと、キーボードと同じ actions（再生、キュー、ジョグ、テンポ、ロード、フェーダー）が呼ばれます。ジョグは `jog` で、引数はデッキ（`"A"` か `"B"`）と秒数です。テンポは `setRate`、`nudgeRate`、`resetRate`、`setRateFromController` です。`setRateFromController` は MIDI の 0–127 を受け、64 が 1.0、0 が 0.5、127 が 2.0 です。デッキ側の書き換えは要りません。チャンネルは 0–15。フェーダー用の CC は `setCrossfaderFromController` に `passValue: true` を渡し、値は MIDI の 0–127。実機の番号はここには書いていません。マップは空のままです。
 
 ## 開発
 

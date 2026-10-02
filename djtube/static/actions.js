@@ -1,4 +1,5 @@
 import { deckGains } from "./gains.js";
+import { clampRate, rateFromMidi } from "./rate.js";
 
 export function freshDeck() {
   return {
@@ -11,6 +12,7 @@ export function freshDeck() {
     playError: "",
     cue: 0,
     playing: false,
+    rate: 1,
   };
 }
 
@@ -160,6 +162,7 @@ export function createActions(deps) {
     const loaded = audio.loadVideo(track.id);
     if (deckState.gen !== gen) return;
     deckState.status = loaded === false ? "preparing" : "ready";
+    audio.playbackRate = deckState.rate;
     applyGains();
     scheduleRender();
   }
@@ -266,6 +269,34 @@ export function createActions(deps) {
     scheduleRender();
   }
 
+  function setRate(deck, value) {
+    const deckState = deckOf(state, deck);
+    const audio = audios[deck];
+    if (!deckState || !audio) return;
+    const rate = clampRate(value);
+    deckState.rate = rate;
+    audio.playbackRate = rate;
+    scheduleRender();
+  }
+
+  function nudgeRate(deck, delta) {
+    const deckState = deckOf(state, deck);
+    if (!deckState) return;
+    const step = Number(delta);
+    if (!Number.isFinite(step) || step === 0) return;
+    setRate(deck, deckState.rate + step);
+  }
+
+  function resetRate(deck) {
+    setRate(deck, 1);
+  }
+
+  function setRateFromController(deck, value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return;
+    setRate(deck, rateFromMidi(numeric));
+  }
+
   function jog(deck, delta) {
     const deckState = deckOf(state, deck);
     const audio = audios[deck];
@@ -307,6 +338,10 @@ export function createActions(deps) {
     seek,
     jog,
     syncJog,
+    setRate,
+    nudgeRate,
+    resetRate,
+    setRateFromController,
     nudgeCrossfader,
     setCrossfader,
     setCrossfaderFromController,

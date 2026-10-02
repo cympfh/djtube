@@ -299,6 +299,30 @@ button:hover { border-color: #5c564b; }
 
 button.cue { color: var(--cue); }
 
+.tempo { display: grid; gap: 2px; }
+
+.tempo-head { display: flex; align-items: baseline; gap: 8px; }
+
+.tempo-head label {
+  margin: 0;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  font-weight: 700;
+}
+
+.tempo-readout {
+  margin: 0;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+
+.tempo-head button { margin-left: auto; padding: 2px 8px; font-size: 12px; }
+
+.tempo input[type="range"]::-webkit-slider-runnable-track { background: #3a342b; }
+
+.tempo input[type="range"]::-moz-range-track { background: #3a342b; }
+
 .fader-panel { padding: 10px 12px 12px; display: grid; gap: 6px; }
 
 .target { display: flex; align-items: center; gap: 8px; }
@@ -349,7 +373,7 @@ input[type="range"]::-moz-range-thumb {
 
 .legend {
   display: grid;
-  grid-template-columns: 1fr 1.15fr 0.85fr 1.15fr;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px 14px;
 }
 

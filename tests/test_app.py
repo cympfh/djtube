@@ -37,10 +37,14 @@ def test_index_uses_public_asset_prefix():
     assert 'id="yt-B"' in html
     assert "クロスフェーダー" in html
     assert "デッキ A" in html
+    assert "テンポ" in html
+    assert 'id="rate-A"' in html
+    assert 'id="rate-B"' in html
     js = client.get("/djtube/static/youtube.js")
     assert js.status_code == 200
     assert "cueVideoById" in js.text
     assert "setVolume" in js.text
+    assert "setPlaybackRate" in js.text
     assert "YOUTUBE_API_KEY" not in js.text
 
 
