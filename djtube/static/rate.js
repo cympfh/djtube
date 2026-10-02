@@ -1,0 +1,23 @@
+export const RATE_MIN = 0.5;
+export const RATE_MAX = 2;
+export const RATE_STEP = 0.25;
+
+export function clampRate(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 1;
+  const clamped = Math.min(RATE_MAX, Math.max(RATE_MIN, numeric));
+  return Math.round(clamped * 100) / 100;
+}
+
+/** MIDI 64 is 1.0, 0 is 0.5, and 127 is 2.0. */
+export function rateFromMidi(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 1;
+  const midi = Math.min(127, Math.max(0, numeric));
+  if (midi <= 64) return clampRate(RATE_MIN + (midi / 64) * (1 - RATE_MIN));
+  return clampRate(1 + ((midi - 64) / 63) * (RATE_MAX - 1));
+}
+
+export function formatRate(rate) {
+  return `${clampRate(rate).toFixed(2)}×`;
+}

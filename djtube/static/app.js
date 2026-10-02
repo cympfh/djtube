@@ -2,6 +2,7 @@ import { createActions, freshState } from "./actions.js";
 import { connectController } from "./controller.js";
 import { deckGains } from "./gains.js";
 import { formatTime } from "./format.js";
+import { formatRate } from "./rate.js";
 import { handleKeydown, legendGroups } from "./keys.js";
 import { publicPrefix } from "./prefix.js";
 import { createDeckPlayer, startYoutubeDecks } from "./youtube.js";
@@ -176,7 +177,19 @@ function renderDeck(deck) {
   play.classList.toggle("is-on", !!deckState.playing);
   const cue = deckState.cue > 0.05 ? formatTime(deckState.cue) : "先頭";
   document.getElementById(`cue-readout-${deck}`).textContent = `キュー位置 ${cue}`;
+  renderTempo(deck);
   updateTime(deck);
+}
+
+function renderTempo(deck) {
+  const rate = state.decks[deck].rate ?? 1;
+  const slider = document.getElementById(`rate-${deck}`);
+  const shown = formatRate(rate);
+  const value = String(Math.round(rate * 100));
+  if (document.activeElement !== slider) slider.value = value;
+  slider.setAttribute("aria-valuenow", value);
+  slider.setAttribute("aria-valuetext", shown);
+  document.getElementById(`rate-readout-${deck}`).textContent = shown;
 }
 
 function updateTime(deck) {
@@ -251,6 +264,15 @@ document.getElementById("play-A").addEventListener("click", () => actions.toggle
 document.getElementById("play-B").addEventListener("click", () => actions.togglePlay("B"));
 document.getElementById("cue-btn-A").addEventListener("click", () => actions.cue("A"));
 document.getElementById("cue-btn-B").addEventListener("click", () => actions.cue("B"));
+for (const deck of ["A", "B"]) {
+  const slider = document.getElementById(`rate-${deck}`);
+  slider.addEventListener("input", () => {
+    actions.setRate(deck, Number(slider.value) / 100);
+  });
+  document.getElementById(`rate-reset-${deck}`).addEventListener("click", () => {
+    actions.resetRate(deck);
+  });
+}
 document.getElementById("target-A").addEventListener("click", () => {
   state.loadTarget = "A";
   scheduleRender();

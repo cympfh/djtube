@@ -1,3 +1,5 @@
+import { RATE_STEP } from "./rate.js";
+
 export const FADER_STEP = 0.04;
 export const FADER_STEP_LARGE = 0.12;
 export const JOG_STEP = 1;
@@ -27,6 +29,12 @@ export const BINDINGS = [
   { keys: ["'"], action: "jog", args: ["B", JOG_STEP], label: "デッキ B を進める", group: "ジョグ" },
   { keys: [";"], action: "jog", args: ["B", -JOG_STEP_LARGE], shift: true, label: "デッキ B を大きく戻す", group: "ジョグ" },
   { keys: ["'"], action: "jog", args: ["B", JOG_STEP_LARGE], shift: true, label: "デッキ B を大きく進める", group: "ジョグ" },
+  { keys: ["1"], action: "nudgeRate", args: ["A", -RATE_STEP], label: "デッキ A のテンポを下げる", group: "テンポ" },
+  { keys: ["2"], action: "nudgeRate", args: ["A", RATE_STEP], label: "デッキ A のテンポを上げる", group: "テンポ" },
+  { keys: ["3"], action: "resetRate", args: ["A"], label: "デッキ A のテンポを 1.0 に戻す", group: "テンポ" },
+  { keys: ["8"], action: "nudgeRate", args: ["B", -RATE_STEP], label: "デッキ B のテンポを下げる", group: "テンポ" },
+  { keys: ["9"], action: "nudgeRate", args: ["B", RATE_STEP], label: "デッキ B のテンポを上げる", group: "テンポ" },
+  { keys: ["0"], action: "resetRate", args: ["B"], label: "デッキ B のテンポを 1.0 に戻す", group: "テンポ" },
   {
     keys: ["ArrowLeft", ","],
     action: "nudgeCrossfader",

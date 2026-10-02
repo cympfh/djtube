@@ -1,4 +1,6 @@
-// Two YouTube IFrame players. The deck actions only see loadVideo / play / pause / volume / time.
+// Two YouTube IFrame players. The deck actions only see loadVideo / play / pause / volume / time / playbackRate.
+
+import { clampRate } from "./rate.js";
 
 export function createDeckPlayer(deck, elementId) {
   return {
@@ -11,6 +13,7 @@ export function createDeckPlayer(deck, elementId) {
     _time: 0,
     _seekPending: false,
     _volume: 1,
+    _rate: 1,
     get currentTime() {
       let reported = NaN;
       try {
@@ -61,6 +64,17 @@ export function createDeckPlayer(deck, elementId) {
         player.setVolume(percent);
       }
     },
+    get playbackRate() {
+      return this._rate;
+    },
+    set playbackRate(value) {
+      this._rate = clampRate(value);
+      try {
+        this.player?.setPlaybackRate?.(this._rate);
+      } catch {
+        /* rate before the player exists */
+      }
+    },
     play() {
       try {
         this.player?.playVideo?.();
@@ -85,6 +99,7 @@ export function createDeckPlayer(deck, elementId) {
       this.paused = true;
       if (!this.player || !this.apiReady) return false;
       this.player.cueVideoById(id);
+      this.playbackRate = this._rate;
       return true;
     },
     fit() {
@@ -119,10 +134,18 @@ export function createDeckPlayer(deck, elementId) {
             if (frame) frame.tabIndex = -1;
             this.volume = this._volume;
             if (this.videoId) this.player.cueVideoById(this.videoId);
+            this.playbackRate = this._rate;
             this.fit();
             hooks.onReady?.(this.deck);
           },
-          onStateChange: (event) => hooks.onState?.(this.deck, event.data),
+          onStateChange: (event) => {
+            try {
+              this.player?.setPlaybackRate?.(this._rate);
+            } catch {
+              /* the player applies the rate when a video is cued */
+            }
+            hooks.onState?.(this.deck, event.data);
+          },
           onError: (event) => hooks.onError?.(this.deck, event.data),
         },
       });
