@@ -212,7 +212,6 @@ export function createActions(deps) {
     deckState.playing = false;
     deckState.jogCommand = null;
     deckState.rate = 1;
-    deckState.volume = 1;
     audio.cancelPendingSeek?.();
     audio.pause();
     audio.playbackRate = 1;
