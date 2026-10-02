@@ -32,6 +32,7 @@ nginx は `/djtube/` を外してコンテナへ渡す。コンテナはポー�
 | `/djtube/static/app.js` | `/static/app.js` |
 | `/djtube/api/search` | `/api/search` |
 | `/djtube/api/playlists` | `/api/playlists` |
+| `/djtube/api/cookies` | `/api/cookies` |
 
 フロントの基準パスは `/djtube/`。直に `http://127.0.0.1:8098/djtube/` を開いても、同じプレフィックスをコンテナ側で剥がすので動く。
 
@@ -86,6 +87,16 @@ docker run --rm -p 8098:8098 -e YOUTUBE_API_KEY -e DJTUBE_PLAYLISTS=/app/data/pl
 ```
 
 イメージは `/app/data` を `appuser` の所有で作ります。名前付きボリュームを初めて付けるとき、この所有者が使われます。API は `/api/playlists` です。プロセスは 1 つを想定しています。
+
+## Cookie
+
+YouTube がボット確認で音源取得を止めるときは、画面から Netscape 形式の Cookie をアップロードする。ファイルが無いあいだ、yt-dlp には `cookiefile` を渡さない。アップロードしたあとの音源取得だけ、そのファイルを渡す。差し替えは同じ画面のアップロードで上書きする。
+
+保存先は環境変数 `DJTUBE_COOKIES`。既定は `data/cookies.txt`。イメージと compose では `/app/data/cookies.txt`。名前付きボリューム `djtube-data` の `/app/data` に載るので、コンテナを作り直しても残る。プレイリストと同じボリューム。ボリュームの無い `docker run` では、プレイリストと同じく消える。中身はログに出さない。リポジトリには置かない。
+
+`GET /api/cookies` は入っているかどうかだけを返す。`POST /api/cookies` がアップロード。
+
+画面の案内は、サーバが今回の音源取得の失敗を認証か Cookie と判断したときだけ出す。それ以外の失敗では出さない。ブラウザは yt-dlp の文言を分類しない。`GET /api/audio/{id}/cause` は `{"cookies": true}` か `{"cookies": false}` だけを返す。
 
 ## 検索と API キー
 

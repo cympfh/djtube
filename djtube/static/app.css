@@ -148,6 +148,44 @@ button:hover { border-color: #5c564b; }
   border-color: var(--text);
 }
 
+.cookie-panel {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+}
+
+.cookie-steps {
+  margin: 0;
+  padding-left: 1.2em;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.cookie-steps li + li { margin-top: 4px; }
+
+.cookie-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+#cookie-file {
+  flex: 1 1 140px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+#cookie-upload {
+  background: var(--text);
+  color: #16140f;
+  border: 0;
+  font-weight: 700;
+}
+
 .library-page {
   min-height: 0;
   flex: 1;

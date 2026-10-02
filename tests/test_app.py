@@ -157,11 +157,19 @@ def test_readme_and_docker_contract():
     assert "名前欄で `Enter` を押すと作る" in readme
     for gone in ("T で切り替え", "次のロード先", "ロード先を切り替え", "検索 / ロード", "検索欄の外で `Enter`"):
         assert gone not in readme
+    assert "サインイン" in readme
+    assert "書き出す" in readme
+    assert "アップロード" in readme
     assert "DJTUBE_PLAYLISTS" not in readme
+    assert "DJTUBE_COOKIES" not in readme
     assert "data/playlists.json" not in readme
+    assert "data/cookies.txt" not in readme
+    assert "cookiefile" not in readme
     assert "AIza" not in readme
     assert "AIza" not in agent
     assert "DJTUBE_PLAYLISTS" in agent
+    assert "DJTUBE_COOKIES" in agent
+    assert "cookiefile" in agent
     assert "djtube-data" in agent
     assert "djtube.audio" in agent
     assert "Bot判定" not in agent
@@ -180,6 +188,8 @@ def test_readme_and_docker_contract():
     assert "8098:8098" in compose
     assert "YOUTUBE_API_KEY" in compose
     assert "djtube-data:/app/data" in compose
+    assert "DJTUBE_COOKIES=/app/data/cookies.txt" in dockerfile
+    assert "DJTUBE_COOKIES: /app/data/cookies.txt" in compose
 
 
 def test_client_unit_tests():

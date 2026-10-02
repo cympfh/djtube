@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import mimetypes
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-from djtube.audio import AudioError, open_audio
+from djtube.audio import AudioError, audio_needs_cookies, clear_audio_cache, open_audio
+from djtube.cookies import MAX_COOKIE_BYTES, CookieError, CookieStore, cookie_path, install_store
 from djtube.ids import is_video_id
 from djtube.paths import INDEX_PATH, PUBLIC_PREFIX, STATIC_DIR
 from djtube.playlists import PlaylistError, PlaylistStore, playlist_path
@@ -56,9 +57,11 @@ class MoveTrackBody(BaseModel):
     to_index: int = Field(alias="to")
 
 
-def create_app(playlist_store: PlaylistStore | None = None) -> FastAPI:
+def create_app(playlist_store: PlaylistStore | None = None, cookies: CookieStore | None = None) -> FastAPI:
     app = FastAPI(title="djtube")
     store = playlist_store if playlist_store is not None else PlaylistStore(playlist_path())
+    jar = cookies if cookies is not None else CookieStore(cookie_path())
+    install_store(jar)
 
     def raise_playlist(exc: PlaylistError) -> None:
         raise HTTPException(exc.status, str(exc)) from None
@@ -72,6 +75,12 @@ def create_app(playlist_store: PlaylistStore | None = None) -> FastAPI:
             "flx4": "mapped",
             "playback": "ytdlp-stream",
         }
+
+    @app.get("/api/audio/{video_id}/cause")
+    def audio_cause(video_id: str) -> dict[str, bool]:
+        if not is_video_id(video_id):
+            raise HTTPException(404, "音源がありません")
+        return {"cookies": audio_needs_cookies(video_id)}
 
     @app.get("/api/audio/{video_id}")
     def stream_audio(video_id: str, request: Request):
@@ -94,6 +103,21 @@ def create_app(playlist_store: PlaylistStore | None = None) -> FastAPI:
         except SearchError as exc:
             raise HTTPException(400 if str(exc) == "検索語を入れてください" else 502, str(exc)) from None
         return {"source": source, "tracks": [track.as_dict() for track in tracks]}
+
+    @app.get("/api/cookies")
+    def cookie_status() -> dict[str, bool]:
+        return {"present": jar.present()}
+
+    @app.post("/api/cookies")
+    async def upload_cookies(file: UploadFile = File(...)) -> dict[str, bool]:
+        data = await file.read(MAX_COOKIE_BYTES + 1)
+        await file.close()
+        try:
+            jar.replace(data)
+        except CookieError as exc:
+            raise HTTPException(exc.status, str(exc)) from None
+        clear_audio_cache()
+        return {"present": True}
 
     @app.get("/api/playlists")
     def list_playlists() -> dict[str, object]:

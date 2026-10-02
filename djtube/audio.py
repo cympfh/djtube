@@ -155,6 +155,65 @@ def forget_audio(video_id: str) -> None:
         _CACHE.pop(video_id, None)
 
 
+_CAUSE_LOCK = threading.Lock()
+_CAUSE: dict[str, bool] = {}
+_COOKIE_MARKERS = (
+    "sign in",
+    "--cookies",
+    "cookies are no longer valid",
+    "failed to load cookies",
+    "login required",
+    "login details are needed",
+    "only available for registered users",
+)
+
+
+def clear_audio_causes() -> None:
+    with _CAUSE_LOCK:
+        _CAUSE.clear()
+
+
+def note_audio_cause(video_id: str, cookies: bool) -> None:
+    if not is_video_id(video_id):
+        return
+    with _CAUSE_LOCK:
+        _CAUSE[video_id] = bool(cookies)
+
+
+def audio_needs_cookies(video_id: str) -> bool:
+    if not is_video_id(video_id):
+        return False
+    with _CAUSE_LOCK:
+        return _CAUSE.get(video_id, False)
+
+
+def _iter_causes(exc: BaseException):
+    pending: list[BaseException | None] = [exc]
+    seen: set[int] = set()
+    while pending:
+        item = pending.pop()
+        if item is None or id(item) in seen or not isinstance(item, BaseException):
+            continue
+        seen.add(id(item))
+        yield item
+        pending.append(item.__cause__)
+        pending.append(item.__context__)
+        info = getattr(item, "exc_info", None)
+        if isinstance(info, tuple) and len(info) > 1:
+            pending.append(info[1])
+        pending.append(getattr(item, "cause", None))
+
+
+def failure_needs_cookies(exc: BaseException) -> bool:
+    for item in _iter_causes(exc):
+        if type(item).__name__ == "CookieLoadError":
+            return True
+        text = str(item).casefold()
+        if any(marker in text for marker in _COOKIE_MARKERS):
+            return True
+    return False
+
+
 _LOG_HANDLER = "djtube-audio"
 
 
@@ -181,6 +240,8 @@ def _emit(level: int, video_id: str, path: str, outcome: str, text: str = "") ->
 def _extract(video_id: str) -> dict:
     import yt_dlp
 
+    from djtube.cookies import current_store
+
     options = {
         "quiet": True,
         "no_warnings": True,
@@ -190,16 +251,35 @@ def _extract(video_id: str) -> dict:
         "socket_timeout": 20,
         "format": "bestaudio/best",
     }
+    temporary = None
     try:
-        with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(watch_url(video_id), download=False)
-    except Exception as exc:
-        _emit(logging.WARNING, video_id, "ytdlp", "failure", str(exc))
-        raise AudioError("音源を取得できませんでした") from None
-    if not isinstance(info, dict):
+        temporary = current_store().materialize()
+    except OSError:
+        note_audio_cause(video_id, False)
         _emit(logging.WARNING, video_id, "ytdlp", "failure")
-        raise AudioError("音源を取得できませんでした")
-    return info
+        raise AudioError("音源を取得できませんでした") from None
+    if temporary is not None:
+        options["cookiefile"] = str(temporary)
+    try:
+        try:
+            with yt_dlp.YoutubeDL(options) as ydl:
+                info = ydl.extract_info(watch_url(video_id), download=False)
+        except Exception as exc:
+            note_audio_cause(video_id, failure_needs_cookies(exc))
+            _emit(logging.WARNING, video_id, "ytdlp", "failure", str(exc))
+            raise AudioError("音源を取得できませんでした") from None
+        if not isinstance(info, dict):
+            note_audio_cause(video_id, False)
+            _emit(logging.WARNING, video_id, "ytdlp", "failure")
+            raise AudioError("音源を取得できませんでした")
+        note_audio_cause(video_id, False)
+        return info
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def resolve_audio(video_id: str, *, extract=_extract, now: float | None = None) -> AudioSource:
