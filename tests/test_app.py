@@ -174,6 +174,7 @@ def test_readme_and_docker_contract():
     assert "サインイン" in readme
     assert "書き出す" in readme
     assert "アップロード" in readme
+    assert "貼り付け" in readme
     assert "DJTUBE_PLAYLISTS" not in readme
     assert "DJTUBE_COOKIES" not in readme
     assert "data/playlists.json" not in readme

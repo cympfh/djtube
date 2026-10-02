@@ -8,6 +8,9 @@ export function bindCookies(prefix) {
   const status = document.getElementById("cookie-status");
   const input = document.getElementById("cookie-file");
   const button = document.getElementById("cookie-upload");
+  const pasteForm = document.getElementById("cookie-paste");
+  const pasteText = document.getElementById("cookie-text");
+  const pasteButton = document.getElementById("cookie-save");
 
   function setOpen(open) {
     if (panel) panel.hidden = !open;
@@ -19,6 +22,11 @@ export function bindCookies(prefix) {
   function show(text, isError) {
     status.textContent = text;
     status.classList.toggle("is-error", !!isError);
+  }
+
+  function setBusy(busy) {
+    button.disabled = busy;
+    if (pasteButton) pasteButton.disabled = busy;
   }
 
   async function refresh() {
@@ -35,16 +43,8 @@ export function bindCookies(prefix) {
     }
   }
 
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const chosen = input.files && input.files[0];
-    if (!chosen) {
-      show("Cookie のファイルを選んでください", true);
-      return;
-    }
-    const payload = new FormData();
-    payload.append("file", chosen);
-    button.disabled = true;
+  async function save(payload, onSuccess) {
+    setBusy(true);
     try {
       const response = await fetch(`${prefix}/api/cookies`, { method: "POST", body: payload });
       let detail = "";
@@ -53,7 +53,7 @@ export function bindCookies(prefix) {
         if (typeof body?.detail === "string") detail = body.detail;
         if (response.ok && body?.present) {
           show("アップロード済み。切れたら、ここで差し替えられます。", false);
-          form.reset();
+          onSuccess();
           return;
         }
       } catch {
@@ -63,9 +63,36 @@ export function bindCookies(prefix) {
     } catch {
       show("Cookie を保存できませんでした", true);
     } finally {
-      button.disabled = false;
+      setBusy(false);
     }
+  }
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const chosen = input.files && input.files[0];
+    if (!chosen) {
+      show("Cookie のファイルを選んでください", true);
+      return;
+    }
+    const payload = new FormData();
+    payload.append("file", chosen);
+    save(payload, () => form.reset());
   });
+
+  if (pasteForm && pasteText && pasteButton) {
+    pasteForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (!pasteText.value.trim()) {
+        show("Cookie を貼り付けてください", true);
+        return;
+      }
+      const payload = new FormData();
+      payload.append("text", pasteText.value);
+      save(payload, () => {
+        pasteText.value = "";
+      });
+    });
+  }
 
   refresh();
   return { setOpen };

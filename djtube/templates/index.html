@@ -38,13 +38,18 @@
           <ol class="cookie-steps">
             <li>ブラウザで YouTube を開き、サインインする。</li>
             <li>サインインしたまま、Cookie を Netscape 形式のファイルに書き出す。Chrome、Edge、Firefox では、拡張機能「Get cookies.txt LOCALLY」を入れ、YouTube のページで書き出す。</li>
-            <li>下でそのファイルを選び、アップロードする。切れたら、同じ手順で書き出して、ここで差し替える。</li>
+            <li>下でそのファイルを選んでアップロードするか、中身を貼り付けて保存する。切れたら、同じ手順で書き出して、ここで差し替える。</li>
           </ol>
           <p class="status" id="cookie-status" role="status">まだありません</p>
           <form id="cookie-form" class="cookie-form" method="post" enctype="multipart/form-data" action="__PUBLIC_PREFIX__/api/cookies">
             <label class="sr-only" for="cookie-file">Cookie ファイル</label>
             <input id="cookie-file" name="file" type="file" />
             <button type="submit" id="cookie-upload">アップロード</button>
+          </form>
+          <form id="cookie-paste" class="cookie-paste" method="post" enctype="multipart/form-data" action="__PUBLIC_PREFIX__/api/cookies">
+            <label for="cookie-text">中身を貼り付け</label>
+            <textarea id="cookie-text" name="text" rows="5" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off"></textarea>
+            <button type="submit" id="cookie-save">保存</button>
           </form>
         </section>
 
