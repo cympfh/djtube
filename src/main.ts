@@ -372,7 +372,7 @@ function onPlayerError(deck: DeckId, code: number): void {
   model.holdingCue = false;
   model.error =
     code === 101 || code === 150
-      ? 'この動画は埋め込み再生が禁止されています'
+      ? 'YouTubeがこの再生を拒否しました'
       : 'この動画を再生できません';
   renderDeck(deck);
   say(`デッキ${deck}: ${model.error}`);
@@ -529,6 +529,21 @@ function bindUi(): void {
   document.addEventListener('focusin', syncMode);
   document.addEventListener('focusout', () => {
     window.setTimeout(syncMode, 0);
+  });
+
+  // YouTube focuses its iframe when playback starts. That focus never
+  // delivers keydown events to the page, so hand it back immediately.
+  let reclaiming = false;
+  window.addEventListener('blur', () => {
+    window.setTimeout(() => {
+      if (reclaiming) return;
+      const active = document.activeElement;
+      if (!(active instanceof HTMLIFrameElement)) return;
+      reclaiming = true;
+      active.blur();
+      if (document.activeElement !== searchInput) app.focus();
+      reclaiming = false;
+    }, 0);
   });
 
   midiButton.addEventListener('click', () => {
