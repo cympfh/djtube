@@ -118,12 +118,16 @@ test("dispatch uses the shared actions", () => {
   assert.equal(cc.type, "cc");
 
   const { actions, state } = harness();
+  state.results = [
+    { id: "abcdefghijk", title: "夜" },
+    { id: "zzzzzzzzzzz", title: "昼" },
+  ];
   assert.equal(dispatchControllerEvent({ type: "note", channel: 0, number: 14, value: 127 }, actions), false);
   assert.equal(
-    dispatchControllerEvent(note, actions, { "note:1:12": { action: "toggleLoadTarget" } }),
+    dispatchControllerEvent(note, actions, { "note:1:12": { action: "moveSelection", args: [1] } }),
     true,
   );
-  assert.equal(state.loadTarget, "B");
+  assert.equal(state.selected, 1);
   assert.equal(
     dispatchControllerEvent(cc, actions, {
       "cc:0:23": { action: "setCrossfaderFromController", passValue: true },
@@ -263,13 +267,18 @@ test("FLX4 map sends notes and CCs to deck actions", async () => {
 
 test("keyboard map covers deck operations and skips typed search", async () => {
   const labels = legendGroups().flatMap((group) => group.items.map((item) => item.label));
-  for (const label of ["検索にフォーカス", "デッキ A へロード", "デッキ B へロード", "デッキ A 再生/停止", "デッキ B キュー", "デッキ A を戻す", "デッキ B を進める", "フェーダーを A へ", "ロード先を切り替え"]) {
+  for (const label of ["検索にフォーカス", "検索", "デッキ A へロード", "デッキ B へロード", "デッキ A 再生/停止", "デッキ B キュー", "デッキ A を戻す", "デッキ B を進める", "フェーダーを A へ", "プレイリストをデッキ A へ", "プレイリストをデッキ B へ"]) {
     assert.ok(labels.includes(label), label);
   }
+  for (const label of ["検索 / ロード", "ロード先を切り替え"]) {
+    assert.equal(labels.includes(label), false, label);
+  }
   const actionsInMap = new Set(BINDINGS.map((binding) => binding.action));
-  for (const name of ["focusSearch", "onEnter", "moveSelection", "loadSelected", "togglePlay", "cue", "jog", "nudgeCrossfader", "toggleLoadTarget"]) {
+  for (const name of ["focusSearch", "onEnter", "moveSelection", "loadSelected", "togglePlay", "cue", "jog", "nudgeCrossfader"]) {
     assert.ok(actionsInMap.has(name), name);
   }
+  assert.equal(actionsInMap.has("toggleLoadTarget"), false);
+  assert.equal(BINDINGS.some((binding) => binding.keys.includes("t")), false);
 
   const { state, audios, actions } = harness();
   const search = searchTarget();
@@ -317,8 +326,14 @@ test("keyboard map covers deck operations and skips typed search", async () => {
   assert.ok(Math.abs(audios.A.volume - 1) < 0.0001);
   assert.ok(audios.B.volume < 0.0001);
 
-  assert.equal(handleKeydown(keyEvent("t", bodyTarget()), actions), true);
-  assert.equal(state.loadTarget, "B");
+  assert.equal(state.decks.A.id, "");
+  assert.equal(handleKeydown(keyEvent("Enter", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.id, "");
+  assert.equal(state.decks.B.id, "abcdefghijk");
+  assert.equal(handleKeydown(keyEvent("t", bodyTarget()), actions), false);
+  assert.equal(handleKeydown(keyEvent("a", bodyTarget()), actions), true);
+  await Promise.resolve();
+  assert.equal(state.decks.A.id, "abcdefghijk");
 });
 
 test("M toggles the music limit outside the search field", async () => {
@@ -368,16 +383,24 @@ test("a loaded deck shows the search thumbnail and does not invent one", async (
   assert.equal(state.decks.A.thumbnail, "");
 });
 
-test("second enter loads the targeted deck", async () => {
+test("enter in the search field searches and does not load a deck", async () => {
   const { state, audios, actions, calls, setFocused } = harness({ focused: true });
   await actions.onEnter();
   assert.equal(calls.search, 1);
   assert.equal(state.decks.A.id, "");
+  assert.equal(state.decks.B.id, "");
   setFocused(true);
   await actions.onEnter();
   assert.equal(calls.search, 1);
-  assert.equal(audios.A.videoId, "abcdefghijk");
-  assert.equal(state.loadTarget, "A");
+  assert.equal(state.decks.A.id, "");
+  assert.equal(state.decks.B.id, "");
+  assert.equal(audios.A.videoId, "");
+  assert.equal(audios.B.videoId, "");
+  const search = searchTarget();
+  assert.equal(handleKeydown(keyEvent("Enter", search), actions), true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(calls.search, 1);
+  assert.equal(state.decks.A.id, "");
 });
 
 test("jog keeps adding while the player still reports the old time", () => {
@@ -930,7 +953,6 @@ test("loading a track resets only that deck tempo to 1.0 and centers its EQ", as
   assert.equal(audios.B.eqDb.low, EQ_CUT_DB);
 
   state.selected = 1;
-  state.loadTarget = "B";
   actions.setRate("A", 1.25);
   actions.setEq("A", "high", 0.7);
   actions.setEq("A", "mid", 0.3);
@@ -939,7 +961,7 @@ test("loading a track resets only that deck tempo to 1.0 and centers its EQ", as
   actions.setEq("B", "high", 1);
   actions.setEq("B", "mid", 0);
   actions.setEq("B", "low", 0.8);
-  await actions.onEnter();
+  await actions.loadSelected("B");
   assert.equal(state.decks.B.id, "zzzzzzzzzzz");
   assert.equal(state.decks.B.rate, 1);
   assert.equal(audios.B.playbackRate, 1);

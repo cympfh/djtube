@@ -8,14 +8,13 @@ export const JOG_STEP_LARGE = 10;
 
 export const BINDINGS = [
   { keys: ["/"], action: "focusSearch", label: "検索にフォーカス", group: "検索" },
-  { keys: ["Enter"], action: "onEnter", label: "検索 / ロード", group: "検索" },
+  { keys: ["Enter"], action: "onEnter", label: "検索", group: "検索" },
   { keys: ["Escape"], action: "blurSearch", label: "検索から抜ける", group: "検索" },
   { keys: ["ArrowUp", "k"], action: "moveSelection", args: [-1], label: "結果を上へ", group: "検索" },
   { keys: ["ArrowDown", "j"], action: "moveSelection", args: [1], label: "結果を下へ", group: "検索" },
   { keys: ["m"], action: "toggleMusicOnly", label: "音楽に限る", group: "検索" },
   { keys: ["a"], action: "loadSelected", args: ["A"], label: "デッキ A へロード", group: "デッキ" },
   { keys: ["b"], action: "loadSelected", args: ["B"], label: "デッキ B へロード", group: "デッキ" },
-  { keys: ["t"], action: "toggleLoadTarget", label: "ロード先を切り替え", group: "デッキ" },
   { keys: ["q"], action: "togglePlay", args: ["A"], label: "デッキ A 再生/停止", group: "デッキ" },
   { keys: ["w"], action: "togglePlay", args: ["B"], label: "デッキ B 再生/停止", group: "デッキ" },
   { keys: ["z"], action: "cue", args: ["A"], label: "デッキ A キュー", group: "デッキ" },

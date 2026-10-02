@@ -60,6 +60,11 @@ def test_index_uses_public_asset_prefix():
     assert 'step="25"' not in html
     assert 'id="midi-status"' in html
     assert "未接続 — MIDI を開く（要 HTTPS）" in html
+    assert "T で切り替え" not in html
+    assert "次のロード先" not in html
+    assert 'id="target-A"' not in html
+    assert 'id="target-B"' not in html
+    assert "Enter で作る" in html
     js = client.get("/djtube/static/player.js")
     assert js.status_code == 200
     assert "createMediaElementSource" in js.text
@@ -138,6 +143,12 @@ def test_readme_and_docker_contract():
     assert "Shift+A" in readme
     assert "各曲の「Aへ」「Bへ」で、そのデッキに載せる" in readme
     assert "「削除」で、その曲だけ外れる" in readme
+    assert "`A` で選択中の曲をデッキ A へ" in readme
+    assert "`B` で選択中の曲をデッキ B へ" in readme
+    assert "`Enter` で検索する" in readme
+    assert "名前欄で `Enter` を押すと作る" in readme
+    for gone in ("T で切り替え", "次のロード先", "ロード先を切り替え", "検索 / ロード", "検索欄の外で `Enter`"):
+        assert gone not in readme
     assert "DJTUBE_PLAYLISTS" not in readme
     assert "data/playlists.json" not in readme
     assert "AIza" not in readme

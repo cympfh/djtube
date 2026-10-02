@@ -39,7 +39,6 @@ export function freshState() {
     searching: false,
     searchError: "",
     source: "",
-    loadTarget: "A",
     musicOnly: true,
     crossfader: 0.5,
     ...freshPlaylistState(),
@@ -106,11 +105,6 @@ export function createActions(deps) {
     scheduleRender();
   }
 
-  function toggleLoadTarget() {
-    state.loadTarget = state.loadTarget === "A" ? "B" : "A";
-    scheduleRender();
-  }
-
   let searchGen = 0;
 
   async function submitSearch() {
@@ -165,7 +159,6 @@ export function createActions(deps) {
     if (focused && (state.searching || query !== state.lastQuery || state.results.length === 0)) {
       return submitSearch();
     }
-    return loadSelected(state.loadTarget);
   }
 
   async function loadTrack(deck, track) {
@@ -405,7 +398,6 @@ export function createActions(deps) {
     moveSelection,
     loadSelected,
     loadTrack,
-    toggleLoadTarget,
     togglePlay,
     cue,
     setCue,
