@@ -11,6 +11,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
@@ -215,6 +216,14 @@ def failure_needs_cookies(exc: BaseException) -> bool:
 
 
 _LOG_HANDLER = "djtube-audio"
+# Logged-in extraction otherwise uses tv_downgraded, whose player response is
+# UNPLAYABLE ("The page needs to be reloaded."). web_embedded can return
+# progressive https audio without a PO token; web_safari is the other
+# cookie-capable client that still answers. Both stay off unless a cookie
+# file was uploaded. Deno is not on PATH, so a fetch with no cookie file
+# keeps the existing jsless clients.
+_COOKIE_PLAYER_CLIENTS = ("web_embedded", "web_safari")
+_DENO = Path("/opt/djtube/deno")
 
 
 def _configure_audio_log() -> None:
@@ -237,11 +246,16 @@ def _emit(level: int, video_id: str, path: str, outcome: str, text: str = "") ->
     log.log(level, line)
 
 
-def _extract(video_id: str) -> dict:
-    import yt_dlp
+def _deno_path() -> str | None:
+    try:
+        if _DENO.is_file():
+            return str(_DENO)
+    except OSError:
+        return None
+    return None
 
-    from djtube.cookies import current_store
 
+def _ytdlp_options(cookiefile: str | None) -> dict:
     options = {
         "quiet": True,
         "no_warnings": True,
@@ -251,6 +265,21 @@ def _extract(video_id: str) -> dict:
         "socket_timeout": 20,
         "format": "bestaudio/best",
     }
+    if not cookiefile:
+        return options
+    options["cookiefile"] = cookiefile
+    options["extractor_args"] = {"youtube": {"player_client": list(_COOKIE_PLAYER_CLIENTS)}}
+    deno = _deno_path()
+    if deno:
+        options["js_runtimes"] = {"deno": {"path": deno}}
+    return options
+
+
+def _extract(video_id: str) -> dict:
+    import yt_dlp
+
+    from djtube.cookies import current_store
+
     temporary = None
     try:
         temporary = current_store().materialize()
@@ -258,8 +287,7 @@ def _extract(video_id: str) -> dict:
         note_audio_cause(video_id, False)
         _emit(logging.WARNING, video_id, "ytdlp", "failure")
         raise AudioError("音源を取得できませんでした") from None
-    if temporary is not None:
-        options["cookiefile"] = str(temporary)
+    options = _ytdlp_options(str(temporary) if temporary is not None else None)
     try:
         try:
             with yt_dlp.YoutubeDL(options) as ydl:

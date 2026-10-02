@@ -113,6 +113,7 @@ def test_empty_store_starts_and_ytdlp_gets_no_cookiefile(tmp_path, monkeypatch):
             seen["cookiefile"] = self.params.get("cookiefile")
             seen["quiet"] = self.params.get("quiet")
             seen["logger"] = "logger" in self.params
+            seen["extractor_args"] = self.params.get("extractor_args")
             return {"formats": [_fmt()]}
 
     monkeypatch.setattr(yt_dlp, "YoutubeDL", Wrapper)
@@ -122,6 +123,7 @@ def test_empty_store_starts_and_ytdlp_gets_no_cookiefile(tmp_path, monkeypatch):
     assert seen["cookiefile"] is None
     assert seen["quiet"] is True
     assert seen["logger"] is False
+    assert seen["extractor_args"] in (None, {})
 
 
 def test_upload_persists_and_ytdlp_uses_it(tmp_path, monkeypatch, caplog, capsys):
@@ -132,6 +134,7 @@ def test_upload_persists_and_ytdlp_uses_it(tmp_path, monkeypatch, caplog, capsys
     class Wrapper(yt_dlp.YoutubeDL):
         def extract_info(self, url, download=False):
             seen["cookiefile"] = self.params.get("cookiefile")
+            seen["player_client"] = (self.params.get("extractor_args") or {}).get("youtube", {}).get("player_client")
             seen["header"] = self.cookiejar.get_cookie_header(f"https://www.youtube.com/watch?v={VIDEO_ID}")
             if seen["cookiefile"]:
                 seen["passed"] = Path(seen["cookiefile"]).read_text(encoding="utf-8")
@@ -158,6 +161,9 @@ def test_upload_persists_and_ytdlp_uses_it(tmp_path, monkeypatch, caplog, capsys
     clear_audio_cache()
     resolve_audio(VIDEO_ID)
     assert seen["cookiefile"]
+    assert seen["player_client"] == ["web_embedded", "web_safari"]
+    assert "tv_downgraded" not in seen["player_client"]
+    assert SECRET not in str(seen["player_client"])
     assert SECRET in seen["passed"]
     assert f"SID={SECRET}" in seen["header"]
     assert not Path(seen["cookiefile"]).exists()
@@ -176,6 +182,7 @@ def test_upload_persists_and_ytdlp_uses_it(tmp_path, monkeypatch, caplog, capsys
     assert REPLACEMENT in store.path.read_text(encoding="utf-8")
     seen.clear()
     resolve_audio(VIDEO_ID)
+    assert seen["player_client"] == ["web_embedded", "web_safari"]
     assert f"SID={REPLACEMENT}" in seen["header"]
     assert SECRET not in (seen.get("header") or "")
     assert SECRET not in (seen.get("passed") or "")
@@ -187,6 +194,78 @@ def test_upload_persists_and_ytdlp_uses_it(tmp_path, monkeypatch, caplog, capsys
     assert SECRET not in rejected.text
     assert REPLACEMENT in store.path.read_text(encoding="utf-8")
     assert client.get("/api/cookies").json() == {"present": True}
+
+
+def test_player_clients_follow_the_cookie_file_and_skip_tv_downgraded(tmp_path, monkeypatch):
+    deno = tmp_path / "deno"
+    deno.write_bytes(b"")
+    monkeypatch.setattr("djtube.audio._DENO", deno)
+    store = CookieStore(tmp_path / "cookies.txt")
+    install_store(store)
+    seen = {}
+
+    class Wrapper(yt_dlp.YoutubeDL):
+        def __init__(self, params=None, auto_init=True):
+            seen["options"] = dict(params or {})
+            super().__init__(params, auto_init=False)
+
+        def extract_info(self, url, download=False):
+            assert download is False
+            return {"formats": [_fmt()]}
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", Wrapper)
+    clear_audio_cache()
+    resolve_audio(VIDEO_ID)
+    assert "cookiefile" not in seen["options"]
+    assert "extractor_args" not in seen["options"]
+    assert "js_runtimes" not in seen["options"]
+
+    marker = "not-a-session"
+    store.replace(netscape(("LOGIN_INFO", marker), ("SAPISID", "also-not")))
+    clear_audio_cache()
+    seen.clear()
+    resolve_audio(VIDEO_ID)
+    options = seen["options"]
+    assert options["extractor_args"]["youtube"]["player_client"] == ["web_embedded", "web_safari"]
+    assert "tv_downgraded" not in options["extractor_args"]["youtube"]["player_client"]
+    assert options["js_runtimes"] == {"deno": {"path": str(deno)}}
+    assert marker not in str(options["extractor_args"])
+    assert marker not in str(options["js_runtimes"])
+    assert "also-not" not in str(options["extractor_args"])
+
+
+def test_this_ytdlp_drops_tv_downgraded_only_for_the_cookie_options(tmp_path):
+    """Logged-in yt-dlp defaults to tv_downgraded. Cookie options replace that list."""
+    cookie = tmp_path / "cookies.txt"
+    cookie.write_bytes(netscape(("LOGIN_INFO", "not-a-session"), ("SAPISID", "also-not")))
+    watched = "https://www.youtube.com/watch?v=abcdefghijk"
+
+    def clients_for(options, *, authenticated):
+        ydl = yt_dlp.YoutubeDL(options)
+        ie = ydl.get_info_extractor("Youtube")
+        ie.set_downloader(ydl)
+        ie.initialize()
+        original = type(ie).is_authenticated
+        type(ie).is_authenticated = property(lambda self: authenticated)
+        try:
+            return ie._get_requested_clients(watched, {}, False)
+        finally:
+            type(ie).is_authenticated = original
+
+    from djtube.audio import _ytdlp_options
+
+    anonymous = _ytdlp_options(None)
+    assert "cookiefile" not in anonymous
+    assert "extractor_args" not in anonymous
+    assert "js_runtimes" not in anonymous
+
+    bare = {"quiet": True, "no_warnings": True, "skip_download": True}
+    assert clients_for(bare, authenticated=True) == ["web_embedded", "tv_downgraded", "web"]
+
+    logged_in = _ytdlp_options(str(cookie))
+    assert logged_in["cookiefile"] == str(cookie)
+    assert clients_for(logged_in, authenticated=True) == ["web_embedded", "web_safari"]
+    assert "not-a-session" not in str(logged_in["extractor_args"])
 
 
 def test_index_has_export_steps_and_upload(tmp_path):
@@ -209,9 +288,10 @@ def test_index_has_export_steps_and_upload(tmp_path):
     js = client.get("/djtube/static/cookies.js")
     assert js.status_code == 200
     assert "/api/cookies" in js.text
-    assert "cookiefile" not in (Path(__file__).resolve().parents[1] / "djtube" / "search.py").read_text(
-        encoding="utf-8"
-    )
+    search_source = (Path(__file__).resolve().parents[1] / "djtube" / "search.py").read_text(encoding="utf-8")
+    assert "cookiefile" not in search_source
+    assert "player_client" not in search_source
+    assert "js_runtimes" not in search_source
     root = Path(__file__).resolve().parents[1]
     client_js = "\n".join(
         (root / "djtube" / "static" / name).read_text(encoding="utf-8")

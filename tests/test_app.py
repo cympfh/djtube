@@ -142,7 +142,21 @@ def test_playlist_rows_load_onto_a_deck_and_remove_is_red():
 def test_readme_and_docker_contract():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "https://s.cympfh.cc/djtube/" in readme
-    for token in ("おもちゃ", "toy", "YOUTUBE_API_KEY", "8098", "docker", "uv sync", "127.0.0.1", "yt-dlp", "DDJ-FLX4"):
+    for token in (
+        "おもちゃ",
+        "toy",
+        "YOUTUBE_API_KEY",
+        "8098",
+        "docker",
+        "uv sync",
+        "127.0.0.1",
+        "yt-dlp",
+        "DDJ-FLX4",
+        "tv_downgraded",
+        "web_embedded",
+        "web_safari",
+        "/opt/djtube/deno",
+    ):
         assert token not in readme
     agent = (ROOT / "AGENT.md").read_text(encoding="utf-8")
     for token in ("YOUTUBE_API_KEY", "8098", "/djtube/", "DDJ-FLX4", "docker run", "uv sync", "yt-dlp"):
@@ -190,6 +204,8 @@ def test_readme_and_docker_contract():
     assert "djtube-data:/app/data" in compose
     assert "DJTUBE_COOKIES=/app/data/cookies.txt" in dockerfile
     assert "DJTUBE_COOKIES: /app/data/cookies.txt" in compose
+    assert "/opt/djtube/deno" in dockerfile
+    assert "/opt/djtube" not in dockerfile.split("ENV PATH=", 1)[1].split("\n", 1)[0]
 
 
 def test_client_unit_tests():
