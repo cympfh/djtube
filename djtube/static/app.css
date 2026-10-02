@@ -261,6 +261,13 @@ button:disabled { opacity: 0.45; cursor: default; }
 
 .result-actions button { padding: 3px 7px; font-size: 12px; }
 
+.result-actions button.is-remove,
+.result-actions button.is-remove:hover {
+  color: #1c0c0a;
+  background: #ff4d3a;
+  border-color: #ff4d3a;
+}
+
 .mixer {
   min-height: 0;
   display: grid;

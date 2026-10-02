@@ -454,8 +454,23 @@ function renderPlaylists() {
     const bits = [track.channel, track.duration ? formatTime(track.duration) : ""].filter(Boolean);
     meta.textContent = bits.join(" · ");
     text.append(title, meta);
+    const buttons = document.createElement("div");
+    buttons.className = "result-actions";
+    for (const deck of ["A", "B"]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = `${deck}へ`;
+      button.disabled = busy;
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        state.playlistIndex = index;
+        actions.loadPlaylistTrack(deck);
+      });
+      buttons.append(button);
+    }
     const remove = document.createElement("button");
     remove.type = "button";
+    remove.className = "is-remove";
     remove.textContent = "削除";
     remove.disabled = busy;
     remove.addEventListener("click", (event) => {
@@ -463,8 +478,6 @@ function renderPlaylists() {
       state.playlistIndex = index;
       actions.removePlaylistTrack();
     });
-    const buttons = document.createElement("div");
-    buttons.className = "result-actions";
     buttons.append(remove);
     li.addEventListener("click", () => {
       state.playlistIndex = index;
