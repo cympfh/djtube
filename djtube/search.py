@@ -11,6 +11,9 @@ from djtube.ids import extract_video_id, is_video_id
 
 log = logging.getLogger(__name__)
 
+RESULT_TARGET = 50
+SEARCH_PAGE_SIZE = 50
+MAX_SEARCH_PAGES = 3
 SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 _ISO_DURATION = re.compile(r"^P(?:\d+D)?(?:T(?:(?P<h>\d+)H)?(?:(?P<m>\d+)M)?(?:(?P<s>\d+)S)?)?$")
@@ -180,34 +183,53 @@ def _youtube_json(response: httpx.Response) -> dict:
     return payload
 
 
+def _collect_search_ids(http: httpx.Client, query: str, key: str) -> list[str]:
+    ids: list[str] = []
+    page_token: str | None = None
+    for _ in range(MAX_SEARCH_PAGES):
+        params = {
+            "part": "snippet",
+            "type": "video",
+            "maxResults": str(SEARCH_PAGE_SIZE),
+            "q": query,
+            "safeSearch": "none",
+            "key": key,
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        payload = _youtube_json(http.get(SEARCH_URL, params=params))
+        for video_id in tracks_from_youtube_search(payload):
+            if video_id not in ids:
+                ids.append(video_id)
+            if len(ids) >= RESULT_TARGET:
+                return ids[:RESULT_TARGET]
+        token = payload.get("nextPageToken")
+        if not isinstance(token, str) or not token:
+            break
+        page_token = token
+    return ids[:RESULT_TARGET]
+
+
+def _hydrate_videos(http: httpx.Client, ids: list[str], key: str) -> list[Track]:
+    by_id: dict[str, Track] = {}
+    for start in range(0, len(ids), SEARCH_PAGE_SIZE):
+        chunk = ids[start : start + SEARCH_PAGE_SIZE]
+        payload = _youtube_json(
+            http.get(VIDEOS_URL, params={"part": "snippet,contentDetails", "id": ",".join(chunk), "key": key})
+        )
+        for track in tracks_from_youtube_videos(payload):
+            by_id[track.id] = track
+    return [by_id[video_id] for video_id in ids if video_id in by_id]
+
+
 def search_youtube_api(query: str, key: str, client: httpx.Client | None = None) -> list[Track]:
     owns = client is None
     http = client or httpx.Client(timeout=15)
     try:
-        search_response = http.get(
-            SEARCH_URL,
-            params={
-                "part": "snippet",
-                "type": "video",
-                "maxResults": 8,
-                "q": query,
-                "safeSearch": "none",
-                "key": key,
-            },
-        )
-        ids = tracks_from_youtube_search(_youtube_json(search_response))
+        ids = _collect_search_ids(http, query, key)
         if not ids:
             return []
-        videos_response = http.get(
-            VIDEOS_URL,
-            params={
-                "part": "snippet,contentDetails",
-                "id": ",".join(ids),
-                "key": key,
-            },
-        )
-        by_id = {track.id: track for track in tracks_from_youtube_videos(_youtube_json(videos_response))}
-        return [by_id[video_id] for video_id in ids if video_id in by_id]
+        return _hydrate_videos(http, ids, key)
     except SearchError:
         raise
     except httpx.HTTPError as exc:
@@ -226,16 +248,16 @@ def search_ytdlp(query: str) -> list[Track]:
         "noprogress": True,
         "extract_flat": "in_playlist",
         "skip_download": True,
-        "playlistend": 8,
+        "playlistend": RESULT_TARGET,
         "socket_timeout": 20,
     }
     try:
         with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(f"ytsearch8:{query}", download=False)
+            info = ydl.extract_info(f"ytsearch{RESULT_TARGET}:{query}", download=False)
     except Exception as exc:
         log.warning("yt-dlp search failed: %s", type(exc).__name__)
         raise SearchError("検索できませんでした") from None
-    return tracks_from_ytdlp_info(info)[:8]
+    return tracks_from_ytdlp_info(info)[:RESULT_TARGET]
 
 
 def search_tracks(query: str) -> tuple[list[Track], str]:
