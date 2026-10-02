@@ -327,6 +327,31 @@ test("M toggles the music limit outside the search field", async () => {
   assert.ok(labels.includes("音楽に限る"));
 });
 
+test("a loaded deck shows the search thumbnail and does not invent one", async () => {
+  const { state, actions } = harness();
+  state.results = [
+    {
+      id: "abcdefghijk",
+      title: "夜",
+      channel: "A店",
+      thumbnail: "https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg",
+    },
+  ];
+  await actions.loadSelected("A");
+  assert.equal(state.decks.A.thumbnail, "https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg");
+
+  state.selected = 0;
+  state.results = [{ id: "zzzzzzzzzzz", title: "昼", channel: "B店" }];
+  await actions.loadSelected("B");
+  assert.equal(state.decks.B.id, "zzzzzzzzzzz");
+  assert.equal(state.decks.B.thumbnail, "");
+
+  state.results = [{ id: "abcdefghijk", title: "夜", thumbnail: "" }];
+  await actions.loadSelected("A");
+  assert.equal(state.decks.A.id, "abcdefghijk");
+  assert.equal(state.decks.A.thumbnail, "");
+});
+
 test("second enter loads the targeted deck", async () => {
   const { state, audios, actions, calls, setFocused } = harness({ focused: true });
   await actions.onEnter();
