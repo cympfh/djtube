@@ -145,8 +145,8 @@ test("FLX4 map sends notes and CCs to deck actions", async () => {
     "note:1:11": ["togglePlay", ["B"]],
     "note:0:12": ["cue", ["A"]],
     "note:1:12": ["cue", ["B"]],
-    "note:6:70": ["loadSelected", ["A"]],
-    "note:6:71": ["loadSelected", ["B"]],
+    "note:6:70": ["loadOpenSelection", ["A"]],
+    "note:6:71": ["loadOpenSelection", ["B"]],
     "cc:6:31": ["setCrossfaderFromController", undefined],
     "cc:0:33": ["jog", ["A"]],
     "cc:0:34": ["jog", ["A"]],
@@ -1282,6 +1282,8 @@ test("playlists stay off reserved keys and load through the search path", async 
   assert.equal(bound("l"), "addSearchHit");
   assert.equal(bound("s"), "addDeckTrack");
   assert.equal(bound("s", true), "addDeckTrack");
+  assert.equal(bound("j"), "moveSelection");
+  assert.equal(bound("k"), "moveSelection");
   assert.equal(bound("g"), "movePlaylistSelection");
   assert.equal(bound("5"), "movePlaylistTrack");
   assert.equal(bound("6"), "movePlaylistTrack");
@@ -1295,6 +1297,8 @@ test("playlists stay off reserved keys and load through the search path", async 
   const labels = legendGroups().find((group) => group.name === "プレイリスト").items.map((item) => item.label);
   assert.ok(labels.includes("検索の曲を追加"));
   assert.ok(labels.includes("プレイリストをデッキ A へ"));
+  assert.ok(labels.includes("前の曲"));
+  assert.ok(labels.includes("次の曲"));
 
   const db = { playlists: [] };
   let seq = 0;
@@ -1442,6 +1446,83 @@ test("playlists stay off reserved keys and load through the search path", async 
   assert.equal(state.playlists[0].tracks[0].id, "abcdefghijk");
   await actions.addTrackToPlaylist("missing-id", morning);
   assert.equal(state.playlistError, "プレイリストを作ってください");
+});
+
+test("playlist tab j/k, browse, and LOAD use that playlist", async () => {
+  const { state, audios, actions } = harness();
+  state.results = [
+    { id: "abcdefghijk", title: "夜" },
+    { id: "zzzzzzzzzzz", title: "昼" },
+    { id: "yyyyyyyyyyy", title: "朝" },
+  ];
+  state.selected = 1;
+  state.playlists = [
+    {
+      id: "abc00000001",
+      name: "夜",
+      tracks: [
+        { id: "aaaaaaaaaaa", title: "1" },
+        { id: "bbbbbbbbbbb", title: "2" },
+        { id: "ccccccccccc", title: "3" },
+      ],
+    },
+  ];
+  state.playlistId = "abc00000001";
+  state.playlistIndex = 1;
+  state.library = "playlist";
+
+  assert.equal(handleKeydown(keyEvent("j", bodyTarget()), actions, "playlist"), true);
+  assert.equal(state.playlistIndex, 0);
+  assert.equal(state.selected, 1);
+  assert.equal(handleKeydown(keyEvent("k", bodyTarget()), actions, "playlist"), true);
+  assert.equal(state.playlistIndex, 1);
+  assert.equal(state.selected, 1);
+  assert.equal(handleKeydown(keyEvent("ArrowDown", bodyTarget()), actions, "playlist"), true);
+  assert.equal(state.playlistIndex, 2);
+  assert.equal(handleKeydown(keyEvent("ArrowUp", bodyTarget()), actions, "playlist"), true);
+  assert.equal(state.playlistIndex, 1);
+
+  const nameField = { id: "playlist-name", tagName: "INPUT", type: "text", closest() { return null; } };
+  assert.equal(handleKeydown(keyEvent("j", nameField), actions, "playlist"), false);
+  assert.equal(state.playlistIndex, 1);
+
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb6, 0x40, 0x01])), actions), true);
+  assert.equal(state.playlistIndex, 2);
+  assert.equal(state.selected, 1);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb6, 0x40, 0x7f])), actions), true);
+  assert.equal(state.playlistIndex, 1);
+  assert.equal(state.selected, 1);
+
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0x96, 0x46, 0x7f])), actions), true);
+  await Promise.resolve();
+  assert.equal(state.decks.A.id, "bbbbbbbbbbb");
+  assert.equal(audios.A.videoId, "bbbbbbbbbbb");
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0x96, 0x47, 0x7f])), actions), true);
+  await Promise.resolve();
+  assert.equal(state.decks.B.id, "bbbbbbbbbbb");
+  assert.equal(audios.B.videoId, "bbbbbbbbbbb");
+
+  assert.equal(handleKeydown(keyEvent("a", bodyTarget()), actions, "playlist"), true);
+  await Promise.resolve();
+  assert.equal(state.decks.A.id, "zzzzzzzzzzz");
+
+  state.library = "search";
+  assert.equal(handleKeydown(keyEvent("j", bodyTarget()), actions, "search"), true);
+  assert.equal(state.selected, 2);
+  assert.equal(state.playlistIndex, 1);
+  assert.equal(handleKeydown(keyEvent("k", bodyTarget()), actions, "search"), true);
+  assert.equal(state.selected, 1);
+  assert.equal(state.playlistIndex, 1);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb6, 0x40, 0x01])), actions), true);
+  assert.equal(state.selected, 2);
+  assert.equal(state.playlistIndex, 1);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb6, 0x40, 0x7f])), actions), true);
+  assert.equal(state.selected, 1);
+  assert.equal(state.playlistIndex, 1);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0x96, 0x46, 0x7f])), actions), true);
+  await Promise.resolve();
+  assert.equal(state.decks.A.id, "zzzzzzzzzzz");
+  assert.equal(state.playlistIndex, 1);
 });
 
 test("a deck with no audio source does not start, and the other deck is left alone", async () => {

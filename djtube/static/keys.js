@@ -88,6 +88,8 @@ export const BINDINGS = [
   { keys: ["l"], action: "addSearchHit", label: "検索の曲を追加", group: "プレイリスト" },
   { keys: ["s"], action: "addDeckTrack", args: ["A"], label: "デッキ A の曲を追加", group: "プレイリスト" },
   { keys: ["s"], action: "addDeckTrack", args: ["B"], shift: true, label: "デッキ B の曲を追加", group: "プレイリスト" },
+  { keys: ["j"], action: "movePlaylistSelection", args: [-1], library: "playlist", label: "前の曲", group: "プレイリスト" },
+  { keys: ["k"], action: "movePlaylistSelection", args: [1], library: "playlist", label: "次の曲", group: "プレイリスト" },
   { keys: ["g"], action: "movePlaylistSelection", args: [-1], label: "プレイリストの曲を上へ", group: "プレイリスト" },
   { keys: ["g"], action: "movePlaylistSelection", args: [1], shift: true, label: "プレイリストの曲を下へ", group: "プレイリスト" },
   { keys: ["5"], action: "movePlaylistTrack", args: [-1], label: "曲の順番を上げる", group: "プレイリスト" },
@@ -176,12 +178,17 @@ function sameKey(bindingKey, event) {
   );
 }
 
-export function bindingFor(event) {
+export function bindingFor(event, library = "search") {
   if (event.metaKey || event.ctrlKey || event.altKey) return null;
-  return (
-    BINDINGS.find((binding) => !!binding.shift === !!event.shiftKey && binding.keys.some((key) => sameKey(key, event))) ||
-    null
-  );
+  let fallback = null;
+  for (const binding of BINDINGS) {
+    if (!!binding.shift !== !!event.shiftKey) continue;
+    if (!binding.keys.some((key) => sameKey(key, event))) continue;
+    if (binding.library && binding.library !== library) continue;
+    if (binding.library === library) return binding;
+    if (!fallback) fallback = binding;
+  }
+  return fallback;
 }
 
 export function isSearchTarget(target) {
@@ -200,7 +207,7 @@ export function isTypingTarget(target) {
   return false;
 }
 
-export function handleKeydown(event, actions) {
+export function handleKeydown(event, actions, library = "search") {
   if (event.metaKey || event.ctrlKey || event.altKey) return false;
   if (isSearchTarget(event.target)) {
     if (event.key === "Enter") {
@@ -242,7 +249,7 @@ export function handleKeydown(event, actions) {
   ) {
     return false;
   }
-  const binding = bindingFor(event);
+  const binding = bindingFor(event, library);
   if (!binding) return false;
   event.preventDefault();
   const fn = actions[binding.action];
