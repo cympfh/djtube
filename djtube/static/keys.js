@@ -1,9 +1,6 @@
 export const FADER_STEP = 0.04;
 export const FADER_STEP_LARGE = 0.12;
 
-export const SEARCH_HINT =
-  "検索欄では Enter で検索し、結果が出たあとにもう一度 Enter でロード先へ載せます。↑↓ は欄の中でも選べます。A/B・Q/W・Z/X・T・←→ は欄の外で使います。";
-
 export const BINDINGS = [
   { keys: ["/"], action: "focusSearch", label: "検索にフォーカス", group: "検索" },
   { keys: ["Enter"], action: "onEnter", label: "検索 / ロード", group: "検索" },

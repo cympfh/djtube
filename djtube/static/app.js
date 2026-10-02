@@ -2,7 +2,7 @@ import { createActions, freshState } from "./actions.js";
 import { connectController } from "./controller.js";
 import { deckGains } from "./gains.js";
 import { formatTime } from "./format.js";
-import { SEARCH_HINT, handleKeydown, legendGroups } from "./keys.js";
+import { handleKeydown, legendGroups } from "./keys.js";
 import { publicPrefix } from "./prefix.js";
 import { createDeckPlayer, startYoutubeDecks } from "./youtube.js";
 
@@ -234,7 +234,6 @@ function render() {
   if (music) music.checked = state.musicOnly;
 }
 
-document.getElementById("search-hint").textContent = SEARCH_HINT;
 renderLegend();
 
 document.getElementById("search-button").addEventListener("click", () => actions.submitSearch());
