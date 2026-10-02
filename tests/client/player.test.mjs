@@ -1297,8 +1297,8 @@ test("playlists stay off reserved keys and load through the search path", async 
   const labels = legendGroups().find((group) => group.name === "プレイリスト").items.map((item) => item.label);
   assert.ok(labels.includes("検索の曲を追加"));
   assert.ok(labels.includes("プレイリストをデッキ A へ"));
-  assert.ok(labels.includes("前の曲"));
-  assert.ok(labels.includes("次の曲"));
+  assert.ok(labels.includes("上の曲"));
+  assert.ok(labels.includes("下の曲"));
 
   const db = { playlists: [] };
   let seq = 0;
@@ -1472,7 +1472,7 @@ test("playlist tab j/k, browse, and LOAD use that playlist", async () => {
   state.library = "playlist";
 
   assert.equal(handleKeydown(keyEvent("j", bodyTarget()), actions, "playlist"), true);
-  assert.equal(state.playlistIndex, 0);
+  assert.equal(state.playlistIndex, 2);
   assert.equal(state.selected, 1);
   assert.equal(handleKeydown(keyEvent("k", bodyTarget()), actions, "playlist"), true);
   assert.equal(state.playlistIndex, 1);
