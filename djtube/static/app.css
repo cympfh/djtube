@@ -158,6 +158,8 @@ button:hover { border-color: #5c564b; }
 
 .library-page[hidden] { display: none; }
 
+#playlist-panel { padding-inline: 12px; }
+
 #playlist-rename { align-self: flex-start; }
 
 .panel-head h1, .deck-head h2, .fader-label, .target-label {
