@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+cache/
+*.m4a
+*.part
+node_modules/
+.uv-cache/

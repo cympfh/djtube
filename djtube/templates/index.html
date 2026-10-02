@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+    <meta name="djtube-prefix" content="__PUBLIC_PREFIX__" />
+    <title>DJTUBE</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect fill='%2311100e' width='16' height='16'/%3E%3Crect fill='%23ffb000' x='2' y='3' width='5' height='10'/%3E%3Crect fill='%23ff4d2e' x='9' y='3' width='5' height='10'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="__PUBLIC_PREFIX__/static/app.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="top">
+        <div class="brand">
+          <p class="mark">DJTUBE</p>
+          <p class="tag">YouTube の曲で遊ぶ、2デッキ</p>
+        </div>
+        <p class="health" id="health-search">検索を確認しています</p>
+        <button type="button" id="midi-button" class="midi-button">MIDI を開く</button>
+      </header>
+
+      <main class="stage">
+        <section class="panel search-panel" aria-label="検索">
+          <div class="panel-head">
+            <h1>検索</h1>
+          </div>
+          <div class="search-row">
+            <label class="sr-only" for="search-input">曲名やアーティスト</label>
+            <input id="search-input" type="search" placeholder="曲名・アーティスト" autocomplete="off" spellcheck="false" enterkeyhint="search" />
+            <button type="button" id="search-button">検索</button>
+          </div>
+          <p class="hint" id="search-hint"></p>
+          <p class="status" id="search-status" role="status"></p>
+          <ol id="results" class="results" role="listbox" aria-label="検索結果"></ol>
+        </section>
+
+        <section class="mixer" aria-label="ミキサー">
+          <div class="deck-row">
+            <article class="deck deck-a" id="deck-A" data-deck="A">
+              <header class="deck-head">
+                <h2>デッキ A</h2>
+                <p class="deck-status" id="status-A">空</p>
+              </header>
+              <p class="deck-title" id="title-A">曲が入っていません</p>
+              <p class="deck-channel" id="channel-A"></p>
+              <div class="player-frame">
+                <div id="yt-A"></div>
+                <div class="player-shield" aria-hidden="true"></div>
+              </div>
+              <div class="pos" id="pos-A" data-deck="A">
+                <div class="pos-bar" id="bar-A"></div>
+                <div class="cue-mark" id="cue-A" hidden></div>
+              </div>
+              <p class="time"><span id="time-A">–:––</span> / <span id="dur-A">–:––</span></p>
+              <p class="cue-readout" id="cue-readout-A">キュー位置 先頭</p>
+              <div class="deck-buttons">
+                <button type="button" id="play-A" aria-keyshortcuts="q">再生</button>
+                <button type="button" id="cue-btn-A" class="cue" aria-keyshortcuts="z">キュー</button>
+              </div>
+              <p class="gain-readout">音量 <span id="gain-A">71</span>%</p>
+            </article>
+
+            <article class="deck deck-b" id="deck-B" data-deck="B">
+              <header class="deck-head">
+                <h2>デッキ B</h2>
+                <p class="deck-status" id="status-B">空</p>
+              </header>
+              <p class="deck-title" id="title-B">曲が入っていません</p>
+              <p class="deck-channel" id="channel-B"></p>
+              <div class="player-frame">
+                <div id="yt-B"></div>
+                <div class="player-shield" aria-hidden="true"></div>
+              </div>
+              <div class="pos" id="pos-B" data-deck="B">
+                <div class="pos-bar" id="bar-B"></div>
+                <div class="cue-mark" id="cue-B" hidden></div>
+              </div>
+              <p class="time"><span id="time-B">–:––</span> / <span id="dur-B">–:––</span></p>
+              <p class="cue-readout" id="cue-readout-B">キュー位置 先頭</p>
+              <div class="deck-buttons">
+                <button type="button" id="play-B" aria-keyshortcuts="w">再生</button>
+                <button type="button" id="cue-btn-B" class="cue" aria-keyshortcuts="x">キュー</button>
+              </div>
+              <p class="gain-readout">音量 <span id="gain-B">71</span>%</p>
+            </article>
+          </div>
+
+          <div class="fader-panel">
+            <div class="target" role="group" aria-label="次のロード先">
+              <span class="target-label">次のロード先</span>
+              <button type="button" id="target-A" aria-pressed="true">A</button>
+              <button type="button" id="target-B" aria-pressed="false">B</button>
+              <span class="target-note">T で切り替え</span>
+            </div>
+            <label class="fader-label" for="fader">クロスフェーダー</label>
+            <input id="fader" type="range" min="0" max="1000" value="500" aria-valuemin="0" aria-valuemax="1000" />
+            <p class="fader-readout" id="fader-readout">位置 A 50 / B 50</p>
+          </div>
+        </section>
+      </main>
+
+      <footer class="legend-wrap">
+        <div id="key-legend" class="legend"></div>
+        <p class="midi-status" id="midi-status">DDJ-FLX4 の割り当ては未実装です。</p>
+      </footer>
+    </div>
+    <script type="module" src="__PUBLIC_PREFIX__/static/app.js"></script>
+  </body>
+</html>
