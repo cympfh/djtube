@@ -171,6 +171,15 @@ function renderDeck(deck) {
   root.classList.toggle("is-error", deckState.status === "error" || !!deckState.playError);
   document.getElementById(`title-${deck}`).textContent = deckState.title || "曲が入っていません";
   document.getElementById(`channel-${deck}`).textContent = deckState.channel || "";
+  const picture = document.getElementById(`picture-${deck}`);
+  const pictureUrl = deckState.id ? deckState.thumbnail : "";
+  if (pictureUrl) {
+    if (picture.getAttribute("src") !== pictureUrl) picture.src = pictureUrl;
+    picture.hidden = false;
+  } else {
+    picture.removeAttribute("src");
+    picture.hidden = true;
+  }
   const status = document.getElementById(`status-${deck}`);
   status.textContent = deckStatusText(deckState);
   const play = document.getElementById(`play-${deck}`);

@@ -35,7 +35,11 @@ def test_index_uses_public_asset_prefix():
     assert 'src="/djtube/static/app.js"' in html
     assert 'id="player-A"' in html
     assert 'id="player-B"' in html
+    assert 'id="picture-A"' in html
+    assert 'id="picture-B"' in html
     assert 'id="yt-A"' not in html
+    assert "<iframe" not in html
+    assert "iframe_api" not in html
     assert "イコライザー" in html
     assert 'id="eq-high-A"' in html
     assert 'id="eq-low-B"' in html

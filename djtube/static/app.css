@@ -73,7 +73,7 @@ button:hover { border-color: #5c564b; }
   font-weight: 700;
 }
 
-.tag, .health, .status, .midi-status, .target-note, .deck-channel, .cue-readout, .gain-readout, .fader-readout, .player-note {
+.tag, .health, .status, .midi-status, .target-note, .deck-channel, .cue-readout, .gain-readout, .fader-readout {
   color: var(--muted);
 }
 
@@ -248,6 +248,8 @@ button:hover { border-color: #5c564b; }
   flex-direction: column;
   gap: 6px;
   min-width: 0;
+  min-height: 0;
+  overflow: auto;
 }
 
 .deck-a { border-top: 3px solid var(--a); }
@@ -277,14 +279,20 @@ button:hover { border-color: #5c564b; }
 .player-frame {
   position: relative;
   width: 100%;
-  min-height: 72px;
-  display: grid;
-  place-items: center;
+  aspect-ratio: 16 / 9;
+  flex: none;
   background: #000;
   overflow: hidden;
 }
 
-.player-note { margin: 0; font-size: 12px; }
+.deck-picture {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.deck-picture[hidden] { display: none; }
 
 .deck-audio {
   position: absolute;

@@ -9,6 +9,7 @@ export function freshDeck() {
     id: "",
     title: "",
     channel: "",
+    thumbnail: "",
     status: "empty",
     error: "",
     playError: "",
@@ -18,6 +19,14 @@ export function freshDeck() {
     eq: { high: 0.5, mid: 0.5, low: 0.5 },
     eqError: "",
   };
+}
+
+function trackThumbnail(track) {
+  const value = track?.thumbnail;
+  if (typeof value !== "string") return "";
+  const url = value.trim();
+  if (!url.startsWith("https://")) return "";
+  return url;
 }
 
 export function freshState() {
@@ -157,6 +166,7 @@ export function createActions(deps) {
     deckState.id = track.id;
     deckState.title = track.title || track.id;
     deckState.channel = track.channel || "";
+    deckState.thumbnail = trackThumbnail(track);
     deckState.error = "";
     deckState.playError = "";
     deckState.cue = 0;
