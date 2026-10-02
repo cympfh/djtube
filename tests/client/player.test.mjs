@@ -860,13 +860,25 @@ test("tempo clamps, nudges, resets, and stays callable from the action table", a
   assert.deepEqual(FLX4_MAP, mapBefore);
 });
 
-test("loading a track resets only that deck tempo to 1.0", async () => {
+test("loading a track resets only that deck tempo to 1.0 and centers its EQ", async () => {
   const { state, audios, actions } = harness();
+  for (const deck of ["A", "B"]) {
+    audios[deck].eqDb = {};
+    audios[deck].setEqGain = (band, db) => {
+      audios[deck].eqDb[band] = db;
+      return true;
+    };
+  }
   state.results = [
     { id: "abcdefghijk", title: "曲", channel: "", duration: 10 },
     { id: "zzzzzzzzzzz", title: "次", channel: "", duration: 12 },
   ];
-  state.decks.A.eq.high = 0.8;
+  actions.setEq("A", "high", 1);
+  actions.setEq("A", "mid", 0);
+  actions.setEq("A", "low", 0.8);
+  actions.setEq("B", "high", 0.2);
+  actions.setEq("B", "mid", 0.9);
+  actions.setEq("B", "low", 0);
   actions.setRate("A", 1.5);
   actions.setRate("B", 0.75);
 
@@ -874,23 +886,58 @@ test("loading a track resets only that deck tempo to 1.0", async () => {
   assert.equal(state.decks.A.id, "abcdefghijk");
   assert.equal(state.decks.A.rate, 1);
   assert.equal(audios.A.playbackRate, 1);
-  assert.equal(state.decks.A.eq.high, 0.8);
+  assert.equal(state.decks.A.eq.high, 0.5);
+  assert.equal(state.decks.A.eq.mid, 0.5);
+  assert.equal(state.decks.A.eq.low, 0.5);
+  assert.equal(audios.A.eqDb.high, 0);
+  assert.equal(audios.A.eqDb.mid, 0);
+  assert.equal(audios.A.eqDb.low, 0);
   assert.equal(state.decks.B.rate, 0.75);
   assert.equal(audios.B.playbackRate, 0.75);
+  assert.equal(state.decks.B.eq.high, 0.2);
+  assert.equal(state.decks.B.eq.mid, 0.9);
+  assert.equal(state.decks.B.eq.low, 0);
+  assert.equal(audios.B.eqDb.high, eqGainDb(0.2));
+  assert.equal(audios.B.eqDb.mid, eqGainDb(0.9));
+  assert.equal(audios.B.eqDb.low, EQ_CUT_DB);
 
   state.selected = 1;
   state.loadTarget = "B";
   actions.setRate("A", 1.25);
+  actions.setEq("A", "high", 0.7);
+  actions.setEq("A", "mid", 0.3);
+  actions.setEq("A", "low", 1);
   actions.setRate("B", 2);
+  actions.setEq("B", "high", 1);
+  actions.setEq("B", "mid", 0);
+  actions.setEq("B", "low", 0.8);
   await actions.onEnter();
   assert.equal(state.decks.B.id, "zzzzzzzzzzz");
   assert.equal(state.decks.B.rate, 1);
   assert.equal(audios.B.playbackRate, 1);
+  assert.equal(state.decks.B.eq.high, 0.5);
+  assert.equal(state.decks.B.eq.mid, 0.5);
+  assert.equal(state.decks.B.eq.low, 0.5);
+  assert.equal(audios.B.eqDb.high, 0);
+  assert.equal(audios.B.eqDb.mid, 0);
+  assert.equal(audios.B.eqDb.low, 0);
   assert.equal(state.decks.A.rate, 1.25);
   assert.equal(audios.A.playbackRate, 1.25);
+  assert.equal(state.decks.A.eq.high, 0.7);
+  assert.equal(state.decks.A.eq.mid, 0.3);
+  assert.equal(state.decks.A.eq.low, 1);
+  assert.equal(audios.A.eqDb.high, eqGainDb(0.7));
+  assert.equal(audios.A.eqDb.mid, eqGainDb(0.3));
+  assert.equal(audios.A.eqDb.low, EQ_BOOST_DB);
 
   actions.setRate("A", 2);
+  actions.setEq("A", "high", 1);
+  actions.setEq("A", "mid", 0.1);
+  actions.setEq("A", "low", 0.9);
   actions.setRate("B", 0.5);
+  actions.setEq("B", "high", 0.2);
+  actions.setEq("B", "mid", 0.4);
+  actions.setEq("B", "low", 0.6);
   const mapBefore = { ...FLX4_MAP };
   const note = messageFromMidi(new Uint8Array([0x90, 20, 40]));
   assert.equal(
@@ -902,9 +949,18 @@ test("loading a track resets only that deck tempo to 1.0", async () => {
   assert.equal(state.decks.A.id, "yyy");
   assert.equal(state.decks.A.rate, 1);
   assert.equal(audios.A.playbackRate, 1);
+  assert.equal(state.decks.A.eq.high, 0.5);
+  assert.equal(state.decks.A.eq.mid, 0.5);
+  assert.equal(state.decks.A.eq.low, 0.5);
+  assert.equal(audios.A.eqDb.high, 0);
+  assert.equal(audios.A.eqDb.mid, 0);
+  assert.equal(audios.A.eqDb.low, 0);
   assert.equal(state.decks.B.rate, 0.5);
   assert.equal(audios.B.playbackRate, 0.5);
-  assert.equal(state.decks.A.eq.high, 0.8);
+  assert.equal(state.decks.B.eq.high, 0.2);
+  assert.equal(state.decks.B.eq.mid, 0.4);
+  assert.equal(state.decks.B.eq.low, 0.6);
+  assert.equal(audios.B.eqDb.low, eqGainDb(0.6));
   assert.deepEqual(FLX4_MAP, mapBefore);
 
   assert.equal(handleKeydown(keyEvent("1", bodyTarget()), actions), true);
@@ -926,6 +982,33 @@ test("loading a track resets only that deck tempo to 1.0", async () => {
   assert.equal(audios.B.playbackRate, 1);
   assert.equal(state.decks.A.rate, 1);
 
+  assert.equal(handleKeydown(keyEvent("r", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.eq.high, 0.6);
+  assert.equal(audios.A.eqDb.high, eqGainDb(0.6));
+  assert.equal(handleKeydown(keyEvent("e", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.eq.high, 0.5);
+  assert.equal(handleKeydown(keyEvent("f", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.eq.mid, 0.6);
+  assert.equal(handleKeydown(keyEvent("d", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.eq.mid, 0.5);
+  assert.equal(handleKeydown(keyEvent("v", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.eq.low, 0.6);
+  assert.equal(handleKeydown(keyEvent("c", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.eq.low, 0.5);
+  assert.equal(handleKeydown(keyEvent("4", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.eq.high, 0.5);
+  assert.equal(state.decks.A.eq.mid, 0.5);
+  assert.equal(state.decks.A.eq.low, 0.5);
+  assert.equal(handleKeydown(keyEvent("o", bodyTarget()), actions), true);
+  assert.equal(state.decks.B.eq.high, 0.3);
+  assert.equal(handleKeydown(keyEvent("i", bodyTarget()), actions), true);
+  assert.equal(state.decks.B.eq.high, 0.2);
+  assert.equal(handleKeydown(keyEvent("7", bodyTarget()), actions), true);
+  assert.equal(state.decks.B.eq.high, 0.5);
+  assert.equal(state.decks.B.eq.mid, 0.5);
+  assert.equal(state.decks.B.eq.low, 0.5);
+  assert.equal(state.decks.A.eq.low, 0.5);
+
   actions.nudgeRate("A", -4);
   assert.equal(state.decks.A.rate, 0.5);
   assert.equal(audios.A.playbackRate, 0.5);
@@ -944,12 +1027,23 @@ test("loading a track resets only that deck tempo to 1.0", async () => {
     },
   };
   deck.playbackRate = 1.75;
-  deck.setEqGain = () => true;
+  const eqGains = [];
+  deck.setEqGain = (band, db) => {
+    eqGains.push([band, db]);
+    return true;
+  };
   elementRates.length = 0;
   const played = freshState();
+  played.decks.A.eq = { high: 1, mid: 0, low: 0.2 };
   played.decks.B.rate = 0.5;
+  played.decks.B.eq = { high: 0.1, mid: 0.2, low: 0.3 };
   const other = fakeAudio();
   other.playbackRate = 0.5;
+  other.eqDb = { high: eqGainDb(0.1), mid: eqGainDb(0.2), low: eqGainDb(0.3) };
+  other.setEqGain = (band, db) => {
+    other.eqDb[band] = db;
+    return true;
+  };
   const deckActions = createActions({
     state: played,
     audios: { A: deck, B: other },
@@ -961,8 +1055,20 @@ test("loading a track resets only that deck tempo to 1.0", async () => {
   assert.equal(elementRates.at(-1), 1);
   assert.ok(elementRates.every((value) => value === 1));
   assert.equal(played.decks.A.rate, 1);
+  assert.equal(played.decks.A.eq.high, 0.5);
+  assert.equal(played.decks.A.eq.mid, 0.5);
+  assert.equal(played.decks.A.eq.low, 0.5);
+  assert.deepEqual(eqGains.slice(-3), [
+    ["high", 0],
+    ["mid", 0],
+    ["low", 0],
+  ]);
   assert.equal(played.decks.B.rate, 0.5);
+  assert.equal(played.decks.B.eq.high, 0.1);
+  assert.equal(played.decks.B.eq.mid, 0.2);
+  assert.equal(played.decks.B.eq.low, 0.3);
   assert.equal(other.playbackRate, 0.5);
+  assert.equal(other.eqDb.high, eqGainDb(0.1));
 });
 
 test("eq gain mapping drives the filter and the shared actions", () => {
@@ -1084,11 +1190,32 @@ test("eq gain mapping drives the filter and the shared actions", () => {
 
   state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 10 }];
   actions.setEq("A", "high", 1);
+  actions.setEq("A", "mid", 0);
+  actions.setEq("A", "low", 0.2);
+  actions.setEq("B", "high", 0.7);
+  actions.setEq("B", "mid", 0.1);
+  actions.setEq("B", "low", 0.9);
   return actions.loadSelected("A").then(() => {
-    assert.equal(state.decks.A.eq.high, 1);
-    assert.equal(audios.A.eqDb.high, EQ_BOOST_DB);
+    assert.equal(state.decks.A.eq.high, 0.5);
+    assert.equal(state.decks.A.eq.mid, 0.5);
+    assert.equal(state.decks.A.eq.low, 0.5);
+    assert.equal(audios.A.eqDb.high, 0);
+    assert.equal(audios.A.eqDb.mid, 0);
+    assert.equal(audios.A.eqDb.low, 0);
+    assert.equal(state.decks.B.eq.high, 0.7);
+    assert.equal(state.decks.B.eq.mid, 0.1);
+    assert.equal(state.decks.B.eq.low, 0.9);
+    assert.equal(audios.B.eqDb.high, eqGainDb(0.7));
     assert.equal(state.decks.A.rate, 1);
     assert.equal(audios.A.playbackRate, 1);
+    assert.equal(handleKeydown(keyEvent("r", bodyTarget()), actions), true);
+    assert.equal(state.decks.A.eq.high, 0.6);
+    assert.equal(audios.A.eqDb.high, eqGainDb(0.6));
+    assert.equal(handleKeydown(keyEvent("u", bodyTarget()), actions), true);
+    assert.equal(state.decks.B.eq.mid, 0.2);
+    assert.equal(handleKeydown(keyEvent("4", bodyTarget()), actions), true);
+    assert.equal(state.decks.A.eq.high, 0.5);
+    assert.equal(state.decks.B.eq.mid, 0.2);
   });
 });
 
