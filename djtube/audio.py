@@ -155,6 +155,29 @@ def forget_audio(video_id: str) -> None:
         _CACHE.pop(video_id, None)
 
 
+_LOG_HANDLER = "djtube-audio"
+
+
+def _configure_audio_log() -> None:
+    if any(getattr(handler, "name", None) == _LOG_HANDLER for handler in log.handlers):
+        return
+    handler = logging.StreamHandler()
+    handler.name = _LOG_HANDLER
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+    log.propagate = False
+
+
+def _emit(level: int, video_id: str, path: str, outcome: str, text: str = "") -> None:
+    video = video_id if is_video_id(video_id) else "-"
+    line = f"video={video} path={path} {outcome}"
+    if text:
+        line = f"{line} {text}"
+    log.log(level, line)
+
+
 def _extract(video_id: str) -> dict:
     import yt_dlp
 
@@ -171,9 +194,10 @@ def _extract(video_id: str) -> dict:
         with yt_dlp.YoutubeDL(options) as ydl:
             info = ydl.extract_info(watch_url(video_id), download=False)
     except Exception as exc:
-        log.warning("yt-dlp audio resolve failed: %s", type(exc).__name__)
+        _emit(logging.WARNING, video_id, "ytdlp", "failure", str(exc))
         raise AudioError("音源を取得できませんでした") from None
     if not isinstance(info, dict):
+        _emit(logging.WARNING, video_id, "ytdlp", "failure")
         raise AudioError("音源を取得できませんでした")
     return info
 
@@ -183,18 +207,31 @@ def resolve_audio(video_id: str, *, extract=_extract, now: float | None = None) 
         raise AudioError("音源がありません", status=404)
     cached = _recall(video_id, now)
     if cached is not None:
+        _emit(logging.INFO, video_id, "cache", "success")
         return cached
-    info = extract(video_id)
-    fmt = select_audio_format(info)
+    path = "ytdlp" if extract is _extract else "other"
+    try:
+        info = extract(video_id)
+    except AudioError:
+        if path != "ytdlp":
+            _emit(logging.WARNING, video_id, path, "failure")
+        raise
+    fmt = select_audio_format(info) if isinstance(info, dict) else None
     if fmt is None:
+        _emit(logging.WARNING, video_id, path, "failure")
         raise AudioError("音源を取得できませんでした")
     content_type = content_type_for(fmt)
     if content_type is None or not host_allowed(str(fmt.get("url"))):
+        _emit(logging.WARNING, video_id, path, "failure")
         raise AudioError("音源を取得できませんでした")
     headers = _header_subset(fmt.get("http_headers") or info.get("http_headers"))
     source = AudioSource(url=str(fmt["url"]), content_type=content_type, headers=headers)
     _remember(video_id, source, now)
+    _emit(logging.INFO, video_id, path, "success")
     return source
+
+
+_configure_audio_log()
 
 
 class Upstream:
@@ -234,7 +271,7 @@ def _send(client: httpx.Client, url: str, headers: dict[str, str]) -> httpx.Resp
     return client.send(request, stream=True)
 
 
-def open_upstream(source: AudioSource, range_header: str | None) -> Upstream:
+def open_upstream(source: AudioSource, range_header: str | None, video_id: str) -> Upstream:
     headers = dict(source.headers)
     if range_header:
         headers["Range"] = range_header
@@ -245,22 +282,26 @@ def open_upstream(source: AudioSource, range_header: str | None) -> Upstream:
             location = response.headers.get("location") or ""
             response.close()
             if not host_allowed(location):
+                status_code = response.status_code
                 client.close()
+                _emit(logging.WARNING, video_id, "upstream", "failure", str(status_code))
                 raise AudioError("音源を取得できませんでした")
             response = _send(client, location, headers)
-        if response.status_code in {403, 410}:
+        status_code = response.status_code
+        if status_code not in {200, 206}:
             response.close()
             client.close()
-            raise AudioExpired("音源を取得できませんでした")
-        if response.status_code not in {200, 206}:
-            response.close()
-            client.close()
+            _emit(logging.WARNING, video_id, "upstream", "failure", str(status_code))
+            if status_code in {403, 410}:
+                raise AudioExpired("音源を取得できませんでした")
             raise AudioError("音源を取得できませんでした")
+        _emit(logging.INFO, video_id, "upstream", "success", str(status_code))
         return Upstream(client, response, source.content_type)
     except AudioError:
         raise
-    except httpx.HTTPError:
+    except httpx.HTTPError as exc:
         client.close()
+        _emit(logging.WARNING, video_id, "upstream", "failure", str(exc))
         raise AudioError("音源を取得できませんでした") from None
 
 
@@ -271,7 +312,7 @@ def open_audio(video_id: str, range_header: str | None) -> Upstream:
     for _attempt in range(2):
         source = resolve_audio(video_id)
         try:
-            return open_upstream(source, range_header)
+            return open_upstream(source, range_header, video_id)
         except AudioExpired as exc:
             forget_audio(video_id)
             last_error = exc

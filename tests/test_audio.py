@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import logging
+import sys
+import types
+from pathlib import Path
+
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -12,6 +18,7 @@ from djtube.audio import (
     content_type_for,
     host_allowed,
     open_audio,
+    open_upstream,
     resolve_audio,
     select_audio_format,
 )
@@ -96,8 +103,9 @@ def test_open_audio_retries_when_the_media_url_expires(monkeypatch):
         calls["n"] += 1
         return AudioSource(url=f"{MEDIA}&n={calls['n']}", content_type="audio/mp4", headers={})
 
-    def upstream(source, range_header):
+    def upstream(source, range_header, video_id):
         assert range_header == "bytes=0-1"
+        assert video_id == VIDEO_ID
         if calls["n"] == 1:
             raise AudioExpired("音源を取得できませんでした")
         return source.url
@@ -142,6 +150,195 @@ def test_audio_route_proxies_bytes_and_hides_the_upstream(monkeypatch):
     missing = client.get("/api/audio/not-an-id")
     assert missing.status_code == 404
     assert "googlevideo" not in missing.text
+
+
+SIGNED = MEDIA + "&sig=supersecret&lsig=aaa"
+YTDLP_TEXT = (
+    "ERROR: [youtube] abcdefghijk: Sign in to confirm you're not a bot. "
+    "HTTP Error 403: Forbidden "
+    f"{SIGNED} "
+    "Cookie: VISITOR_INFO1_LIVE=secretcookie "
+    "AIzaSyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+)
+
+
+class _Resp:
+    def __init__(self, status_code, headers=None):
+        self.status_code = status_code
+        self.headers = headers or {}
+
+    def close(self):
+        return None
+
+
+@pytest.fixture
+def audio_logs():
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = Capture()
+    handler.setLevel(logging.INFO)
+    logger = logging.getLogger("djtube.audio")
+    logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+
+
+def _text(records) -> str:
+    return "\n".join(records)
+
+
+def _install_ytdlp(monkeypatch, extract_info):
+    class FakeYDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def extract_info(self, url, download=False):
+            return extract_info(self, url, download)
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeYDL))
+
+
+def test_playback_error_text_stays_on_screen():
+    root = Path(__file__).resolve().parents[1]
+    actions = (root / "djtube" / "static" / "actions.js").read_text(encoding="utf-8")
+    app = (root / "djtube" / "static" / "app.js").read_text(encoding="utf-8")
+    assert 'SOURCE_UNAVAILABLE = "音源を再生できませんでした"' in actions
+    assert "deckState.error = SOURCE_UNAVAILABLE" in app
+    assert "play.disabled = sourcePlaybackBlocked(deckState)" in app
+
+
+def test_audio_source_does_not_rewrite_log_text():
+    source = (Path(__file__).resolve().parents[1] / "djtube" / "audio.py").read_text(encoding="utf-8")
+    assert "_signal_labels" not in source
+    assert "_redact" not in source
+    assert "_YtdlpCapture" not in source
+    assert "Bot判定" not in source
+    assert "同意画面" not in source
+
+
+def test_audio_logger_reaches_stderr():
+    logger = logging.getLogger("djtube.audio")
+    assert logger.level <= logging.INFO
+    assert logger.propagate is False
+    assert any(handler.name == "djtube-audio" for handler in logger.handlers)
+
+
+def test_ytdlp_failure_logs_the_message_as_it_is(monkeypatch, audio_logs):
+    clear_audio_cache()
+
+    def extract_info(ydl, url, download):
+        assert download is False
+        assert url == watch_url(VIDEO_ID)
+        assert ydl.options["quiet"] is True
+        assert ydl.options["skip_download"] is True
+        assert "logger" not in ydl.options
+        raise RuntimeError(YTDLP_TEXT)
+
+    _install_ytdlp(monkeypatch, extract_info)
+    with pytest.raises(AudioError) as caught:
+        resolve_audio(VIDEO_ID)
+    assert str(caught.value) == "音源を取得できませんでした"
+    assert caught.value.status == 502
+    text = _text(audio_logs)
+    assert f"video={VIDEO_ID} path=ytdlp failure {YTDLP_TEXT}" in text
+    assert "Bot判定" not in text
+    assert "同意画面" not in text
+    assert "signals=" not in text
+
+
+def test_ytdlp_success_logs_path_and_cache(monkeypatch, audio_logs):
+    clear_audio_cache()
+    calls = {"n": 0}
+
+    def extract_info(ydl, url, download):
+        calls["n"] += 1
+        assert "logger" not in ydl.options
+        return {"formats": [_fmt(format_id="140", url=SIGNED)], "http_headers": {"User-Agent": "djtube-test"}}
+
+    _install_ytdlp(monkeypatch, extract_info)
+    source = resolve_audio(VIDEO_ID)
+    assert source.url == SIGNED
+    assert source.headers["User-Agent"] == "djtube-test"
+    again = resolve_audio(VIDEO_ID)
+    assert again.url == source.url
+    assert calls["n"] == 1
+    text = _text(audio_logs)
+    assert f"video={VIDEO_ID} path=ytdlp success" in text
+    assert f"video={VIDEO_ID} path=cache success" in text
+
+
+def test_open_audio_logs_upstream_status(monkeypatch, audio_logs):
+    clear_audio_cache()
+    state = {"n": 0}
+
+    def extract_info(ydl, url, download):
+        state["n"] += 1
+        return {"formats": [_fmt(url=f"{SIGNED}&n={state['n']}", format_id="140")]}
+
+    _install_ytdlp(monkeypatch, extract_info)
+
+    def send(client, url, headers):
+        if "n=1" in url:
+            return _Resp(403)
+        return _Resp(206)
+
+    monkeypatch.setattr("djtube.audio._send", send)
+    opened = open_audio(VIDEO_ID, None)
+    opened.close()
+    assert state["n"] == 2
+    text = _text(audio_logs)
+    assert f"video={VIDEO_ID} path=ytdlp success" in text
+    assert f"video={VIDEO_ID} path=upstream failure 403" in text
+    assert f"video={VIDEO_ID} path=upstream success 206" in text
+
+
+def test_upstream_logs_redirect_and_transport_text(monkeypatch, audio_logs):
+    source = AudioSource(url=SIGNED, content_type="audio/mp4", headers={})
+
+    def reject(client, url, headers):
+        return _Resp(302, {"location": "https://evil.example/secret-audio?sig=supersecret"})
+
+    monkeypatch.setattr("djtube.audio._send", reject)
+    with pytest.raises(AudioError) as rejected:
+        open_upstream(source, None, VIDEO_ID)
+    assert str(rejected.value) == "音源を取得できませんでした"
+    assert f"video={VIDEO_ID} path=upstream failure 302" in _text(audio_logs)
+
+    audio_logs.clear()
+
+    def follow(client, url, headers):
+        if url == SIGNED:
+            return _Resp(302, {"location": SIGNED + "&redirect=1"})
+        return _Resp(206)
+
+    monkeypatch.setattr("djtube.audio._send", follow)
+    opened = open_upstream(source, "bytes=0-1", VIDEO_ID)
+    opened.close()
+    assert f"video={VIDEO_ID} path=upstream success 206" in _text(audio_logs)
+
+    audio_logs.clear()
+
+    def boom(client, url, headers):
+        raise httpx.TransportError(f"failed {url}")
+
+    monkeypatch.setattr("djtube.audio._send", boom)
+    with pytest.raises(AudioError) as failed:
+        open_upstream(source, None, VIDEO_ID)
+    assert str(failed.value) == "音源を取得できませんでした"
+    assert f"failed {SIGNED}" in _text(audio_logs)
+    assert "path=upstream failure" in _text(audio_logs)
 
 
 def test_audio_route_reports_resolve_failure(monkeypatch):

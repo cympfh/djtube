@@ -133,6 +133,10 @@ Web MIDI は安全なページで、「MIDI を開く」を押したときだけ
 - パッド、ループ、BEAT SYNC、エフェクト、SMART CFX、SMART FADER
 - BROWSE の押し込みと Shift+BROWSE
 
+## 音源のログ
+
+再生できないときは、サーバの標準エラーに出る `djtube.audio` を見る。
+
 ## 開発
 
 ```bash

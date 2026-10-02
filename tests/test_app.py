@@ -119,6 +119,12 @@ def test_readme_and_docker_contract():
     assert "AIza" not in agent
     assert "DJTUBE_PLAYLISTS" in agent
     assert "djtube-data" in agent
+    assert "djtube.audio" in agent
+    assert "Bot判定" not in agent
+    assert "同意画面" not in agent
+    assert "djtube.audio" not in readme
+    assert "音源のログ" not in readme
+    assert "Bot判定" not in readme
     assert "ボリュームを付けません" in agent
     assert "未実装" in agent
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
