@@ -230,6 +230,21 @@ export function createActions(deps) {
     scheduleRender();
   }
 
+  function jog(deck, delta) {
+    const deckState = deckOf(state, deck);
+    const audio = audios[deck];
+    if (!deckState || deckState.status !== "ready" || !audio) return;
+    const step = Number(delta);
+    if (!Number.isFinite(step) || step === 0) return;
+    const current = Number(audio.currentTime) || 0;
+    let next = current + step;
+    if (next < 0) next = 0;
+    const duration = Number(audio.duration);
+    if (Number.isFinite(duration) && duration > 0 && next > duration) next = duration;
+    audio.currentTime = next;
+    scheduleRender();
+  }
+
   return {
     focusSearch,
     blurSearch,
@@ -244,6 +259,7 @@ export function createActions(deps) {
     togglePlay,
     cue,
     setCue,
+    jog,
     nudgeCrossfader,
     setCrossfader,
     setCrossfaderFromController,
