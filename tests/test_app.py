@@ -109,6 +109,23 @@ def test_search_route_does_not_echo_key(monkeypatch):
     assert response.json()["tracks"][0]["id"] == VIDEO_ID
 
 
+def test_playlist_rows_load_onto_a_deck_and_remove_is_red():
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    body = js[js.index("function renderPlaylists()") : js.index("function renderAddNote()")]
+    assert "actions.loadPlaylistTrack(deck)" in body
+    assert "`${deck}へ`" in body
+    assert 'remove.className = "is-remove"' in body
+    assert 'remove.textContent = "削除"' in body
+    assert "actions.removePlaylistTrack()" in body
+    assert "actions.movePlaylistTrack" not in body
+    assert '"上"' not in body
+    assert '"下"' not in body
+    rule = css.split(".result-actions button.is-remove", 1)[1].split("}", 1)[0]
+    assert "#ff4d3a" in rule
+    assert "background:" in rule
+
+
 def test_readme_and_docker_contract():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "https://s.cympfh.cc/djtube/" in readme
@@ -119,6 +136,8 @@ def test_readme_and_docker_contract():
         assert token in agent
     assert "プレイリスト" in readme
     assert "Shift+A" in readme
+    assert "各曲の「Aへ」「Bへ」で、そのデッキに載せる" in readme
+    assert "「削除」で、その曲だけ外れる" in readme
     assert "DJTUBE_PLAYLISTS" not in readme
     assert "data/playlists.json" not in readme
     assert "AIza" not in readme
