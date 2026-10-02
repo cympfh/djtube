@@ -41,6 +41,7 @@ export function freshState() {
     searchError: "",
     source: "",
     musicOnly: true,
+    library: "search",
     crossfader: 0.5,
     ...freshPlaylistState(),
     decks: { A: freshDeck(), B: freshDeck() },
@@ -99,7 +100,7 @@ export function createActions(deps) {
     deps.blurSearchElement?.();
   }
 
-  function moveSelection(delta) {
+  function moveSearchSelection(delta) {
     if (!state.results.length) return;
     const count = state.results.length;
     state.selected = (state.selected + delta + count) % count;
@@ -390,6 +391,21 @@ export function createActions(deps) {
     scheduleRender();
   }
 
+  const playlistActions = createPlaylistActions({ deps, state, scheduleRender, loadTrack });
+
+  function moveSelection(delta) {
+    if (state.library === "playlist") {
+      playlistActions.movePlaylistSelection(delta);
+      return;
+    }
+    moveSearchSelection(delta);
+  }
+
+  function loadOpenSelection(deck) {
+    if (state.library === "playlist") return playlistActions.loadPlaylistTrack(deck);
+    return loadSelected(deck);
+  }
+
   return {
     focusSearch,
     blurSearch,
@@ -399,6 +415,7 @@ export function createActions(deps) {
     onEnter,
     moveSelection,
     loadSelected,
+    loadOpenSelection,
     loadTrack,
     togglePlay,
     cue,
@@ -418,6 +435,6 @@ export function createActions(deps) {
     setCrossfader,
     setCrossfaderFromController,
     applyGains,
-    ...createPlaylistActions({ deps, state, scheduleRender, loadTrack }),
+    ...playlistActions,
   };
 }

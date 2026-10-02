@@ -505,6 +505,7 @@ function renderAddNote() {
 }
 
 function showLibrary(name) {
+  state.library = name === "playlist" ? "playlist" : "search";
   const search = name !== "playlist";
   document.getElementById("search-panel").hidden = !search;
   document.getElementById("playlist-panel").hidden = search;
@@ -586,7 +587,7 @@ for (const deck of ["A", "B"]) {
   });
 }
 
-window.addEventListener("keydown", (event) => handleKeydown(event, actions), true);
+window.addEventListener("keydown", (event) => handleKeydown(event, actions, state.library), true);
 
 function showMidiStatus(status) {
   const node = document.getElementById("midi-status");

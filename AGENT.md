@@ -126,11 +126,11 @@ Web MIDI は安全なページで、「MIDI を開く」を押したときだけ
 
 - PLAY/PAUSE（ch 0/1、ノート 11）: 再生 / 一時停止
 - CUE（ch 0/1、ノート 12）: キュー
-- LOAD（ch 6、ノート 70 / 71）: 選択中の曲をデッキ A / B へ
+- LOAD（ch 6、ノート 70 / 71）: 開いているタブで選んでいる曲をデッキ A / B へ。検索なら検索結果、プレイリストならその曲。`loadOpenSelection` がタブを見て、プレイリストのときは `loadPlaylistTrack` と同じ載せ方
 - クロスフェーダー MSB（ch 6、CC 31）: クロスフェーダー。値は 0–127
 - ジョグ側面・プラッター（ch 0/1、CC 33 / 34 / 35）: 1 目盛り約 0.05 秒
 - Shift+プラッター（ch 0/1、CC 41）: 1 目盛り約 0.5 秒
-- BROWSE 回転（ch 6、CC 64）: 検索結果を上下
+- BROWSE 回転（ch 6、CC 64）: 開いているタブの曲を上下。右回りが下（J）、左回りが上（K）。検索もプレイリストも同じ。`moveSelection` がタブを見て、プレイリストのときは `movePlaylistSelection` と同じ移動をする
 - テンポスライダー MSB（ch 0/1、CC 0）: そのデッキの再生速度
 - EQ HI / MID / LOW MSB（ch 0/1、CC 7 / 11 / 15）: そのデッキの HIGH / MID / LOW
 
