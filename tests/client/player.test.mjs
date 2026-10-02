@@ -14,7 +14,7 @@ import {
 import { formatTime } from "../../djtube/static/format.js";
 import { EQ_BOOST_DB, EQ_CUT_DB, EQ_STEP, connectEqGraph, eqGainDb, eqUnitFromMidi, formatEqDb } from "../../djtube/static/eq.js";
 import { deckGains } from "../../djtube/static/gains.js";
-import { BINDINGS, handleKeydown, legendGroups } from "../../djtube/static/keys.js";
+import { BINDINGS, VOLUME_STEP, handleKeydown, legendGroups } from "../../djtube/static/keys.js";
 import { RATE_STEP, clampRate, formatRate, rateFromMidi } from "../../djtube/static/rate.js";
 import { cookiePanelOpen, cookiePanelShown, nextChosenOpen } from "../../djtube/static/cookies.js";
 import { createDeckPlayer } from "../../djtube/static/player.js";
@@ -165,6 +165,8 @@ test("FLX4 map sends notes and CCs to deck actions", async () => {
     "cc:1:7": ["setEqFromController", ["B", "high"]],
     "cc:1:11": ["setEqFromController", ["B", "mid"]],
     "cc:1:15": ["setEqFromController", ["B", "low"]],
+    "cc:0:19": ["setVolumeFromController", ["A"]],
+    "cc:1:19": ["setVolumeFromController", ["B"]],
   };
   for (const [key, [action, args]] of Object.entries(expected)) {
     assert.equal(FLX4_MAP[key]?.action, action, key);
@@ -178,7 +180,26 @@ test("FLX4 map sends notes and CCs to deck actions", async () => {
   assert.equal(FLX4_MAP["cc:6:64"].relative, "signed7");
   assert.equal(FLX4_MAP["cc:0:0"].passValue, true);
   assert.equal(FLX4_MAP["cc:1:15"].passValue, true);
-  for (const key of ["note:0:14", "note:0:72", "note:0:54", "cc:0:19", "cc:6:63", "cc:0:4", "cc:0:32", "cc:0:39", "cc:0:43", "cc:0:47", "cc:1:32"]) {
+  assert.equal(FLX4_MAP["cc:0:19"].passValue, true);
+  assert.equal(FLX4_MAP["cc:1:19"].passValue, true);
+  for (const key of [
+    "note:0:14",
+    "note:0:72",
+    "note:0:54",
+    "note:0:102",
+    "note:0:82",
+    "note:1:102",
+    "note:1:82",
+    "cc:0:51",
+    "cc:1:51",
+    "cc:6:63",
+    "cc:0:4",
+    "cc:0:32",
+    "cc:0:39",
+    "cc:0:43",
+    "cc:0:47",
+    "cc:1:32",
+  ]) {
     assert.equal(FLX4_MAP[key], undefined, key);
   }
 
@@ -257,6 +278,23 @@ test("FLX4 map sends notes and CCs to deck actions", async () => {
   assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb0, 0x27, 0])), actions), false);
   assert.equal(state.crossfader, 0);
   assert.equal(state.decks.A.cue, cue);
+
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb0, 0x13, 0x00])), actions), true);
+  assert.equal(state.decks.A.volume, 0);
+  assert.equal(audios.A.volume, 0);
+  assert.equal(state.decks.B.volume, 1);
+  assert.equal(state.crossfader, 0);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb0, 0x33, 0x7f])), actions), false);
+  assert.equal(state.decks.A.volume, 0);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb1, 0x13, 0x7f])), actions), true);
+  assert.equal(state.decks.B.volume, 1);
+  assert.equal(state.decks.A.volume, 0);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb1, 0x33, 0x00])), actions), false);
+  assert.equal(state.decks.B.volume, 1);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0x90, 0x66, 0x7f])), actions), false);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0x90, 0x52, 0x7f])), actions), false);
+  assert.equal(audios.A.paused, false);
+  assert.equal(state.decks.A.volume, 0);
 
   assert.match(controllerStatusText(), /未接続/);
   assert.match(controllerStatusText({ state: "insecure" }), /HTTPS/);
@@ -796,6 +834,126 @@ test("+ seeks deck B backward about 10 seconds from the commanded position", () 
   });
 });
 
+test("deck volume is independent of the crossfader", async () => {
+  assert.equal(VOLUME_STEP, 0.05);
+  const labels = legendGroups().find((group) => group.name === "音量").items.map((item) => item.label);
+  assert.ok(labels.includes("デッキ A の音量を下げる"));
+  assert.ok(labels.includes("デッキ A の音量を上げる"));
+  assert.ok(labels.includes("デッキ B の音量を下げる"));
+  assert.ok(labels.includes("デッキ B の音量を上げる"));
+
+  const { state, audios, actions } = harness();
+  assert.equal(state.decks.A.volume, 1);
+  assert.equal(state.decks.B.volume, 1);
+  actions.setCrossfader(state.crossfader);
+  const center = deckGains(0.5);
+  assert.ok(Math.abs(audios.A.volume - center.a) < 0.0001);
+  assert.ok(Math.abs(audios.B.volume - center.b) < 0.0001);
+
+  actions.setVolume("A", 1);
+  actions.setVolume("B", 1);
+  actions.setCrossfader(0.5);
+  assert.ok(audios.A.volume > 0.7);
+  assert.ok(audios.B.volume > 0.7);
+  assert.equal(state.crossfader, 0.5);
+
+  actions.setVolume("A", 0);
+  assert.equal(state.decks.A.volume, 0);
+  assert.equal(audios.A.volume, 0);
+  assert.ok(audios.B.volume > 0.7);
+  assert.equal(state.decks.B.volume, 1);
+  assert.equal(state.crossfader, 0.5);
+  actions.setCrossfader(0);
+  assert.equal(audios.A.volume, 0);
+  assert.equal(state.decks.A.volume, 0);
+  assert.ok(audios.B.volume < 0.0001);
+  actions.setCrossfader(1);
+  assert.equal(audios.A.volume, 0);
+  assert.ok(Math.abs(audios.B.volume - 1) < 0.0001);
+  assert.equal(state.decks.B.volume, 1);
+
+  actions.setVolume("B", 0);
+  actions.setCrossfader(0);
+  assert.equal(audios.B.volume, 0);
+  assert.equal(state.decks.A.volume, 0);
+  actions.setVolume("A", 1);
+  assert.ok(Math.abs(audios.A.volume - 1) < 0.0001);
+  assert.equal(audios.B.volume, 0);
+  assert.equal(state.crossfader, 0);
+
+  actions.setVolume("A", 1.4);
+  assert.equal(state.decks.A.volume, 1);
+  actions.setVolume("A", -0.2);
+  assert.equal(state.decks.A.volume, 0);
+  actions.setVolume("C", 0.5);
+  actions.setVolume("A", Number.NaN);
+  assert.equal(state.decks.A.volume, 0);
+  actions.resetVolume("A");
+  assert.equal(state.decks.A.volume, 1);
+  actions.nudgeVolume("A", -VOLUME_STEP);
+  assert.equal(state.decks.A.volume, 0.95);
+  actions.nudgeVolume("B", VOLUME_STEP);
+  assert.equal(state.decks.B.volume, 0.05);
+  actions.nudgeVolume("A", 0);
+  assert.equal(state.decks.A.volume, 0.95);
+  assert.equal(state.decks.A.rate, 1);
+  assert.equal(state.crossfader, 0);
+
+  actions.setVolumeFromController("A", 127);
+  assert.equal(state.decks.A.volume, 1);
+  actions.setVolumeFromController("B", 0);
+  assert.equal(state.decks.B.volume, 0);
+  actions.setVolumeFromController("A", 64);
+  assert.equal(state.decks.A.volume, 64 / 127);
+  actions.setVolumeFromController("A", Number.NaN);
+  assert.equal(state.decks.A.volume, 64 / 127);
+  assert.equal(state.decks.B.volume, 0);
+
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 10 }];
+  actions.setVolume("A", 0.25);
+  actions.setVolume("B", 0.5);
+  actions.setRate("A", 1.4);
+  actions.setRate("B", 0.8);
+  const fader = state.crossfader;
+  await actions.loadSelected("A");
+  assert.equal(state.decks.A.volume, 1);
+  assert.equal(state.decks.A.rate, 1);
+  assert.equal(audios.A.playbackRate, 1);
+  assert.equal(state.decks.B.volume, 0.5);
+  assert.equal(state.decks.B.rate, 0.8);
+  assert.equal(audios.B.playbackRate, 0.8);
+  assert.equal(state.crossfader, fader);
+
+  actions.setVolume("A", 0.4);
+  assert.equal(handleKeydown(keyEvent("-", searchTarget()), actions), false);
+  assert.equal(state.decks.A.volume, 0.4);
+  assert.equal(handleKeydown(keyEvent("-", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.volume, 0.35);
+  assert.equal(handleKeydown(keyEvent("=", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.volume, 0.4);
+  assert.equal(handleKeydown(keyEvent("=", bodyTarget(), { shiftKey: true }), actions), true);
+  assert.equal(state.decks.A.volume, 0.45);
+  assert.equal(state.decks.B.volume, 0.5);
+  actions.setCrossfader(0.5);
+  const beforeFader = state.crossfader;
+  assert.equal(handleKeydown(keyEvent(",", bodyTarget()), actions), true);
+  assert.ok(state.crossfader < beforeFader);
+  assert.equal(state.decks.A.volume, 0.45);
+  assert.equal(state.decks.B.volume, 0.5);
+  assert.equal(handleKeydown(keyEvent("<", bodyTarget(), { shiftKey: true }), actions), true);
+  assert.equal(state.decks.B.volume, 0.45);
+  assert.equal(state.decks.A.volume, 0.45);
+  assert.equal(handleKeydown(keyEvent(">", bodyTarget(), { shiftKey: true }), actions), true);
+  assert.equal(state.decks.B.volume, 0.5);
+  assert.equal(handleKeydown(keyEvent("+", bodyTarget(), { shiftKey: true }), actions), true);
+  assert.equal(state.decks.A.volume, 0.45);
+  assert.equal(state.decks.B.volume, 0.5);
+  actions.setRate("B", 1.2);
+  assert.equal(handleKeydown(keyEvent("9", bodyTarget()), actions), true);
+  assert.equal(state.decks.B.rate, 1.21);
+  assert.equal(state.decks.B.volume, 0.5);
+});
+
 test("tempo clamps, nudges, resets, and stays callable from the action table", async () => {
   assert.equal(clampRate(Number.NaN), 1);
   assert.equal(clampRate(4), 2);
@@ -933,11 +1091,16 @@ test("loading a track resets only that deck tempo to 1.0 and centers its EQ", as
   actions.setEq("B", "low", 0);
   actions.setRate("A", 1.5);
   actions.setRate("B", 0.75);
+  actions.setVolume("A", 0.2);
+  actions.setVolume("B", 0.4);
 
   await actions.loadSelected("A");
   assert.equal(state.decks.A.id, "abcdefghijk");
   assert.equal(state.decks.A.rate, 1);
   assert.equal(audios.A.playbackRate, 1);
+  assert.equal(state.decks.A.volume, 1);
+  assert.equal(state.decks.B.volume, 0.4);
+  assert.equal(state.decks.B.rate, 0.75);
   assert.equal(state.decks.A.eq.high, 0.5);
   assert.equal(state.decks.A.eq.mid, 0.5);
   assert.equal(state.decks.A.eq.low, 0.5);
@@ -955,6 +1118,8 @@ test("loading a track resets only that deck tempo to 1.0 and centers its EQ", as
 
   state.selected = 1;
   actions.setRate("A", 1.25);
+  actions.setVolume("A", 0.3);
+  actions.setVolume("B", 0.15);
   actions.setEq("A", "high", 0.7);
   actions.setEq("A", "mid", 0.3);
   actions.setEq("A", "low", 1);
@@ -966,6 +1131,9 @@ test("loading a track resets only that deck tempo to 1.0 and centers its EQ", as
   assert.equal(state.decks.B.id, "zzzzzzzzzzz");
   assert.equal(state.decks.B.rate, 1);
   assert.equal(audios.B.playbackRate, 1);
+  assert.equal(state.decks.B.volume, 1);
+  assert.equal(state.decks.A.volume, 0.3);
+  assert.equal(state.decks.A.rate, 1.25);
   assert.equal(state.decks.B.eq.high, 0.5);
   assert.equal(state.decks.B.eq.mid, 0.5);
   assert.equal(state.decks.B.eq.low, 0.5);

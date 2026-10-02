@@ -151,7 +151,15 @@
                 </div>
                 <p class="eq-error" id="eq-error-A" hidden></p>
               </div>
-              <p class="gain-readout">音量 <span id="gain-A">71</span>%</p>
+              <div class="level">
+                <div class="level-head">
+                  <label for="volume-A">音量</label>
+                  <span class="level-readout" id="volume-readout-A">100%</span>
+                  <button type="button" id="volume-reset-A">100% に戻す</button>
+                </div>
+                <input id="volume-A" type="range" min="0" max="100" step="1" value="100" aria-label="デッキ A の音量" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100" aria-valuetext="100%" />
+              </div>
+              <p class="gain-readout">フェード <span id="gain-A">71</span>%</p>
             </article>
 
             <article class="deck deck-b" id="deck-B" data-deck="B">
@@ -204,7 +212,15 @@
                 </div>
                 <p class="eq-error" id="eq-error-B" hidden></p>
               </div>
-              <p class="gain-readout">音量 <span id="gain-B">71</span>%</p>
+              <div class="level">
+                <div class="level-head">
+                  <label for="volume-B">音量</label>
+                  <span class="level-readout" id="volume-readout-B">100%</span>
+                  <button type="button" id="volume-reset-B">100% に戻す</button>
+                </div>
+                <input id="volume-B" type="range" min="0" max="100" step="1" value="100" aria-label="デッキ B の音量" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100" aria-valuetext="100%" />
+              </div>
+              <p class="gain-readout">フェード <span id="gain-B">71</span>%</p>
             </article>
           </div>
 

@@ -304,6 +304,7 @@ function renderDeck(deck) {
   document.getElementById(`cue-readout-${deck}`).textContent = `キュー位置 ${cue}`;
   renderTempo(deck);
   renderEq(deck);
+  renderVolume(deck);
   updateTime(deck);
 }
 
@@ -316,6 +317,17 @@ function renderTempo(deck) {
   slider.setAttribute("aria-valuenow", value);
   slider.setAttribute("aria-valuetext", shown);
   document.getElementById(`rate-readout-${deck}`).textContent = shown;
+}
+
+function renderVolume(deck) {
+  const volume = state.decks[deck].volume ?? 1;
+  const slider = document.getElementById(`volume-${deck}`);
+  const shown = `${Math.round(volume * 100)}%`;
+  const value = String(Math.round(volume * 100));
+  if (document.activeElement !== slider) slider.value = value;
+  slider.setAttribute("aria-valuenow", value);
+  slider.setAttribute("aria-valuetext", shown);
+  document.getElementById(`volume-readout-${deck}`).textContent = shown;
 }
 
 function renderEq(deck) {
@@ -560,6 +572,13 @@ for (const deck of ["A", "B"]) {
   });
   document.getElementById(`rate-reset-${deck}`).addEventListener("click", () => {
     actions.resetRate(deck);
+  });
+  const volume = document.getElementById(`volume-${deck}`);
+  volume.addEventListener("input", () => {
+    actions.setVolume(deck, Number(volume.value) / 100);
+  });
+  document.getElementById(`volume-reset-${deck}`).addEventListener("click", () => {
+    actions.resetVolume(deck);
   });
   for (const band of ["high", "mid", "low"]) {
     const slider = document.getElementById(`eq-${band}-${deck}`);
