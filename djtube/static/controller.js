@@ -12,7 +12,11 @@
 // The crossfader MSB is CC 31 and goes to setCrossfaderFromController as 0–127.
 // Tempo MSB is CC 0 on the deck channel and goes to setRateFromController.
 // EQ MSB is CC 7 / 11 / 15 (HI / MID / LOW) and goes to setEqFromController.
-// The LSB companions (CC 32, 39, 43, 47) are not mapped.
+// Channel fader MSB is CC 19 (0x13) on the deck channel and goes to
+// setVolumeFromController as 0–127. Deck 1 (channel 0, left) is deck A.
+// Deck 2 (channel 1, right) is deck B. The LSB is CC 51 (0x33) and is not
+// mapped. Notes 102 and 82 are fader-start play/cue, not the level.
+// The other LSB companions (CC 32, 39, 43, 47, and crossfader CC 63) are not mapped.
 
 const DECK_A = 0;
 const DECK_B = 1;
@@ -32,6 +36,7 @@ const TEMPO = 0x00;
 const EQ_HI = 0x07;
 const EQ_MID = 0x0b;
 const EQ_LOW = 0x0f;
+const CHANNEL_FADER = 0x13;
 
 /** Seconds of seek for one jog tick (value 65 or 63). */
 export const JOG_STEP_SECONDS = 0.05;
@@ -45,6 +50,12 @@ function binding(action, args, extra) {
   if (args) spec.args = args;
   if (extra) Object.assign(spec, extra);
   return spec;
+}
+
+function deckVolume(channel, deck) {
+  return {
+    [`cc:${channel}:${CHANNEL_FADER}`]: binding("setVolumeFromController", [deck], { passValue: true }),
+  };
 }
 
 function deckTone(channel, deck) {
@@ -83,6 +94,8 @@ export const FLX4_MAP = {
   ...deckJog(DECK_B, "B"),
   ...deckTone(DECK_A, "A"),
   ...deckTone(DECK_B, "B"),
+  ...deckVolume(DECK_A, "A"),
+  ...deckVolume(DECK_B, "B"),
 };
 
 export function controllerEventKey(msg) {

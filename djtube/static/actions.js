@@ -18,6 +18,7 @@ export function freshDeck() {
     cue: 0,
     playing: false,
     rate: 1,
+    volume: 1,
     eq: { high: 0.5, mid: 0.5, low: 0.5 },
     eqError: "",
     track: null,
@@ -70,8 +71,38 @@ export function createActions(deps) {
 
   function applyGains() {
     const gains = deckGains(state.crossfader);
-    audios.A.volume = gains.a;
-    audios.B.volume = gains.b;
+    audios.A.volume = gains.a * (state.decks.A.volume ?? 1);
+    audios.B.volume = gains.b * (state.decks.B.volume ?? 1);
+  }
+
+  function setVolume(deck, value) {
+    const deckState = deckOf(state, deck);
+    if (!deckState) return;
+    const numeric = Number(value);
+    deckState.volume = Math.min(1, Math.max(0, Number.isFinite(numeric) ? numeric : 0));
+    applyGains();
+    scheduleRender();
+  }
+
+  function nudgeVolume(deck, delta) {
+    const deckState = deckOf(state, deck);
+    if (!deckState) return;
+    const step = Number(delta);
+    if (!Number.isFinite(step) || step === 0) return;
+    const current = Number(deckState.volume);
+    const base = Number.isFinite(current) ? current : 1;
+    setVolume(deck, Math.round((base + step) * 100) / 100);
+  }
+
+  function resetVolume(deck) {
+    setVolume(deck, 1);
+  }
+
+  function setVolumeFromController(deck, value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return;
+    const midi = Math.min(127, Math.max(0, numeric));
+    setVolume(deck, midi / 127);
   }
 
   function setCrossfader(value) {
@@ -181,6 +212,7 @@ export function createActions(deps) {
     deckState.playing = false;
     deckState.jogCommand = null;
     deckState.rate = 1;
+    deckState.volume = 1;
     audio.cancelPendingSeek?.();
     audio.pause();
     audio.playbackRate = 1;
@@ -427,6 +459,10 @@ export function createActions(deps) {
     nudgeRate,
     resetRate,
     setRateFromController,
+    setVolume,
+    nudgeVolume,
+    resetVolume,
+    setVolumeFromController,
     setEq,
     nudgeEq,
     resetEq,

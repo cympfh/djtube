@@ -57,6 +57,11 @@ def test_index_uses_public_asset_prefix():
     assert "テンポ" in html
     assert 'id="rate-A" type="range" min="50" max="200" step="1"' in html
     assert 'id="rate-B" type="range" min="50" max="200" step="1"' in html
+    assert 'id="volume-A" type="range" min="0" max="100" step="1"' in html
+    assert 'id="volume-B" type="range" min="0" max="100" step="1"' in html
+    assert 'id="volume-reset-A"' in html
+    assert 'id="volume-reset-B"' in html
+    assert "フェード" in html
     assert 'step="25"' not in html
     assert 'id="midi-status"' in html
     assert "未接続 — MIDI を開く（要 HTTPS）" in html
@@ -178,6 +183,8 @@ def test_readme_and_docker_contract():
     assert "画面上部の丸い Cookie の印" in readme
     assert "画面上部の「Cookie」" not in readme
     assert "再生が失敗する前でも" in readme
+    assert "曲を載せると、そのデッキの音量は 100% に戻る" in readme
+    assert "クロスフェーダーとは別" in readme
     assert "DJTUBE_PLAYLISTS" not in readme
     assert "DJTUBE_COOKIES" not in readme
     assert "data/playlists.json" not in readme

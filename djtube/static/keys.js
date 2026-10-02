@@ -3,6 +3,7 @@ import { RATE_STEP } from "./rate.js";
 
 export const FADER_STEP = 0.04;
 export const FADER_STEP_LARGE = 0.12;
+export const VOLUME_STEP = 0.05;
 export const JOG_STEP = 1;
 export const JOG_STEP_LARGE = 10;
 
@@ -35,6 +36,24 @@ export const BINDINGS = [
   { keys: ["8"], action: "nudgeRate", args: ["B", -RATE_STEP], label: "デッキ B のテンポを下げる", group: "テンポ" },
   { keys: ["9"], action: "nudgeRate", args: ["B", RATE_STEP], label: "デッキ B のテンポを上げる", group: "テンポ" },
   { keys: ["0"], action: "resetRate", args: ["B"], label: "デッキ B のテンポを 1.0 に戻す", group: "テンポ" },
+  { keys: ["-"], action: "nudgeVolume", args: ["A", -VOLUME_STEP], label: "デッキ A の音量を下げる", group: "音量" },
+  { keys: ["="], action: "nudgeVolume", args: ["A", VOLUME_STEP], label: "デッキ A の音量を上げる", group: "音量" },
+  {
+    keys: [","],
+    action: "nudgeVolume",
+    args: ["B", -VOLUME_STEP],
+    shift: true,
+    label: "デッキ B の音量を下げる",
+    group: "音量",
+  },
+  {
+    keys: ["."],
+    action: "nudgeVolume",
+    args: ["B", VOLUME_STEP],
+    shift: true,
+    label: "デッキ B の音量を上げる",
+    group: "音量",
+  },
   { keys: ["e"], action: "nudgeEq", args: ["A", "high", -EQ_STEP], label: "デッキ A の HIGH を下げる", group: "イコライザー" },
   { keys: ["r"], action: "nudgeEq", args: ["A", "high", EQ_STEP], label: "デッキ A の HIGH を上げる", group: "イコライザー" },
   { keys: ["d"], action: "nudgeEq", args: ["A", "mid", -EQ_STEP], label: "デッキ A の MID を下げる", group: "イコライザー" },
@@ -161,6 +180,8 @@ const SHIFT_ALIASES = {
   "]": ["}"],
   ";": [":", "+"],
   "'": ['"'],
+  ",": ["<"],
+  ".": [">"],
 };
 
 function shiftAliases(bindingKey) {
@@ -188,7 +209,12 @@ export function bindingFor(event, library = "search") {
     if (binding.library === library) return binding;
     if (!fallback) fallback = binding;
   }
-  return fallback;
+  if (fallback) return fallback;
+  // A JIS keyboard types "=" by shifting the minus key. That character is deck A volume up.
+  if (event.shiftKey && event.key === "=") {
+    return BINDINGS.find((binding) => !binding.shift && !binding.library && binding.keys.includes("=")) || null;
+  }
+  return null;
 }
 
 export function isSearchTarget(target) {

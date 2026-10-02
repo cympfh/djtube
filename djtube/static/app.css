@@ -506,29 +506,31 @@ button:disabled { opacity: 0.45; cursor: default; }
 
 button.cue { color: var(--cue); }
 
-.tempo { display: grid; gap: 2px; }
+.tempo, .level { display: grid; gap: 2px; }
 
-.tempo-head { display: flex; align-items: baseline; gap: 8px; }
+.tempo-head, .level-head { display: flex; align-items: baseline; gap: 8px; }
 
-.tempo-head label {
+.tempo-head label, .level-head label {
   margin: 0;
   font-size: 12px;
   letter-spacing: 0.12em;
   font-weight: 700;
 }
 
-.tempo-readout {
+.tempo-readout, .level-readout {
   margin: 0;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
 }
 
-.tempo-head button { margin-left: auto; padding: 2px 8px; font-size: 12px; }
+.tempo-head button, .level-head button { margin-left: auto; padding: 2px 8px; font-size: 12px; }
 
-.tempo input[type="range"]::-webkit-slider-runnable-track { background: #3a342b; }
+.tempo input[type="range"]::-webkit-slider-runnable-track,
+.level input[type="range"]::-webkit-slider-runnable-track { background: #3a342b; }
 
-.tempo input[type="range"]::-moz-range-track { background: #3a342b; }
+.tempo input[type="range"]::-moz-range-track,
+.level input[type="range"]::-moz-range-track { background: #3a342b; }
 
 .eq { display: grid; gap: 4px; }
 
