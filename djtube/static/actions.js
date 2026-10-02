@@ -23,6 +23,7 @@ export function freshState() {
     searchError: "",
     source: "",
     loadTarget: "A",
+    musicOnly: true,
     crossfader: 0.5,
     decks: { A: freshDeck(), B: freshDeck() },
   };
@@ -84,33 +85,52 @@ export function createActions(deps) {
     scheduleRender();
   }
 
+  let searchGen = 0;
+
   async function submitSearch() {
-    if (state.searching) return;
     const query = deps.queryValue().trim();
     if (!query) {
       state.searchError = "検索語を入れてください";
       scheduleRender();
       return;
     }
+    const gen = ++searchGen;
+    const musicOnly = state.musicOnly;
     state.searching = true;
     state.searchError = "";
     scheduleRender();
     try {
-      const data = await deps.fetchSearch(query);
+      const data = await deps.fetchSearch(query, musicOnly);
+      if (gen !== searchGen) return;
       state.lastQuery = query;
       state.results = Array.isArray(data?.tracks) ? data.tracks : [];
       state.selected = 0;
       state.source = data?.source || "";
       state.searchError = state.results.length ? "" : "見つかりませんでした";
     } catch (err) {
+      if (gen !== searchGen) return;
       state.results = [];
       state.source = "";
       const message = err instanceof Error ? err.message : "";
       state.searchError = message && !/^failed to fetch$/i.test(message) ? message : "検索できませんでした";
     } finally {
-      state.searching = false;
-      scheduleRender();
+      if (gen === searchGen) {
+        state.searching = false;
+        scheduleRender();
+      }
     }
+  }
+
+  function setMusicOnly(value) {
+    const next = !!value;
+    if (next === state.musicOnly) return;
+    state.musicOnly = next;
+    scheduleRender();
+    if (state.lastQuery || deps.queryValue().trim()) return submitSearch();
+  }
+
+  function toggleMusicOnly() {
+    return setMusicOnly(!state.musicOnly);
   }
 
   function onEnter() {
@@ -214,6 +234,8 @@ export function createActions(deps) {
     focusSearch,
     blurSearch,
     submitSearch,
+    setMusicOnly,
+    toggleMusicOnly,
     onEnter,
     moveSelection,
     loadSelected,

@@ -124,6 +124,19 @@ button:hover { border-color: #5c564b; }
 
 #search-button { background: var(--text); color: #16140f; border: 0; font-weight: 700; }
 
+.music-only {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.music-only input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--a);
+}
+
 .hint, .status, .midi-status { margin: 0; font-size: 12px; line-height: 1.45; }
 
 .status:empty { display: none; }

@@ -4,6 +4,7 @@ import logging
 import os
 import re
 from dataclasses import asdict, dataclass
+from urllib.parse import urlencode
 
 import httpx
 
@@ -14,6 +15,7 @@ log = logging.getLogger(__name__)
 RESULT_TARGET = 50
 SEARCH_PAGE_SIZE = 50
 MAX_SEARCH_PAGES = 3
+MUSIC_CATEGORY_ID = "10"
 SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 _ISO_DURATION = re.compile(r"^P(?:\d+D)?(?:T(?:(?P<h>\d+)H)?(?:(?P<m>\d+)M)?(?:(?P<s>\d+)S)?)?$")
@@ -183,7 +185,7 @@ def _youtube_json(response: httpx.Response) -> dict:
     return payload
 
 
-def _collect_search_ids(http: httpx.Client, query: str, key: str) -> list[str]:
+def _collect_search_ids(http: httpx.Client, query: str, key: str, *, music: bool = False) -> list[str]:
     ids: list[str] = []
     page_token: str | None = None
     for _ in range(MAX_SEARCH_PAGES):
@@ -195,6 +197,8 @@ def _collect_search_ids(http: httpx.Client, query: str, key: str) -> list[str]:
             "safeSearch": "none",
             "key": key,
         }
+        if music:
+            params["videoCategoryId"] = MUSIC_CATEGORY_ID
         if page_token:
             params["pageToken"] = page_token
         payload = _youtube_json(http.get(SEARCH_URL, params=params))
@@ -222,11 +226,11 @@ def _hydrate_videos(http: httpx.Client, ids: list[str], key: str) -> list[Track]
     return [by_id[video_id] for video_id in ids if video_id in by_id]
 
 
-def search_youtube_api(query: str, key: str, client: httpx.Client | None = None) -> list[Track]:
+def search_youtube_api(query: str, key: str, client: httpx.Client | None = None, *, music: bool = False) -> list[Track]:
     owns = client is None
     http = client or httpx.Client(timeout=15)
     try:
-        ids = _collect_search_ids(http, query, key)
+        ids = _collect_search_ids(http, query, key, music=music)
         if not ids:
             return []
         return _hydrate_videos(http, ids, key)
@@ -239,9 +243,13 @@ def search_youtube_api(query: str, key: str, client: httpx.Client | None = None)
             http.close()
 
 
-def search_ytdlp(query: str) -> list[Track]:
+def search_ytdlp(query: str, *, music: bool = False) -> list[Track]:
     import yt_dlp
 
+    if music:
+        url = "https://music.youtube.com/search?" + urlencode({"q": query}) + "#songs"
+    else:
+        url = f"ytsearch{RESULT_TARGET}:{query}"
     options = {
         "quiet": True,
         "no_warnings": True,
@@ -253,21 +261,21 @@ def search_ytdlp(query: str) -> list[Track]:
     }
     try:
         with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(f"ytsearch{RESULT_TARGET}:{query}", download=False)
+            info = ydl.extract_info(url, download=False)
     except Exception as exc:
         log.warning("yt-dlp search failed: %s", type(exc).__name__)
         raise SearchError("検索できませんでした") from None
     return tracks_from_ytdlp_info(info)[:RESULT_TARGET]
 
 
-def search_tracks(query: str) -> tuple[list[Track], str]:
+def search_tracks(query: str, *, music: bool = True) -> tuple[list[Track], str]:
     normalized = normalize_query(query)
     if not normalized:
         raise SearchError("検索語を入れてください")
     key = api_key()
     if key:
         try:
-            tracks = search_youtube_api(normalized, key)
+            tracks = search_youtube_api(normalized, key, music=music)
         except Exception:
             log.warning("YouTube Data API search failed; falling back to yt-dlp")
         else:
@@ -275,7 +283,7 @@ def search_tracks(query: str) -> tuple[list[Track], str]:
                 return tracks, "youtube"
             log.info("YouTube Data API returned no videos; falling back to yt-dlp")
     try:
-        return search_ytdlp(normalized), "ytdlp"
+        return search_ytdlp(normalized, music=music), "ytdlp"
     except SearchError:
         raise
     except Exception as exc:

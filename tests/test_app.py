@@ -52,10 +52,27 @@ def test_client_sources_do_not_carry_the_api_key():
         assert token not in text
 
 
+def test_search_route_defaults_to_music_and_can_turn_it_off(monkeypatch):
+    seen = {}
+
+    def fake(query: str, music: bool = True):
+        seen["query"] = query
+        seen["music"] = music
+        return [Track(VIDEO_ID, "曲", "人", 12, None)], "youtube"
+
+    monkeypatch.setattr("djtube.app.search_tracks", fake)
+    client = TestClient(create_app())
+    assert client.get("/api/search", params={"q": "同人誌"}).status_code == 200
+    assert seen == {"query": "同人誌", "music": True}
+    assert client.get("/api/search", params={"q": "同人誌", "music": "false"}).status_code == 200
+    assert seen["music"] is False
+
+
 def test_search_route_does_not_echo_key(monkeypatch):
     monkeypatch.setenv("YOUTUBE_API_KEY", "test-key")
 
-    def fake(_query: str):
+    def fake(_query: str, music: bool = True):
+        assert music is True
         return [Track(VIDEO_ID, "曲", "人", 12, "https://i.ytimg.com/a.jpg")], "youtube"
 
     monkeypatch.setattr("djtube.app.search_tracks", fake)

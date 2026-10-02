@@ -56,9 +56,9 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/api/search")
-    def search(q: str = Query(min_length=1, max_length=120)) -> dict[str, object]:
+    def search(q: str = Query(min_length=1, max_length=120), music: bool = True) -> dict[str, object]:
         try:
-            tracks, source = search_tracks(q)
+            tracks, source = search_tracks(q, music=music)
         except SearchError as exc:
             raise HTTPException(400 if str(exc) == "検索語を入れてください" else 502, str(exc)) from None
         return {"source": source, "tracks": [track.as_dict() for track in tracks]}

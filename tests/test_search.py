@@ -142,7 +142,7 @@ def test_empty_data_api_falls_back_to_ytdlp(monkeypatch):
     monkeypatch.setattr("djtube.search.search_youtube_api", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         "djtube.search.search_ytdlp",
-        lambda _query: [Track("abcdefghijk", "同人誌を広げる", "棚", 180, None)],
+        lambda _query, music=False: [Track("abcdefghijk", "同人誌を広げる", "棚", 180, None)],
     )
     tracks, source = search_tracks("同人誌")
     assert source == "ytdlp"
@@ -158,7 +158,7 @@ def test_fallback_when_data_api_fails(monkeypatch):
     monkeypatch.setattr("djtube.search.search_youtube_api", boom)
     monkeypatch.setattr(
         "djtube.search.search_ytdlp",
-        lambda _query: [Track("abcdefghijk", "曲", "人", 10, None)],
+        lambda _query, music=False: [Track("abcdefghijk", "曲", "人", 10, None)],
     )
     tracks, source = search_tracks("query")
     assert source == "ytdlp"
@@ -174,7 +174,7 @@ def test_without_key_skips_data_api(monkeypatch):
         raise AssertionError("api should not be called")
 
     monkeypatch.setattr("djtube.search.search_youtube_api", api)
-    monkeypatch.setattr("djtube.search.search_ytdlp", lambda _query: [])
+    monkeypatch.setattr("djtube.search.search_ytdlp", lambda _query, music=False: [])
     tracks, source = search_tracks("  city   pop ")
     assert source == "ytdlp"
     assert tracks == []
@@ -201,6 +201,7 @@ def test_search_pages_until_fifty():
             pages.append(request.url.params.get("pageToken"))
             assert request.url.params["maxResults"] == "50"
             assert request.url.params["safeSearch"] == "none"
+            assert "videoCategoryId" not in request.url.params
             if "pageToken" not in request.url.params:
                 items = [{"id": {"videoId": f"{index:011d}"}} for index in range(30)]
                 return httpx.Response(200, json={"items": items, "nextPageToken": "page-2"})
@@ -255,6 +256,66 @@ def test_ytdlp_asks_for_fifty(monkeypatch):
     tracks = search_ytdlp("city pop")
     assert tracks[0].id == "abcdefghijk"
     assert seen == {"playlistend": 50, "url": "ytsearch50:city pop"}
+
+
+def test_music_category_is_opt_in():
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            seen.append(dict(request.url.params))
+            assert request.url.params["type"] == "video"
+            assert request.url.params["maxResults"] == "50"
+            assert "topicId" not in request.url.params
+            return httpx.Response(200, json={"items": [{"id": {"videoId": "abcdefghijk"}}]})
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    {
+                        "id": "abcdefghijk",
+                        "snippet": {
+                            "title": "曲",
+                            "channelTitle": "人",
+                            "thumbnails": {"medium": {"url": "https://i.ytimg.com/a.jpg"}},
+                        },
+                        "contentDetails": {"duration": "PT1M"},
+                    }
+                ]
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        search_youtube_api("city pop", "test-key", client, music=True)
+        search_youtube_api("city pop", "test-key", client, music=False)
+    assert seen[0]["videoCategoryId"] == "10"
+    assert "videoCategoryId" not in seen[1]
+
+
+def test_ytdlp_music_uses_song_search(monkeypatch):
+    seen = {}
+
+    class FakeYoutubeDL:
+        def __init__(self, _options):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, url, download=False):
+            seen["url"] = url
+            assert download is False
+            return {"entries": [{"id": "abcdefghijk", "title": "曲", "channel": "人"}]}
+
+    monkeypatch.setattr("yt_dlp.YoutubeDL", FakeYoutubeDL)
+    assert search_ytdlp("スピッツ", music=True)[0].id == "abcdefghijk"
+    assert seen["url"].startswith("https://music.youtube.com/search?")
+    assert seen["url"].endswith("#songs")
+    search_ytdlp("city pop", music=False)
+    assert seen["url"] == "ytsearch50:city pop"
 
 
 def test_blank_query():
