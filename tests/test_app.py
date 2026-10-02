@@ -47,7 +47,7 @@ def test_index_uses_public_asset_prefix():
     assert 'id="tab-search"' in html
     assert 'id="tab-playlist"' in html
     assert 'id="search-panel"' in html
-    assert 'hidden' in html
+    assert "hidden" in html
     assert 'id="playlist-name"' in html
     assert 'id="playlist-tracks"' in html
     assert 'id="playlist-delete"' not in html
