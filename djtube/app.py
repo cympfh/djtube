@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import mimetypes
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from djtube.audio import AudioError, open_audio
+from djtube.ids import is_video_id
 from djtube.paths import INDEX_PATH, PUBLIC_PREFIX, STATIC_DIR
 from djtube.search import SearchError, search_mode, search_tracks
 
@@ -52,8 +54,22 @@ def create_app() -> FastAPI:
             "search": search_mode(),
             "prefix": PUBLIC_PREFIX,
             "flx4": "unmapped",
-            "playback": "youtube-iframe",
+            "playback": "ytdlp-stream",
         }
+
+    @app.get("/api/audio/{video_id}")
+    def stream_audio(video_id: str, request: Request):
+        if not is_video_id(video_id):
+            raise HTTPException(404, "音源がありません")
+        try:
+            upstream = open_audio(video_id, request.headers.get("range"))
+        except AudioError as exc:
+            raise HTTPException(exc.status, str(exc)) from None
+        return StreamingResponse(
+            upstream.iter_bytes(),
+            status_code=upstream.status_code,
+            headers=upstream.response_headers(),
+        )
 
     @app.get("/api/search")
     def search(q: str = Query(min_length=1, max_length=120), music: bool = True) -> dict[str, object]:

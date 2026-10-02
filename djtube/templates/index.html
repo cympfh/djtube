@@ -55,9 +55,8 @@
               </header>
               <p class="deck-title" id="title-A">曲が入っていません</p>
               <p class="deck-channel" id="channel-A"></p>
-              <div class="player-frame">
-                <div id="yt-A"></div>
-                <div class="player-shield" aria-hidden="true"></div>
+              <div class="player-frame" id="player-A">
+                <p class="player-note">サーバーの音声</p>
               </div>
               <div class="pos" id="pos-A" data-deck="A">
                 <div class="pos-bar" id="bar-A"></div>
@@ -77,6 +76,28 @@
                 </div>
                 <input id="rate-A" type="range" min="50" max="200" step="25" value="100" aria-label="デッキ A のテンポ" aria-valuemin="50" aria-valuemax="200" aria-valuenow="100" aria-valuetext="1.00×" />
               </div>
+              <div class="eq" aria-label="デッキ A のイコライザー">
+                <p class="eq-label">イコライザー</p>
+                <div class="eq-band">
+                  <label for="eq-high-A">HIGH</label>
+                  <input id="eq-high-A" type="range" min="0" max="1000" step="10" value="500" aria-label="デッキ A の HIGH" aria-valuemin="0" aria-valuemax="1000" aria-valuenow="500" aria-valuetext="0.0 dB" />
+                  <span class="eq-readout" id="eq-high-readout-A">0.0 dB</span>
+                  <button type="button" id="eq-high-reset-A">0 dB</button>
+                </div>
+                <div class="eq-band">
+                  <label for="eq-mid-A">MID</label>
+                  <input id="eq-mid-A" type="range" min="0" max="1000" step="10" value="500" aria-label="デッキ A の MID" aria-valuemin="0" aria-valuemax="1000" aria-valuenow="500" aria-valuetext="0.0 dB" />
+                  <span class="eq-readout" id="eq-mid-readout-A">0.0 dB</span>
+                  <button type="button" id="eq-mid-reset-A">0 dB</button>
+                </div>
+                <div class="eq-band">
+                  <label for="eq-low-A">LOW</label>
+                  <input id="eq-low-A" type="range" min="0" max="1000" step="10" value="500" aria-label="デッキ A の LOW" aria-valuemin="0" aria-valuemax="1000" aria-valuenow="500" aria-valuetext="0.0 dB" />
+                  <span class="eq-readout" id="eq-low-readout-A">0.0 dB</span>
+                  <button type="button" id="eq-low-reset-A">0 dB</button>
+                </div>
+                <p class="eq-error" id="eq-error-A" hidden></p>
+              </div>
               <p class="gain-readout">音量 <span id="gain-A">71</span>%</p>
             </article>
 
@@ -87,9 +108,8 @@
               </header>
               <p class="deck-title" id="title-B">曲が入っていません</p>
               <p class="deck-channel" id="channel-B"></p>
-              <div class="player-frame">
-                <div id="yt-B"></div>
-                <div class="player-shield" aria-hidden="true"></div>
+              <div class="player-frame" id="player-B">
+                <p class="player-note">サーバーの音声</p>
               </div>
               <div class="pos" id="pos-B" data-deck="B">
                 <div class="pos-bar" id="bar-B"></div>
@@ -108,6 +128,28 @@
                   <button type="button" id="rate-reset-B">1.0 に戻す</button>
                 </div>
                 <input id="rate-B" type="range" min="50" max="200" step="25" value="100" aria-label="デッキ B のテンポ" aria-valuemin="50" aria-valuemax="200" aria-valuenow="100" aria-valuetext="1.00×" />
+              </div>
+              <div class="eq" aria-label="デッキ B のイコライザー">
+                <p class="eq-label">イコライザー</p>
+                <div class="eq-band">
+                  <label for="eq-high-B">HIGH</label>
+                  <input id="eq-high-B" type="range" min="0" max="1000" step="10" value="500" aria-label="デッキ B の HIGH" aria-valuemin="0" aria-valuemax="1000" aria-valuenow="500" aria-valuetext="0.0 dB" />
+                  <span class="eq-readout" id="eq-high-readout-B">0.0 dB</span>
+                  <button type="button" id="eq-high-reset-B">0 dB</button>
+                </div>
+                <div class="eq-band">
+                  <label for="eq-mid-B">MID</label>
+                  <input id="eq-mid-B" type="range" min="0" max="1000" step="10" value="500" aria-label="デッキ B の MID" aria-valuemin="0" aria-valuemax="1000" aria-valuenow="500" aria-valuetext="0.0 dB" />
+                  <span class="eq-readout" id="eq-mid-readout-B">0.0 dB</span>
+                  <button type="button" id="eq-mid-reset-B">0 dB</button>
+                </div>
+                <div class="eq-band">
+                  <label for="eq-low-B">LOW</label>
+                  <input id="eq-low-B" type="range" min="0" max="1000" step="10" value="500" aria-label="デッキ B の LOW" aria-valuemin="0" aria-valuemax="1000" aria-valuenow="500" aria-valuetext="0.0 dB" />
+                  <span class="eq-readout" id="eq-low-readout-B">0.0 dB</span>
+                  <button type="button" id="eq-low-reset-B">0 dB</button>
+                </div>
+                <p class="eq-error" id="eq-error-B" hidden></p>
               </div>
               <p class="gain-readout">音量 <span id="gain-B">71</span>%</p>
             </article>

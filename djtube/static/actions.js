@@ -1,3 +1,4 @@
+import { EQ_BANDS, clampEqUnit, eqGainDb, eqUnitFromMidi } from "./eq.js";
 import { deckGains } from "./gains.js";
 import { clampRate, rateFromMidi } from "./rate.js";
 
@@ -13,6 +14,8 @@ export function freshDeck() {
     cue: 0,
     playing: false,
     rate: 1,
+    eq: { high: 0.5, mid: 0.5, low: 0.5 },
+    eqError: "",
   };
 }
 
@@ -163,6 +166,12 @@ export function createActions(deps) {
     if (deckState.gen !== gen) return;
     deckState.status = loaded === false ? "preparing" : "ready";
     audio.playbackRate = deckState.rate;
+    let eqLive = true;
+    for (const band of EQ_BANDS) {
+      const applied = audio.setEqGain?.(band, eqGainDb(deckState.eq[band]));
+      if (applied === false) eqLive = false;
+    }
+    deckState.eqError = eqLive ? "" : "イコライザーを音声に接続できませんでした";
     applyGains();
     scheduleRender();
   }
@@ -297,6 +306,39 @@ export function createActions(deps) {
     setRate(deck, rateFromMidi(numeric));
   }
 
+  function setEq(deck, band, value) {
+    const deckState = deckOf(state, deck);
+    const audio = audios[deck];
+    if (!deckState || !audio || !EQ_BANDS.includes(band)) return;
+    const unit = clampEqUnit(value);
+    deckState.eq[band] = unit;
+    const applied = audio.setEqGain?.(band, eqGainDb(unit));
+    deckState.eqError = applied === false ? "イコライザーを音声に接続できませんでした" : "";
+    scheduleRender();
+  }
+
+  function nudgeEq(deck, band, delta) {
+    const deckState = deckOf(state, deck);
+    if (!deckState || !EQ_BANDS.includes(band)) return;
+    const step = Number(delta);
+    if (!Number.isFinite(step) || step === 0) return;
+    setEq(deck, band, deckState.eq[band] + step);
+  }
+
+  function resetEq(deck, band) {
+    if (band == null) {
+      for (const name of EQ_BANDS) setEq(deck, name, 0.5);
+      return;
+    }
+    setEq(deck, band, 0.5);
+  }
+
+  function setEqFromController(deck, band, value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return;
+    setEq(deck, band, eqUnitFromMidi(numeric));
+  }
+
   function jog(deck, delta) {
     const deckState = deckOf(state, deck);
     const audio = audios[deck];
@@ -342,6 +384,10 @@ export function createActions(deps) {
     nudgeRate,
     resetRate,
     setRateFromController,
+    setEq,
+    nudgeEq,
+    resetEq,
+    setEqFromController,
     nudgeCrossfader,
     setCrossfader,
     setCrossfaderFromController,

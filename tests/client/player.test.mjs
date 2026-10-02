@@ -4,10 +4,11 @@ import test from "node:test";
 import { createActions, freshState } from "../../djtube/static/actions.js";
 import { FLX4_MAP, dispatchControllerEvent, messageFromMidi } from "../../djtube/static/controller.js";
 import { formatTime } from "../../djtube/static/format.js";
+import { EQ_BOOST_DB, EQ_CUT_DB, EQ_STEP, connectEqGraph, eqGainDb, eqUnitFromMidi, formatEqDb } from "../../djtube/static/eq.js";
 import { deckGains } from "../../djtube/static/gains.js";
 import { BINDINGS, handleKeydown, legendGroups } from "../../djtube/static/keys.js";
 import { RATE_STEP, clampRate, formatRate, rateFromMidi } from "../../djtube/static/rate.js";
-import { createDeckPlayer } from "../../djtube/static/youtube.js";
+import { createDeckPlayer } from "../../djtube/static/player.js";
 
 function fakeAudio() {
   return {
@@ -431,24 +432,31 @@ test("tempo clamps, nudges, resets, and stays callable from the action table", a
   const tempoKeys = BINDINGS.filter((binding) => binding.group === "テンポ").flatMap((binding) => binding.keys);
   assert.deepEqual(tempoKeys, ["1", "2", "3", "8", "9", "0"]);
 
-  const deck = createDeckPlayer("A", "yt-A");
+  const deck = createDeckPlayer("A", "player-A");
   const seen = [];
-  deck.player = {
-    setPlaybackRate(value) {
+  const listeners = {};
+  deck.audio = {
+    src: "",
+    load() {},
+    addEventListener(name, fn) {
+      listeners[name] = fn;
+    },
+    set playbackRate(value) {
       seen.push(value);
     },
-    cueVideoById() {},
   };
   deck.playbackRate = 1.25;
   deck.playbackRate = 9;
   deck.playbackRate = 0.1;
   assert.equal(deck.playbackRate, 0.5);
   assert.deepEqual(seen, [1.25, 2, 0.5]);
-  deck.apiReady = true;
+  deck.attach({});
   deck.playbackRate = 1.5;
   seen.length = 0;
-  assert.equal(deck.loadVideo("abcdefghijk"), true);
-  assert.equal(seen[seen.length - 1], 1.5);
+  assert.equal(deck.loadVideo("abcdefghijk"), false);
+  assert.equal(deck.audio.src.endsWith("/api/audio/abcdefghijk"), true);
+  listeners.canplay();
+  assert.deepEqual(seen, [1.5, 1.5]);
 
   const { state, audios, actions } = harness();
   assert.equal(state.decks.A.rate, 1);
@@ -506,6 +514,130 @@ test("tempo clamps, nudges, resets, and stays callable from the action table", a
     true,
   );
   assert.equal(state.decks.B.rate, 1);
+});
+
+test("eq gain mapping drives the filter and the shared actions", () => {
+  assert.equal(eqGainDb(0.5), 0);
+  assert.equal(eqGainDb(1), EQ_BOOST_DB);
+  assert.equal(eqGainDb(0), EQ_CUT_DB);
+  assert.equal(eqGainDb(2), EQ_BOOST_DB);
+  assert.equal(eqGainDb(-1), EQ_CUT_DB);
+  assert.ok(eqGainDb(0.2) < eqGainDb(0.4));
+  assert.ok(eqGainDb(0.4) < eqGainDb(0.5));
+  assert.ok(eqGainDb(0.5) < eqGainDb(0.7));
+  assert.ok(eqGainDb(0.7) < eqGainDb(1));
+  assert.equal(eqUnitFromMidi(0), 0);
+  assert.equal(eqUnitFromMidi(64), 0.5);
+  assert.equal(eqUnitFromMidi(127), 1);
+  assert.equal(formatEqDb(0), "0.0 dB");
+  assert.equal(formatEqDb(EQ_BOOST_DB), "+12.0 dB");
+  assert.equal(formatEqDb(EQ_CUT_DB), "-36.0 dB");
+
+  const source = { next: null, connect(target) { this.next = target; } };
+  const context = {
+    destination: { name: "out" },
+    createBiquadFilter() {
+      return {
+        type: "",
+        frequency: { value: 0 },
+        Q: { value: 0 },
+        gain: { value: 0 },
+        connect(target) { this.next = target; },
+      };
+    },
+  };
+  const nodes = connectEqGraph(source, context);
+  assert.equal(source.next, nodes.high);
+  assert.equal(nodes.high.next, nodes.mid);
+  assert.equal(nodes.mid.next, nodes.low);
+  assert.equal(nodes.low.next, context.destination);
+  assert.equal(nodes.high.type, "highshelf");
+  assert.equal(nodes.high.frequency.value, 10000);
+  assert.equal(nodes.mid.type, "peaking");
+  assert.equal(nodes.mid.frequency.value, 1000);
+  assert.equal(nodes.low.type, "lowshelf");
+  assert.equal(nodes.low.frequency.value, 100);
+  assert.equal(nodes.low.gain.value, 0);
+
+  const labels = legendGroups().find((group) => group.name === "イコライザー").items.map((item) => item.label);
+  assert.ok(labels.includes("デッキ A の LOW を下げる"));
+  assert.ok(labels.includes("デッキ B の HIGH を上げる"));
+  const eqKeys = new Set(BINDINGS.filter((binding) => binding.group === "イコライザー").flatMap((binding) => binding.keys));
+  for (const key of ["a", "q", "z", "m", "[", "]", ";", "'", "1", "2", "3", "8", "9", "0"]) {
+    assert.equal(eqKeys.has(key), false, key);
+  }
+
+  const { state, audios, actions } = harness();
+  for (const deck of ["A", "B"]) {
+    audios[deck].eqDb = {};
+    audios[deck].setEqGain = (band, db) => {
+      audios[deck].eqDb[band] = db;
+      return audios[deck].eqLive !== false;
+    };
+  }
+  actions.setEq("A", "low", 0);
+  assert.equal(state.decks.A.eq.low, 0);
+  assert.equal(audios.A.eqDb.low, EQ_CUT_DB);
+  actions.nudgeEq("A", "low", EQ_STEP);
+  assert.equal(state.decks.A.eq.low, 0.1);
+  assert.equal(audios.A.eqDb.low, eqGainDb(0.1));
+  actions.nudgeEq("A", "low", -1);
+  assert.equal(state.decks.A.eq.low, 0);
+  actions.setEq("A", "nope", 1);
+  assert.equal(state.decks.A.eq.high, 0.5);
+  actions.resetEq("A", "low");
+  assert.equal(state.decks.A.eq.low, 0.5);
+  assert.equal(audios.A.eqDb.low, 0);
+
+  assert.equal(handleKeydown(keyEvent("r", searchTarget()), actions), false);
+  assert.equal(handleKeydown(keyEvent("r", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.eq.high, 0.6);
+  assert.equal(audios.A.eqDb.high, eqGainDb(0.6));
+  assert.equal(handleKeydown(keyEvent("4", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.eq.high, 0.5);
+  assert.equal(state.decks.A.eq.mid, 0.5);
+  assert.equal(state.decks.A.eq.low, 0.5);
+  assert.equal(audios.A.eqDb.high, 0);
+  const before = state.decks.A.eq.low;
+  assert.equal(handleKeydown(keyEvent("[", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.eq.low, before);
+
+  const cc = messageFromMidi(new Uint8Array([0xb0, 7, 0]));
+  assert.equal(
+    dispatchControllerEvent(cc, actions, {
+      "cc:0:7": { action: "setEqFromController", args: ["B", "low"], passValue: true },
+    }),
+    true,
+  );
+  assert.equal(state.decks.B.eq.low, 0);
+  assert.equal(audios.B.eqDb.low, EQ_CUT_DB);
+  assert.equal(
+    dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb0, 7, 64])), actions, {
+      "cc:0:7": { action: "setEqFromController", args: ["B", "low"], passValue: true },
+    }),
+    true,
+  );
+  assert.equal(state.decks.B.eq.low, 0.5);
+  assert.equal(audios.B.eqDb.low, 0);
+  assert.deepEqual(FLX4_MAP, {});
+
+  audios.A.eqLive = false;
+  actions.setEq("A", "mid", 1);
+  assert.equal(state.decks.A.eq.mid, 1);
+  assert.equal(state.decks.A.eqError, "イコライザーを音声に接続できませんでした");
+  audios.A.eqLive = true;
+  actions.resetEq("A", "mid");
+  assert.equal(state.decks.A.eqError, "");
+  assert.equal(audios.A.eqDb.mid, 0);
+
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 10 }];
+  actions.setEq("A", "high", 1);
+  return actions.loadSelected("A").then(() => {
+    assert.equal(state.decks.A.eq.high, 1);
+    assert.equal(audios.A.eqDb.high, EQ_BOOST_DB);
+    assert.equal(state.decks.A.rate, 1);
+    assert.equal(audios.A.playbackRate, 1);
+  });
 });
 
 test("cue while playing returns and pauses", () => {

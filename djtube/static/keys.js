@@ -1,3 +1,4 @@
+import { EQ_STEP } from "./eq.js";
 import { RATE_STEP } from "./rate.js";
 
 export const FADER_STEP = 0.04;
@@ -35,6 +36,20 @@ export const BINDINGS = [
   { keys: ["8"], action: "nudgeRate", args: ["B", -RATE_STEP], label: "デッキ B のテンポを下げる", group: "テンポ" },
   { keys: ["9"], action: "nudgeRate", args: ["B", RATE_STEP], label: "デッキ B のテンポを上げる", group: "テンポ" },
   { keys: ["0"], action: "resetRate", args: ["B"], label: "デッキ B のテンポを 1.0 に戻す", group: "テンポ" },
+  { keys: ["e"], action: "nudgeEq", args: ["A", "high", -EQ_STEP], label: "デッキ A の HIGH を下げる", group: "イコライザー" },
+  { keys: ["r"], action: "nudgeEq", args: ["A", "high", EQ_STEP], label: "デッキ A の HIGH を上げる", group: "イコライザー" },
+  { keys: ["d"], action: "nudgeEq", args: ["A", "mid", -EQ_STEP], label: "デッキ A の MID を下げる", group: "イコライザー" },
+  { keys: ["f"], action: "nudgeEq", args: ["A", "mid", EQ_STEP], label: "デッキ A の MID を上げる", group: "イコライザー" },
+  { keys: ["c"], action: "nudgeEq", args: ["A", "low", -EQ_STEP], label: "デッキ A の LOW を下げる", group: "イコライザー" },
+  { keys: ["v"], action: "nudgeEq", args: ["A", "low", EQ_STEP], label: "デッキ A の LOW を上げる", group: "イコライザー" },
+  { keys: ["4"], action: "resetEq", args: ["A"], label: "デッキ A のイコライザーを 0 dB に戻す", group: "イコライザー" },
+  { keys: ["i"], action: "nudgeEq", args: ["B", "high", -EQ_STEP], label: "デッキ B の HIGH を下げる", group: "イコライザー" },
+  { keys: ["o"], action: "nudgeEq", args: ["B", "high", EQ_STEP], label: "デッキ B の HIGH を上げる", group: "イコライザー" },
+  { keys: ["y"], action: "nudgeEq", args: ["B", "mid", -EQ_STEP], label: "デッキ B の MID を下げる", group: "イコライザー" },
+  { keys: ["u"], action: "nudgeEq", args: ["B", "mid", EQ_STEP], label: "デッキ B の MID を上げる", group: "イコライザー" },
+  { keys: ["n"], action: "nudgeEq", args: ["B", "low", -EQ_STEP], label: "デッキ B の LOW を下げる", group: "イコライザー" },
+  { keys: ["h"], action: "nudgeEq", args: ["B", "low", EQ_STEP], label: "デッキ B の LOW を上げる", group: "イコライザー" },
+  { keys: ["7"], action: "resetEq", args: ["B"], label: "デッキ B のイコライザーを 0 dB に戻す", group: "イコライザー" },
   {
     keys: ["ArrowLeft", ","],
     action: "nudgeCrossfader",
