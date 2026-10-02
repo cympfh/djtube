@@ -1,1 +1,1 @@
-"""Browser DJ toy. Search and audio stay on the server."""
+"""Browser DJ. Search and audio stay on the server."""
