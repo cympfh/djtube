@@ -68,18 +68,28 @@ button:hover { border-color: #5c564b; }
 
 .mark {
   margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.32em;
   font-size: 22px;
-  letter-spacing: 0.18em;
   font-weight: 700;
+  line-height: 1;
 }
 
-.tag, .health, .status, .midi-status, .deck-channel, .cue-readout, .gain-readout, .fader-readout {
+.mark-word { letter-spacing: 0.18em; }
+
+.mark-icon {
+  display: block;
+  flex: none;
+  height: 1cap;
+  width: 1cap;
+}
+
+.health, .status, .midi-status, .deck-channel, .cue-readout, .gain-readout, .fader-readout {
   color: var(--muted);
 }
 
-.tag, .health { margin: 2px 0 0; font-size: 13px; }
-
-.health { margin-left: auto; }
+.health { margin: 2px 0 0 auto; font-size: 13px; }
 
 .cookie-open {
   width: 36px;
