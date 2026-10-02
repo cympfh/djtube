@@ -14,8 +14,9 @@ const audios = {
 };
 const searchInput = document.getElementById("search-input");
 
-async function fetchSearch(query) {
-  const response = await fetch(`${prefix}/api/search?q=${encodeURIComponent(query)}`);
+async function fetchSearch(query, musicOnly = state.musicOnly) {
+  const params = new URLSearchParams({ q: query, music: musicOnly ? "true" : "false" });
+  const response = await fetch(`${prefix}/api/search?${params}`);
   if (!response.ok) {
     let detail = "";
     try {
@@ -229,12 +230,17 @@ function render() {
   renderFader();
   document.getElementById("search-button").disabled = state.searching;
   document.getElementById("search-button").textContent = state.searching ? "検索中" : "検索";
+  const music = document.getElementById("music-only");
+  if (music) music.checked = state.musicOnly;
 }
 
 document.getElementById("search-hint").textContent = SEARCH_HINT;
 renderLegend();
 
 document.getElementById("search-button").addEventListener("click", () => actions.submitSearch());
+document.getElementById("music-only").addEventListener("change", (event) => {
+  actions.setMusicOnly(event.target.checked);
+});
 document.getElementById("play-A").addEventListener("click", () => actions.togglePlay("A"));
 document.getElementById("play-B").addEventListener("click", () => actions.togglePlay("B"));
 document.getElementById("cue-btn-A").addEventListener("click", () => actions.cue("A"));

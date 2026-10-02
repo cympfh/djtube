@@ -184,6 +184,28 @@ test("keyboard map covers deck operations and skips typed search", async () => {
   assert.equal(state.loadTarget, "B");
 });
 
+test("M toggles the music limit outside the search field", async () => {
+  const seen = [];
+  const { state, actions } = harness({
+    deps: {
+      async fetchSearch(query, musicOnly) {
+        seen.push({ query, musicOnly });
+        return { source: "youtube", tracks: [{ id: "abcdefghijk", title: "夜", channel: "A店", duration: 90 }] };
+      },
+    },
+  });
+  assert.equal(state.musicOnly, true);
+  assert.equal(handleKeydown(keyEvent("m", searchTarget()), actions), false);
+  assert.equal(state.musicOnly, true);
+  state.lastQuery = "city pop";
+  assert.equal(handleKeydown(keyEvent("m", bodyTarget()), actions), true);
+  assert.equal(state.musicOnly, false);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(seen.at(-1), { query: "city pop", musicOnly: false });
+  const labels = legendGroups().flatMap((group) => group.items.map((item) => item.label));
+  assert.ok(labels.includes("音楽に限る"));
+});
+
 test("second enter loads the targeted deck", async () => {
   const { state, audios, actions, calls, setFocused } = harness({ focused: true });
   await actions.onEnter();

@@ -10,6 +10,7 @@ export const BINDINGS = [
   { keys: ["Escape"], action: "blurSearch", label: "検索から抜ける", group: "検索" },
   { keys: ["ArrowUp", "k"], action: "moveSelection", args: [-1], label: "結果を上へ", group: "検索" },
   { keys: ["ArrowDown", "j"], action: "moveSelection", args: [1], label: "結果を下へ", group: "検索" },
+  { keys: ["m"], action: "toggleMusicOnly", label: "音楽に限る", group: "検索" },
   { keys: ["a"], action: "loadSelected", args: ["A"], label: "デッキ A へロード", group: "デッキ" },
   { keys: ["b"], action: "loadSelected", args: ["B"], label: "デッキ B へロード", group: "デッキ" },
   { keys: ["t"], action: "toggleLoadTarget", label: "ロード先を切り替え", group: "デッキ" },

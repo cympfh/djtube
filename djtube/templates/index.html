@@ -30,6 +30,10 @@
             <input id="search-input" type="search" placeholder="曲名・アーティスト" autocomplete="off" spellcheck="false" enterkeyhint="search" />
             <button type="button" id="search-button">検索</button>
           </div>
+          <label class="music-only" for="music-only">
+            <input id="music-only" type="checkbox" checked aria-keyshortcuts="m" />
+            音楽に限る
+          </label>
           <p class="hint" id="search-hint"></p>
           <p class="status" id="search-status" role="status"></p>
           <ol id="results" class="results" role="listbox" aria-label="検索結果"></ol>
