@@ -13,7 +13,7 @@ YouTube の曲を 2 デッキで再生する。検索はサーバ側で行い、
 - 検索はこれまでどおり。再生は YouTube IFrame ではなく、サーバが yt-dlp で音声 URL を解決して中継する
 - テンポは audio 要素の `playbackRate`。範囲は 0.5 から 2.0、操作は 0.25 刻み。画面の数値を `playbackRate` に渡す。曲を載せると、載せたデッキだけ 1.0 に戻す
 - キーボードだけで一通り操作できる
-- Pioneer DDJ-FLX4 の MIDI 割り当ては未実装。受信口だけある
+- Pioneer DDJ-FLX4 の再生、キュー、ロード、クロスフェーダー、ジョグ、ブラウズは MIDI。それ以外の操作は未実装
 
 YouTube の iframe は音声を Web Audio に渡せない。HIGH / MID / LOW を実際にかけるため、デッキは `/api/audio/{id}` の音声を再生する。yt-dlp は progressive な音声 URL を取るだけで、ファイルは保存しない。別のダウンロードサイトは使わない。署名付き URL はブラウザに返さない。データセンターの IP では取得に失敗することがあり、そのときはデッキにエラーが出る。
 
@@ -77,17 +77,37 @@ docker compose up --build
 
 ## 操作の実装
 
-クロスフェーダーは等パワー（中央で両方とも約 71%）。画面の「音量」がその値です。ジョグ（`[ ]` と `; '`）は再生位置だけを動かし、キュー位置とクロスフェーダーは変えません。長さが分かっているときはその範囲に収め、プレーヤーが準備完了でないときは何もしません。
+クロスフェーダーは等パワー（中央で両方とも約 71%）。画面の「音量」がその値です。ジョグ（`[ ]` と `; '`。デッキ B の 10 秒戻しは `Shift+;` と `+`）は再生位置だけを動かし、キュー位置とクロスフェーダーは変えません。プレーヤーがまだジョグ前の位置にいるあいだは、直前に指示した位置へ足す。再生がその位置を離れて指示した位置のほうへ進んだときに記憶は消える。0.05 秒の指示に再生位置が届いたときも消える。ジョグ前の位置のまま、または逆方向に動いただけでは消えない。キューしたとき、時間のバーをクリックしたとき、曲を読み込んだときは、位置を読む前とシークする前に消える。長さが分かっているときはその範囲に収め、プレーヤーが準備完了でないときは何もしません。
 
 画面下の凡例は `djtube/static/keys.js` の `BINDINGS` が出す。
 
 ## DDJ-FLX4
 
-割り当ては未実装です。コントローラ用の入口は `djtube/static/controller.js` の `FLX4_MAP` と `dispatchControllerEvent` だけです。
+`djtube/static/controller.js` の `FLX4_MAP` が、キーボードと同じ actions を呼ぶ。番号は Pioneer の DDJ-FLX4 MIDI Message List（E1）と Mixxx の Pioneer-DDJ-FLX4。チャンネルは 0 始まり。デッキ 1 は 0、デッキ 2 は 1、ミキサーとブラウズは 6。
 
-マップは空です。Web MIDI は「MIDI を開く」を押したときだけ接続します。来た信号は、マップに無いのでデッキを動かさず、件数だけ数えます。
+Web MIDI は安全なページで、「MIDI を開く」を押したときだけ接続する。公開サイトは https://s.cympfh.cc/djtube/ 。画面上部に未接続か、接続したデバイス名が出る。
 
-あとからノート番号や CC を `FLX4_MAP` に書くと、キーボードと同じ actions（再生、キュー、ジョグ、テンポ、イコライザー、ロード、フェーダー）が呼ばれます。ジョグは `jog` で、引数はデッキ（`"A"` か `"B"`）と秒数です。テンポは `setRate`、`nudgeRate`、`resetRate`、`setRateFromController` です。`setRateFromController` は MIDI の 0–127 を受け、64 が 1.0、0 が 0.5、127 が 2.0 です。イコライザーは `setEq`、`nudgeEq`、`resetEq`、`setEqFromController` です。`setEqFromController` はバンド名と MIDI 0–127 を受け、64 が 0 dB、0 がカット、127 がブーストです。デッキ側の書き換えは要りません。チャンネルは 0–15。フェーダー用の CC は `setCrossfaderFromController` に `passValue: true` を渡し、値は MIDI の 0–127。実機の番号はここには書いていません。マップは空のままです。
+ジョグは `actions.jog(deck, seconds)`。準備完了のデッキだけ、再生位置を秒数ぶん動かす。テンポはキーボードの `setRate`、`nudgeRate`、`resetRate` と、MIDI 値を受ける `setRateFromController`（0–127、64 が 1.0、0 が 0.5、127 が 2.0）。イコライザーは `setEq`、`nudgeEq`、`resetEq`、`setEqFromController`。`setEqFromController` はバンド名と MIDI 0–127 を受け、64 が 0 dB、0 がカット、127 がブーストです。FLX4 のテンポスライダーと EQ はこのマップには入っていない。
+
+割り当てている操作:
+
+- PLAY/PAUSE（ch 0/1、ノート 11）: 再生 / 一時停止
+- CUE（ch 0/1、ノート 12）: キュー
+- LOAD（ch 6、ノート 70 / 71）: 選択中の曲をデッキ A / B へ
+- クロスフェーダー MSB（ch 6、CC 31）: クロスフェーダー。値は 0–127
+- ジョグ側面・プラッター（ch 0/1、CC 33 / 34 / 35）: 1 目盛り約 0.05 秒
+- Shift+プラッター（ch 0/1、CC 41）: 1 目盛り約 0.5 秒
+- BROWSE 回転（ch 6、CC 64）: 検索結果を上下
+
+未実装の操作:
+
+- Shift+PLAY/PAUSE、Shift+CUE
+- ジョグのタッチ
+- テンポスライダー、TRIM、EQ、フィルター
+- チャンネルフェーダーとその LSB、クロスフェーダーの LSB
+- ヘッドホン、MASTER、マイク
+- パッド、ループ、BEAT SYNC、エフェクト、SMART CFX、SMART FADER
+- BROWSE の押し込みと Shift+BROWSE
 
 ## 開発
 

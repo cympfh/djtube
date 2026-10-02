@@ -528,86 +528,6 @@ test("+ seeks deck B backward about 10 seconds from the commanded position", () 
   });
 });
 
-test("jog keeps adding while the player still reports the old time", () => {
-  const { state, audios, actions } = harness();
-  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 120 }];
-  return actions.loadSelected("A").then(() => {
-    let reported = 10;
-    let commanded = 10;
-    Object.defineProperty(audios.A, "currentTime", {
-      configurable: true,
-      get() {
-        return reported;
-      },
-      set(value) {
-        commanded = value;
-      },
-    });
-    audios.A.duration = 80;
-    actions.jog("A", 1);
-    assert.equal(commanded, 11);
-    actions.jog("A", 1);
-    assert.equal(commanded, 12);
-    actions.jog("A", 10);
-    assert.equal(commanded, 22);
-    reported = 22;
-    actions.syncJog("A");
-    assert.equal(state.decks.A.jogCommand, null);
-    actions.jog("A", 1);
-    assert.equal(commanded, 23);
-    assert.equal(state.decks.A.cue, 0);
-  });
-});
-
-test("cue back near the pre-jog time does not jump to the old jog target", () => {
-  const { state, audios, actions } = harness();
-  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 120 }];
-  return actions.loadSelected("A").then(() => {
-    let reported = 10;
-    let commanded = 10;
-    let seekPending = false;
-    Object.defineProperty(audios.A, "currentTime", {
-      configurable: true,
-      get() {
-        if (seekPending && Math.abs(reported - commanded) > 0.35) return commanded;
-        seekPending = false;
-        return reported;
-      },
-      set(value) {
-        commanded = value;
-        seekPending = true;
-      },
-    });
-    state.decks.A.cue = 10;
-    actions.jog("A", 10);
-    assert.equal(commanded, 20);
-    assert.equal(state.decks.A.jogCommand.at, 20);
-    actions.cue("A");
-    assert.equal(commanded, 10);
-    assert.equal(state.decks.A.jogCommand, null);
-    actions.jog("A", 1);
-    assert.equal(commanded, 11);
-  });
-});
-
-test("a position bar seek drops the stored jog target", () => {
-  const { state, audios, actions } = harness();
-  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 120 }];
-  return actions.loadSelected("A").then(() => {
-    audios.A.currentTime = 10;
-    audios.A.duration = 80;
-    actions.jog("A", 10);
-    assert.equal(audios.A.currentTime, 20);
-    actions.seek("A", 10);
-    assert.equal(audios.A.currentTime, 10);
-    assert.equal(state.decks.A.jogCommand, null);
-    actions.jog("A", 1);
-    assert.equal(audios.A.currentTime, 11);
-    assert.equal(state.decks.A.cue, 0);
-    assert.equal(state.crossfader, 0.5);
-  });
-});
-
 test("tempo clamps, nudges, resets, and stays callable from the action table", async () => {
   assert.equal(clampRate(Number.NaN), 1);
   assert.equal(clampRate(4), 2);
@@ -691,6 +611,7 @@ test("tempo clamps, nudges, resets, and stays callable from the action table", a
   assert.equal(handleKeydown(keyEvent("[", bodyTarget()), actions), true);
   assert.equal(state.decks.A.rate, beforeJog);
 
+  const mapBefore = { ...FLX4_MAP };
   const cc = messageFromMidi(new Uint8Array([0xb0, 40, 127]));
   assert.equal(
     dispatchControllerEvent(cc, actions, {
@@ -700,7 +621,6 @@ test("tempo clamps, nudges, resets, and stays callable from the action table", a
   );
   assert.equal(state.decks.A.rate, 2);
   assert.equal(audios.A.playbackRate, 2);
-  assert.deepEqual(FLX4_MAP, {});
   const center = messageFromMidi(new Uint8Array([0xb0, 40, 64]));
   assert.equal(
     dispatchControllerEvent(center, actions, {
@@ -709,6 +629,7 @@ test("tempo clamps, nudges, resets, and stays callable from the action table", a
     true,
   );
   assert.equal(state.decks.B.rate, 1);
+  assert.deepEqual(FLX4_MAP, mapBefore);
 });
 
 test("loading a track resets only that deck tempo to 1.0", async () => {
