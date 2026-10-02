@@ -1,0 +1,216 @@
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import threading
+import uuid
+from pathlib import Path
+
+from djtube.paths import PACKAGE_DIR
+from djtube.search import track_from_payload
+
+log = logging.getLogger(__name__)
+
+NAME_MAX = 80
+PLAYLIST_MAX = 40
+TRACK_MAX = 300
+_PLAYLIST_ID = re.compile(r"^[0-9a-f]{32}$")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+class PlaylistError(Exception):
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
+def playlist_path() -> Path:
+    raw = os.environ.get("DJTUBE_PLAYLISTS", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return PACKAGE_DIR.parent / "data" / "playlists.json"
+
+
+def normalize_name(name: object) -> str:
+    if not isinstance(name, str):
+        return ""
+    cleaned = _CONTROL.sub(" ", name)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:NAME_MAX]
+
+
+class PlaylistStore:
+    """Named track lists.
+
+    The file is the durable copy when it can be written. If the write fails,
+    the in-memory list still serves this process.
+    """
+
+    def __init__(self, path: Path, *, playlist_limit: int = PLAYLIST_MAX, track_limit: int = TRACK_MAX):
+        self.path = path
+        self.playlist_limit = playlist_limit
+        self.track_limit = track_limit
+        self.durable = True
+        self._lock = threading.Lock()
+        self._playlists = self._load()
+
+    def list_playlists(self) -> list[dict]:
+        with self._lock:
+            return [_public(item) for item in self._playlists]
+
+    def create(self, name: object) -> dict:
+        cleaned = normalize_name(name)
+        if not cleaned:
+            raise PlaylistError("名前を入れてください")
+        with self._lock:
+            if len(self._playlists) >= self.playlist_limit:
+                raise PlaylistError("プレイリストが多すぎます")
+            playlist = {"id": uuid.uuid4().hex, "name": cleaned, "tracks": []}
+            self._playlists.append(playlist)
+            self._save()
+            return _public(playlist)
+
+    def rename(self, playlist_id: str, name: object) -> dict:
+        cleaned = normalize_name(name)
+        if not cleaned:
+            raise PlaylistError("名前を入れてください")
+        with self._lock:
+            playlist = self._find(playlist_id)
+            playlist["name"] = cleaned
+            self._save()
+            return _public(playlist)
+
+    def delete(self, playlist_id: str) -> None:
+        with self._lock:
+            playlist = self._find(playlist_id)
+            self._playlists.remove(playlist)
+            self._save()
+
+    def add_track(self, playlist_id: str, payload: object) -> dict:
+        if not isinstance(payload, dict):
+            raise PlaylistError("曲を選べません")
+        raw = dict(payload)
+        index = raw.pop("index", None)
+        track = track_from_payload(raw)
+        if track is None:
+            raise PlaylistError("動画IDが正しくありません")
+        with self._lock:
+            playlist = self._find(playlist_id)
+            tracks = playlist["tracks"]
+            if len(tracks) >= self.track_limit:
+                raise PlaylistError("曲数が多すぎます")
+            if index is None:
+                at = len(tracks)
+            elif isinstance(index, bool) or not isinstance(index, int) or index < 0 or index > len(tracks):
+                raise PlaylistError("曲を選べません")
+            else:
+                at = index
+            tracks.insert(at, track.as_dict())
+            self._save()
+            return _public(playlist)
+
+    def remove_track(self, playlist_id: str, index: int) -> dict:
+        with self._lock:
+            playlist = self._find(playlist_id)
+            tracks = playlist["tracks"]
+            if isinstance(index, bool) or not isinstance(index, int) or index < 0 or index >= len(tracks):
+                raise PlaylistError("曲を選べません")
+            del tracks[index]
+            self._save()
+            return _public(playlist)
+
+    def move_track(self, playlist_id: str, from_index: int, to_index: int) -> dict:
+        with self._lock:
+            playlist = self._find(playlist_id)
+            tracks = playlist["tracks"]
+            if (
+                isinstance(from_index, bool)
+                or isinstance(to_index, bool)
+                or not isinstance(from_index, int)
+                or not isinstance(to_index, int)
+                or from_index < 0
+                or to_index < 0
+                or from_index >= len(tracks)
+                or to_index >= len(tracks)
+            ):
+                raise PlaylistError("曲を選べません")
+            item = tracks.pop(from_index)
+            tracks.insert(to_index, item)
+            self._save()
+            return _public(playlist)
+
+    def _find(self, playlist_id: str) -> dict:
+        if not isinstance(playlist_id, str) or not _PLAYLIST_ID.fullmatch(playlist_id):
+            raise PlaylistError("プレイリストが見つかりません", 404)
+        for playlist in self._playlists:
+            if playlist["id"] == playlist_id:
+                return playlist
+        raise PlaylistError("プレイリストが見つかりません", 404)
+
+    def _load(self) -> list[dict]:
+        if not self.path.is_file():
+            return []
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            log.warning("playlist file unreadable: %s", self.path)
+            self._park_unreadable()
+            return []
+        if not isinstance(raw, dict) or not isinstance(raw.get("playlists"), list):
+            log.warning("playlist file has an unexpected shape: %s", self.path)
+            self._park_unreadable()
+            return []
+        playlists: list[dict] = []
+        for item in raw["playlists"]:
+            parsed = _parse_playlist(item)
+            if parsed is not None:
+                playlists.append(parsed)
+        return playlists
+
+    def _park_unreadable(self) -> None:
+        backup = self.path.with_name(self.path.name + ".bak")
+        try:
+            os.replace(self.path, backup)
+        except OSError:
+            log.warning("could not move unreadable playlist file aside: %s", self.path)
+
+    def _save(self) -> None:
+        payload = {"playlists": [_public(item) for item in self._playlists]}
+        text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_name(self.path.name + ".tmp")
+            temporary.write_text(text, encoding="utf-8")
+            os.replace(temporary, self.path)
+        except OSError:
+            log.warning("could not write playlists to %s; keeping them in memory", self.path)
+            self.durable = False
+            return
+        self.durable = True
+
+
+def _parse_playlist(item: object) -> dict | None:
+    if not isinstance(item, dict):
+        return None
+    playlist_id = item.get("id")
+    name = normalize_name(item.get("name"))
+    if not isinstance(playlist_id, str) or not _PLAYLIST_ID.fullmatch(playlist_id) or not name:
+        return None
+    tracks: list[dict] = []
+    raw_tracks = item.get("tracks")
+    if isinstance(raw_tracks, list):
+        for raw in raw_tracks:
+            track = track_from_payload(raw)
+            if track is not None:
+                tracks.append(track.as_dict())
+    return {"id": playlist_id, "name": name, "tracks": tracks}
+
+
+def _public(playlist: dict) -> dict:
+    return {
+        "id": playlist["id"],
+        "name": playlist["name"],
+        "tracks": [dict(track) for track in playlist["tracks"]],
+    }

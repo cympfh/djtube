@@ -21,6 +21,29 @@ audios.B.onSeekLanded = () => {
   state.decks.B.jogCommand = null;
 };
 const searchInput = document.getElementById("search-input");
+const playlistName = document.getElementById("playlist-name");
+
+async function fetchJson(path, options = {}) {
+  const response = await fetch(`${prefix}${path}`, {
+    ...options,
+    headers: {
+      ...(options.body ? { "content-type": "application/json" } : {}),
+      ...(options.headers || {}),
+    },
+  });
+  if (response.status === 204) return null;
+  let body = null;
+  try {
+    body = await response.json();
+  } catch {
+    body = null;
+  }
+  if (!response.ok) {
+    const detail = body && typeof body.detail === "string" ? body.detail : "";
+    throw new Error(detail || "プレイリストを保存できませんでした");
+  }
+  return body;
+}
 
 async function fetchSearch(query, musicOnly = state.musicOnly) {
   const params = new URLSearchParams({ q: query, music: musicOnly ? "true" : "false" });
@@ -57,6 +80,26 @@ const actions = createActions({
   focusSearchElement: () => searchInput.focus(),
   blurSearchElement: () => searchInput.blur(),
   fetchSearch,
+  fetchPlaylists: () => fetchJson("/api/playlists"),
+  createPlaylist: (name) => fetchJson("/api/playlists", { method: "POST", body: JSON.stringify({ name }) }),
+  renamePlaylist: (id, name) =>
+    fetchJson(`/api/playlists/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
+  deletePlaylist: (id) => fetchJson(`/api/playlists/${id}`, { method: "DELETE" }),
+  addPlaylistTrack: (id, track) =>
+    fetchJson(`/api/playlists/${id}/tracks`, { method: "POST", body: JSON.stringify(track) }),
+  removePlaylistTrack: (id, index) => fetchJson(`/api/playlists/${id}/tracks/${index}`, { method: "DELETE" }),
+  movePlaylistTrack: (id, from, to) =>
+    fetchJson(`/api/playlists/${id}/tracks/move`, { method: "POST", body: JSON.stringify({ from, to }) }),
+  playlistNameValue: () => playlistName.value,
+  setPlaylistNameValue: (value) => {
+    playlistName.value = value;
+  },
+  focusPlaylistNameElement: () => {
+    playlistName.focus();
+    playlistName.select();
+  },
+  blurPlaylistNameElement: () => playlistName.blur(),
+  confirmDelete: (message) => window.confirm(message),
 });
 
 function sourceLabel(source) {
@@ -275,9 +318,119 @@ function renderSearchStatus() {
   node.classList.toggle("is-error", !!state.searchError && state.searchError !== "見つかりませんでした");
 }
 
+function renderPlaylists() {
+  const select = document.getElementById("playlist-select");
+  const signature = state.playlists.map((item) => `${item.id}\t${item.name}`).join("\n");
+  if (select.dataset.signature !== signature) {
+    select.dataset.signature = signature;
+    select.replaceChildren();
+    if (!state.playlists.length) {
+      const empty = document.createElement("option");
+      empty.value = "";
+      empty.textContent = "プレイリストはありません";
+      select.append(empty);
+    }
+    for (const playlist of state.playlists) {
+      const option = document.createElement("option");
+      option.value = playlist.id;
+      option.textContent = playlist.name;
+      select.append(option);
+    }
+  }
+  select.value = state.playlistId || "";
+  select.disabled = state.playlistBusy || state.playlists.length === 0;
+
+  const note = document.getElementById("playlist-name-note");
+  note.textContent = state.playlistNaming === "rename" ? "Enter で変える" : "Enter で作る";
+  const status = document.getElementById("playlist-status");
+  status.textContent = state.playlistError || "";
+  status.classList.toggle("is-error", !!state.playlistError);
+
+  const busy = state.playlistBusy;
+  document.getElementById("playlist-create").disabled = busy;
+  document.getElementById("playlist-rename").disabled = busy;
+  document.getElementById("playlist-delete").disabled = busy || !state.playlistId;
+  document.getElementById("playlist-add-search").disabled = busy || !state.playlistId;
+  document.getElementById("playlist-add-a").disabled = busy || !state.playlistId;
+  document.getElementById("playlist-add-b").disabled = busy || !state.playlistId;
+
+  const playlist = state.playlists.find((item) => item.id === state.playlistId) || null;
+  const tracks = playlist?.tracks || [];
+  const list = document.getElementById("playlist-tracks");
+  list.replaceChildren();
+  tracks.forEach((track, index) => {
+    const li = document.createElement("li");
+    li.className = index === state.playlistIndex ? "is-selected" : "";
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", index === state.playlistIndex ? "true" : "false");
+    li.id = `playlist-track-${index}`;
+
+    if (track.thumbnail) {
+      const img = document.createElement("img");
+      img.className = "thumb";
+      img.alt = "";
+      img.src = track.thumbnail;
+      li.append(img);
+    } else {
+      const blank = document.createElement("div");
+      blank.className = "thumb";
+      blank.textContent = "♪";
+      li.append(blank);
+    }
+
+    const text = document.createElement("div");
+    const title = document.createElement("p");
+    title.className = "result-title";
+    title.textContent = track.title || track.id;
+    const meta = document.createElement("p");
+    meta.className = "result-meta";
+    const bits = [track.channel, track.duration ? formatTime(track.duration) : ""].filter(Boolean);
+    meta.textContent = bits.join(" · ");
+    const buttons = document.createElement("div");
+    buttons.className = "playlist-track-actions";
+    const actionsForTrack = [
+      ["Aへ", () => actions.loadPlaylistTrack("A")],
+      ["Bへ", () => actions.loadPlaylistTrack("B")],
+      ["上", () => actions.movePlaylistTrack(-1)],
+      ["下", () => actions.movePlaylistTrack(1)],
+      ["外す", () => actions.removePlaylistTrack()],
+    ];
+    for (const [label, run] of actionsForTrack) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.disabled = busy;
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        state.playlistIndex = index;
+        run();
+      });
+      buttons.append(button);
+    }
+    text.append(title, meta, buttons);
+    li.addEventListener("click", () => {
+      state.playlistIndex = index;
+      renderPlaylists();
+    });
+    li.append(text);
+    list.append(li);
+  });
+  const selected = list.children[state.playlistIndex];
+  if (selected) {
+    const top = selected.offsetTop;
+    const bottom = top + selected.offsetHeight;
+    if (top < list.scrollTop) list.scrollTop = top;
+    else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
+    list.setAttribute("aria-activedescendant", selected.id);
+  } else {
+    list.removeAttribute("aria-activedescendant");
+  }
+}
+
 function render() {
   renderSearchStatus();
   renderResults();
+  renderPlaylists();
   renderDeck("A");
   renderDeck("B");
   renderFader();
@@ -290,6 +443,21 @@ function render() {
 renderLegend();
 
 document.getElementById("search-button").addEventListener("click", () => actions.submitSearch());
+document.getElementById("playlist-create").addEventListener("click", () => actions.createPlaylist());
+document.getElementById("playlist-rename").addEventListener("click", () => actions.renamePlaylist());
+document.getElementById("playlist-delete").addEventListener("click", () => actions.deletePlaylist());
+document.getElementById("playlist-add-search").addEventListener("click", () => actions.addSearchHit());
+document.getElementById("playlist-add-a").addEventListener("click", () => actions.addDeckTrack("A"));
+document.getElementById("playlist-add-b").addEventListener("click", () => actions.addDeckTrack("B"));
+document.getElementById("playlist-select").addEventListener("change", (event) => {
+  actions.selectPlaylist(event.target.value);
+});
+playlistName.addEventListener("blur", () => {
+  if (state.playlistNaming !== "create") {
+    state.playlistNaming = "create";
+    scheduleRender();
+  }
+});
 document.getElementById("music-only").addEventListener("change", (event) => {
   actions.setMusicOnly(event.target.checked);
 });
@@ -363,6 +531,8 @@ midiButton.addEventListener("click", () => {
     showMidiStatus(status);
   });
 });
+
+actions.loadPlaylists();
 
 fetch(`${prefix}/api/health`)
   .then((response) => (response.ok ? response.json() : null))

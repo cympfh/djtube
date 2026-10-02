@@ -25,9 +25,11 @@ FROM base AS runtime
 COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 COPY --chown=appuser:appuser djtube ./djtube
 COPY --chown=appuser:appuser main.py ./
+RUN mkdir -p /app/data && chown appuser:appuser /app/data
 
 ENV PATH="/app/.venv/bin:$PATH" \
-    PYTHONPATH="/app"
+    PYTHONPATH="/app" \
+    DJTUBE_PLAYLISTS=/app/data/playlists.json
 USER appuser
 EXPOSE 8098
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8098"]

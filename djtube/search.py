@@ -104,6 +104,18 @@ def _track(
     )
 
 
+def track_from_payload(payload: object) -> Track | None:
+    if not isinstance(payload, dict):
+        return None
+    return _track(
+        payload.get("id"),
+        payload.get("title"),
+        payload.get("channel"),
+        payload.get("duration"),
+        payload.get("thumbnail"),
+    )
+
+
 def tracks_from_youtube_search(payload: dict) -> list[str]:
     ids: list[str] = []
     for item in payload.get("items") or []:

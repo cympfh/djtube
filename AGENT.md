@@ -8,7 +8,7 @@ YouTube の曲を 2 デッキで再生する。検索はサーバ側で行い、
 
 ## 動き
 
-- デッキ A / B、再生・一時停止、キュー、テンポ、イコライザー、クロスフェーダー
+- デッキ A / B、再生・一時停止、キュー、テンポ、イコライザー、クロスフェーダー、プレイリスト
 - 検索語を入れると結果からデッキへ載せる
 - 検索はこれまでどおり。再生は YouTube IFrame ではなく、サーバが yt-dlp で音声 URL を解決して中継する
 - デッキに曲が載っているあいだ、検索結果の `thumbnail` を静止画で出す。無いときはその枠を空にする。動画 ID から絵は作らない
@@ -31,6 +31,7 @@ nginx は `/djtube/` を外してコンテナへ渡す。コンテナはポー�
 | `/djtube/` | `/` |
 | `/djtube/static/app.js` | `/static/app.js` |
 | `/djtube/api/search` | `/api/search` |
+| `/djtube/api/playlists` | `/api/playlists` |
 
 フロントの基準パスは `/djtube/`。直に `http://127.0.0.1:8098/djtube/` を開いても、同じプレフィックスをコンテナ側で剥がすので動く。
 
@@ -65,6 +66,26 @@ docker compose up --build
 ```
 
 キーの値はリポジトリに置きません。
+
+## プレイリスト
+
+プレイリストは名前の付いた曲の並びです。曲は検索結果と同じ項目（動画 ID、タイトル、チャンネル、長さ、サムネイル）です。ブラウザを閉じても、別のブラウザで開いても、同じサーバの一覧を見ます。ログインはなく、このサーバを開ける人は同じプレイリストを共有します。
+
+保存先は JSON ファイルです。既定は、起動したディレクトリ（コンテナの中では `/app`）の `data/playlists.json`。環境変数 `DJTUBE_PLAYLISTS` にファイルのパスを渡すと、そこへ書きます。
+
+ファイルに書けたときは、同じファイルシステムが残っていればプロセスを入れ直しても読めます。書けないときは、そのプロセスが生きているあいだだけメモリに残し、ログに警告を出します。
+
+公開手順の `docker run --rm -p 8098:8098 -e YOUTUBE_API_KEY djtube` はボリュームを付けません。`--rm` でコンテナを消すと、コンテナの中に書いたファイルも消えます。この起動のしかたには、コンテナを作り直したあとも残る場所はありません。
+
+`compose.yaml` は名前付きボリューム `djtube-data` を `/app/data` に付け、`DJTUBE_PLAYLISTS=/app/data/playlists.json` を渡します。`docker compose` でコンテナを作り直しても、このボリュームのプレイリストは残ります。
+
+`docker run` で残したいときは、同じボリュームを付けます。
+
+```bash
+docker run --rm -p 8098:8098 -e YOUTUBE_API_KEY -e DJTUBE_PLAYLISTS=/app/data/playlists.json -v djtube-data:/app/data djtube
+```
+
+イメージは `/app/data` を `appuser` の所有で作ります。名前付きボリュームを初めて付けるとき、この所有者が使われます。API は `/api/playlists` です。プロセスは 1 つを想定しています。
 
 ## 検索と API キー
 

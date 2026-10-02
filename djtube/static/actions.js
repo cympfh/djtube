@@ -1,5 +1,6 @@
 import { EQ_BANDS, clampEqUnit, eqGainDb, eqUnitFromMidi } from "./eq.js";
 import { deckGains } from "./gains.js";
+import { createPlaylistActions, freshPlaylistState, trackSnapshot } from "./playlists.js";
 import { clampRate, rateFromMidi } from "./rate.js";
 import { commandedSeekLanded } from "./seekland.js";
 
@@ -18,6 +19,7 @@ export function freshDeck() {
     rate: 1,
     eq: { high: 0.5, mid: 0.5, low: 0.5 },
     eqError: "",
+    track: null,
   };
 }
 
@@ -40,6 +42,7 @@ export function freshState() {
     loadTarget: "A",
     musicOnly: true,
     crossfader: 0.5,
+    ...freshPlaylistState(),
     decks: { A: freshDeck(), B: freshDeck() },
   };
 }
@@ -163,6 +166,7 @@ export function createActions(deps) {
     if (!deckState || !track?.id || typeof audio.loadVideo !== "function") return;
     deckState.gen += 1;
     const gen = deckState.gen;
+    deckState.track = trackSnapshot(track);
     deckState.id = track.id;
     deckState.title = track.title || track.id;
     deckState.channel = track.channel || "";
@@ -407,5 +411,6 @@ export function createActions(deps) {
     setCrossfader,
     setCrossfaderFromController,
     applyGains,
+    ...createPlaylistActions({ deps, state, scheduleRender, loadTrack }),
   };
 }

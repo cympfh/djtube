@@ -9,3 +9,4 @@ cache/
 *.part
 node_modules/
 .uv-cache/
+data/

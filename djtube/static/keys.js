@@ -82,6 +82,27 @@ export const BINDINGS = [
   },
   { keys: ["Home"], action: "setCrossfader", args: [0], label: "フェーダーを A 端へ", group: "フェーダー" },
   { keys: ["End"], action: "setCrossfader", args: [1], label: "フェーダーを B 端へ", group: "フェーダー" },
+  { keys: ["p"], action: "focusPlaylistName", label: "プレイリストの名前欄", group: "プレイリスト" },
+  { keys: ["p"], action: "beginRenamePlaylist", shift: true, label: "プレイリストの名前を変える", group: "プレイリスト" },
+  { keys: ["PageUp"], action: "cyclePlaylist", args: [-1], label: "前のプレイリスト", group: "プレイリスト" },
+  { keys: ["PageDown"], action: "cyclePlaylist", args: [1], label: "次のプレイリスト", group: "プレイリスト" },
+  { keys: ["l"], action: "addSearchHit", label: "検索の曲を追加", group: "プレイリスト" },
+  { keys: ["s"], action: "addDeckTrack", args: ["A"], label: "デッキ A の曲を追加", group: "プレイリスト" },
+  { keys: ["s"], action: "addDeckTrack", args: ["B"], shift: true, label: "デッキ B の曲を追加", group: "プレイリスト" },
+  { keys: ["g"], action: "movePlaylistSelection", args: [-1], label: "プレイリストの曲を上へ", group: "プレイリスト" },
+  { keys: ["g"], action: "movePlaylistSelection", args: [1], shift: true, label: "プレイリストの曲を下へ", group: "プレイリスト" },
+  { keys: ["5"], action: "movePlaylistTrack", args: [-1], label: "曲の順番を上げる", group: "プレイリスト" },
+  { keys: ["6"], action: "movePlaylistTrack", args: [1], label: "曲の順番を下げる", group: "プレイリスト" },
+  { keys: ["Backspace", "Delete"], action: "removePlaylistTrack", label: "プレイリストから外す", group: "プレイリスト" },
+  {
+    keys: ["Backspace", "Delete"],
+    action: "deletePlaylist",
+    shift: true,
+    label: "プレイリストを消す",
+    group: "プレイリスト",
+  },
+  { keys: ["a"], action: "loadPlaylistTrack", args: ["A"], shift: true, label: "プレイリストをデッキ A へ", group: "プレイリスト" },
+  { keys: ["b"], action: "loadPlaylistTrack", args: ["B"], shift: true, label: "プレイリストをデッキ B へ", group: "プレイリスト" },
 ];
 
 const KEY_LABELS = {
@@ -93,6 +114,10 @@ const KEY_LABELS = {
   Enter: "Enter",
   Home: "Home",
   End: "End",
+  PageUp: "PageUp",
+  PageDown: "PageDown",
+  Backspace: "Backspace",
+  Delete: "Delete",
 };
 
 function prettyKey(key) {
@@ -192,6 +217,19 @@ export function handleKeydown(event, actions) {
     if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       event.preventDefault();
       actions.moveSelection(event.key === "ArrowUp" ? -1 : 1);
+      return true;
+    }
+    return false;
+  }
+  if (event.target?.id === "playlist-name") {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (typeof actions.submitPlaylistName === "function") actions.submitPlaylistName();
+      return true;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      if (typeof actions.blurPlaylistName === "function") actions.blurPlaylistName();
       return true;
     }
     return false;
