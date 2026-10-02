@@ -82,7 +82,9 @@ function bindingKeyText(binding) {
   return binding.keys
     .map((key) => {
       const label = prettyKey(key);
-      return binding.shift ? `Shift+${label}` : label;
+      const text = binding.shift ? `Shift+${label}` : label;
+      if (binding.shift && key === ";" && shiftAliases(key).includes("+")) return `${text} +`;
+      return text;
     })
     .join(" ");
 }
@@ -106,15 +108,20 @@ export function legendGroups() {
 }
 
 const SHIFT_ALIASES = {
-  "[": "{",
-  "]": "}",
-  ";": ":",
-  "'": '"',
+  "[": ["{"],
+  "]": ["}"],
+  ";": [":", "+"],
+  "'": ['"'],
 };
+
+function shiftAliases(bindingKey) {
+  const aliases = SHIFT_ALIASES[bindingKey];
+  return Array.isArray(aliases) ? aliases : [];
+}
 
 function sameKey(bindingKey, event) {
   if (event.key === bindingKey) return true;
-  if (event.shiftKey && SHIFT_ALIASES[bindingKey] === event.key) return true;
+  if (event.shiftKey && shiftAliases(bindingKey).includes(event.key)) return true;
   return (
     bindingKey.length === 1 &&
     event.key.length === 1 &&
