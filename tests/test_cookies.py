@@ -88,7 +88,40 @@ def test_normalize_keeps_youtube_cookies_and_drops_bad_lines():
     with pytest.raises(CookieError, match="YouTube"):
         normalize_netscape(netscape(("SID", SECRET), domain=".example.com"))
     with pytest.raises(CookieError, match="大きすぎます"):
-        normalize_netscape(b"x" * (256 * 1024 + 1))
+        normalize_netscape(b"x" * (1024 * 1024 + 1))
+    wide = netscape(("SID", "v" * (256 * 1024)))
+    assert len(wide) > 256 * 1024
+    assert len(wide) <= 1024 * 1024
+    assert "SID" in normalize_netscape(wide)
+
+
+def test_youtube_export_over_256_kib_uploads(tmp_path, caplog):
+    value = "v" * 1500
+    names = ["LOGIN_INFO"] + [f"N{index}" for index in range(179)]
+    raw = netscape(*[(name, value) for name in names])
+    assert 256 * 1024 < len(raw) <= 1024 * 1024
+    assert raw.count(b".youtube.com\t") == 180
+
+    store = CookieStore(tmp_path / "cookies.txt")
+    client = TestClient(create_app(cookies=store))
+    caplog.set_level(logging.DEBUG)
+    uploaded = client.post("/api/cookies", files={"file": ("cookies.txt", raw, "text/plain")})
+    assert uploaded.status_code == 200
+    assert uploaded.json() == {"present": True}
+    assert value not in uploaded.text
+    assert value not in caplog.text
+    saved = store.path.read_text(encoding="utf-8")
+    assert saved.count(".youtube.com\t") == 180
+    assert value in saved
+
+    rejected = client.post(
+        "/api/cookies",
+        files={"file": ("big.txt", b"x" * (1024 * 1024 + 1), "text/plain")},
+    )
+    assert rejected.status_code == 400
+    assert rejected.json()["detail"] == "Cookie ファイルが大きすぎます"
+    assert value not in rejected.text
+    assert store.path.read_text(encoding="utf-8") == saved
 
 
 def test_empty_store_starts_and_ytdlp_gets_no_cookiefile(tmp_path, monkeypatch):
@@ -361,7 +394,10 @@ def test_paste_persists_and_ytdlp_uses_it(tmp_path, monkeypatch, caplog, capsys)
     empty = post_paste(client, "   \n")
     assert empty.status_code == 400
     assert "選んでください" in empty.json()["detail"]
-    oversized = post_paste(client, "x" * (256 * 1024 + 1))
+    oversized = client.post(
+        "/api/cookies",
+        files={"file": ("big.txt", b"x" * (1024 * 1024 + 1), "text/plain")},
+    )
     assert oversized.status_code == 400
     assert "大きすぎます" in oversized.json()["detail"]
     for response in (rejected, no_youtube, empty, oversized):

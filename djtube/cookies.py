@@ -16,7 +16,7 @@ from djtube.paths import PACKAGE_DIR
 
 log = logging.getLogger(__name__)
 
-MAX_COOKIE_BYTES = 256 * 1024
+MAX_COOKIE_BYTES = 1024 * 1024
 _EXPIRES = re.compile(r"[0-9]+(?:\.[0-9]+)?")
 _HTTPONLY = "#HttpOnly_"
 _HEADER = "# Netscape HTTP Cookie File"
