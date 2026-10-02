@@ -197,6 +197,9 @@ def test_index_has_export_steps_and_upload(tmp_path):
     assert "Get cookies.txt LOCALLY" in html
     assert "ここで差し替える" in html
     assert 'id="cookie-panel" aria-label="Cookie" hidden' in html
+    css = (Path(__file__).resolve().parents[1] / "djtube" / "static" / "app.css").read_text(encoding="utf-8")
+    assert ".cookie-panel:not([hidden])" in css
+    assert "display: flex" in css.split(".cookie-panel:not([hidden])", 1)[1].split("}", 1)[0]
     assert 'id="cookie-file"' in html
     assert 'type="file"' in html
     assert 'id="cookie-upload"' in html
@@ -222,7 +225,7 @@ def test_index_has_export_steps_and_upload(tmp_path):
     assert "deckState.error = SOURCE_UNAVAILABLE" in (root / "djtube" / "static" / "app.js").read_text(encoding="utf-8")
 
 
-class _CookieLoadError(Exception):
+class CookieLoadError(Exception):
     pass
 
 

@@ -150,10 +150,13 @@ button:hover { border-color: #5c564b; }
 
 .cookie-panel {
   flex: none;
-  display: flex;
   flex-direction: column;
   gap: 8px;
   padding: 12px;
+}
+
+.cookie-panel:not([hidden]) {
+  display: flex;
 }
 
 .cookie-steps {
