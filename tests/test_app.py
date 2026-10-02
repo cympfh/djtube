@@ -23,7 +23,7 @@ def test_health_and_public_prefix():
     assert body["ok"] is True
     assert body["prefix"] == "/djtube"
     assert body["flx4"] == "unmapped"
-    assert body["playback"] == "youtube-iframe"
+    assert body["playback"] == "ytdlp-stream"
     assert body["search"] in {"youtube", "ytdlp"}
 
 
@@ -33,19 +33,25 @@ def test_index_uses_public_asset_prefix():
     assert "__PUBLIC_PREFIX__" not in html
     assert 'href="/djtube/static/app.css"' in html
     assert 'src="/djtube/static/app.js"' in html
-    assert 'id="yt-A"' in html
-    assert 'id="yt-B"' in html
+    assert 'id="player-A"' in html
+    assert 'id="player-B"' in html
+    assert 'id="yt-A"' not in html
+    assert "イコライザー" in html
+    assert 'id="eq-high-A"' in html
+    assert 'id="eq-low-B"' in html
     assert "クロスフェーダー" in html
     assert "デッキ A" in html
     assert "テンポ" in html
     assert 'id="rate-A"' in html
     assert 'id="rate-B"' in html
-    js = client.get("/djtube/static/youtube.js")
+    js = client.get("/djtube/static/player.js")
     assert js.status_code == 200
-    assert "cueVideoById" in js.text
-    assert "setVolume" in js.text
-    assert "setPlaybackRate" in js.text
+    assert "createMediaElementSource" in js.text
+    assert "connectEqGraph" in js.text
+    assert "playbackRate" in js.text
+    assert "iframe_api" not in js.text
     assert "YOUTUBE_API_KEY" not in js.text
+    assert client.get("/djtube/static/youtube.js").status_code == 404
 
 
 def test_client_sources_do_not_carry_the_api_key():

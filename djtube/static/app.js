@@ -1,17 +1,18 @@
 import { createActions, freshState } from "./actions.js";
 import { connectController } from "./controller.js";
 import { deckGains } from "./gains.js";
+import { eqGainDb, formatEqDb } from "./eq.js";
 import { formatTime } from "./format.js";
 import { formatRate } from "./rate.js";
 import { handleKeydown, legendGroups } from "./keys.js";
+import { createDeckPlayer, startDeckAudio } from "./player.js";
 import { publicPrefix } from "./prefix.js";
-import { createDeckPlayer, startYoutubeDecks } from "./youtube.js";
 
 const prefix = publicPrefix();
 const state = freshState();
 const audios = {
-  A: createDeckPlayer("A", "yt-A"),
-  B: createDeckPlayer("B", "yt-B"),
+  A: createDeckPlayer("A", "player-A"),
+  B: createDeckPlayer("B", "player-B"),
 };
 audios.A.onSeekLanded = () => {
   state.decks.A.jogCommand = null;
@@ -178,6 +179,7 @@ function renderDeck(deck) {
   const cue = deckState.cue > 0.05 ? formatTime(deckState.cue) : "先頭";
   document.getElementById(`cue-readout-${deck}`).textContent = `キュー位置 ${cue}`;
   renderTempo(deck);
+  renderEq(deck);
   updateTime(deck);
 }
 
@@ -190,6 +192,28 @@ function renderTempo(deck) {
   slider.setAttribute("aria-valuenow", value);
   slider.setAttribute("aria-valuetext", shown);
   document.getElementById(`rate-readout-${deck}`).textContent = shown;
+}
+
+function renderEq(deck) {
+  const deckState = state.decks[deck];
+  for (const band of ["high", "mid", "low"]) {
+    const unit = deckState.eq?.[band] ?? 0.5;
+    const slider = document.getElementById(`eq-${band}-${deck}`);
+    const shown = formatEqDb(eqGainDb(unit));
+    const value = String(Math.round(unit * 1000));
+    if (document.activeElement !== slider) slider.value = value;
+    slider.setAttribute("aria-valuenow", value);
+    slider.setAttribute("aria-valuetext", shown);
+    document.getElementById(`eq-${band}-readout-${deck}`).textContent = shown;
+  }
+  const error = document.getElementById(`eq-error-${deck}`);
+  if (deckState.eqError) {
+    error.hidden = false;
+    error.textContent = deckState.eqError;
+  } else {
+    error.hidden = true;
+    error.textContent = "";
+  }
 }
 
 function updateTime(deck) {
@@ -272,6 +296,15 @@ for (const deck of ["A", "B"]) {
   document.getElementById(`rate-reset-${deck}`).addEventListener("click", () => {
     actions.resetRate(deck);
   });
+  for (const band of ["high", "mid", "low"]) {
+    const slider = document.getElementById(`eq-${band}-${deck}`);
+    slider.addEventListener("input", () => {
+      actions.setEq(deck, band, Number(slider.value) / 1000);
+    });
+    document.getElementById(`eq-${band}-reset-${deck}`).addEventListener("click", () => {
+      actions.resetEq(deck, band);
+    });
+  }
 }
 document.getElementById("target-A").addEventListener("click", () => {
   state.loadTarget = "A";
@@ -339,34 +372,44 @@ fetch(`${prefix}/api/health`)
   });
 
 actions.setCrossfader(state.crossfader);
-startYoutubeDecks(audios, {
+startDeckAudio(audios, {
   onReady(deck) {
-    if (state.decks[deck].id && state.decks[deck].status === "preparing") {
-      state.decks[deck].status = "ready";
+    const deckState = state.decks[deck];
+    if (deckState.id && deckState.status === "preparing") {
+      deckState.status = "ready";
       scheduleRender();
     }
   },
-  onState(deck, code) {
+  onPlaying(deck) {
     const deckState = state.decks[deck];
     if (!deckState.id) return;
-    audios[deck].paused = code !== 1;
-    if ((code === 1 || code === 2 || code === 5) && deckState.status !== "error") deckState.status = "ready";
-    if (code === 1) {
-      deckState.playing = true;
-      deckState.playError = "";
-      deckState.error = "";
-      deckState.status = "ready";
-    }
-    if (code === 0 || code === 2) deckState.playing = false;
+    deckState.playing = true;
+    deckState.playError = "";
+    deckState.error = "";
+    if (deckState.status !== "error") deckState.status = "ready";
     updateTime(deck);
     renderDeck(deck);
   },
-  onError(deck, code) {
+  onPaused(deck) {
     const deckState = state.decks[deck];
+    if (!deckState.id) return;
+    deckState.playing = false;
+    updateTime(deck);
+    renderDeck(deck);
+  },
+  onEnded(deck) {
+    const deckState = state.decks[deck];
+    if (!deckState.id) return;
+    deckState.playing = false;
+    updateTime(deck);
+    renderDeck(deck);
+  },
+  onError(deck) {
+    const deckState = state.decks[deck];
+    if (!deckState.id) return;
     deckState.status = "error";
     deckState.playing = false;
-    deckState.playerCode = code;
-    deckState.error = code === 101 || code === 150 || code === 153 ? "この動画は埋め込み再生できません" : "動画を再生できません";
+    deckState.error = "音源を再生できませんでした";
     renderDeck(deck);
   },
 });
@@ -374,12 +417,6 @@ setInterval(() => {
   if (state.decks.A.playing) updateTime("A");
   if (state.decks.B.playing) updateTime("B");
 }, 250);
-setTimeout(() => {
-  if (!audios.A.apiReady && !audios.B.apiReady) {
-    const node = document.getElementById("health-search");
-    if (!node.textContent.includes("プレーヤー")) node.textContent = "YouTube プレーヤーを読み込めませんでした";
-  }
-}, 8000);
 render();
 
 window.djtube = { actions, state, audios };
