@@ -124,6 +124,14 @@ def test_playlist_rows_load_onto_a_deck_and_remove_is_red():
     rule = css.split(".result-actions button.is-remove", 1)[1].split("}", 1)[0]
     assert "#ff4d3a" in rule
     assert "background:" in rule
+    actions = css.split(".result-actions {", 1)[1].split("}", 1)[0]
+    assert "flex-direction: row" in actions
+    assert "column" not in actions
+    tail = css.split(".result-actions button:last-child", 1)[1].split("}", 1)[0]
+    assert "margin-left: auto" in tail
+    row = css.split(".results li {", 1)[1].split("}", 1)[0]
+    assert "52px minmax(0, 1fr)" in row
+    assert '"actions actions"' in row
 
 
 def test_readme_and_docker_contract():
