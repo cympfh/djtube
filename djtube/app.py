@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import mimetypes
 
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -108,16 +108,32 @@ def create_app(playlist_store: PlaylistStore | None = None, cookies: CookieStore
     def cookie_status() -> dict[str, bool]:
         return {"present": jar.present()}
 
-    @app.post("/api/cookies")
-    async def upload_cookies(file: UploadFile = File(...)) -> dict[str, bool]:
-        data = await file.read(MAX_COOKIE_BYTES + 1)
-        await file.close()
+    def store_cookies(data: bytes) -> dict[str, bool]:
         try:
             jar.replace(data)
         except CookieError as exc:
             raise HTTPException(exc.status, str(exc)) from None
         clear_audio_cache()
         return {"present": True}
+
+    @app.post("/api/cookies")
+    async def upload_cookies(
+        file: UploadFile | None = File(None),
+        text: str | None = Form(None),
+    ) -> dict[str, bool]:
+        if file is not None:
+            data = await file.read(MAX_COOKIE_BYTES + 1)
+            await file.close()
+        elif text is not None:
+            try:
+                data = text.encode("utf-8")
+            except UnicodeEncodeError:
+                raise HTTPException(400, "Cookie のファイルを読めません") from None
+            if len(data) > MAX_COOKIE_BYTES + 1:
+                data = data[: MAX_COOKIE_BYTES + 1]
+        else:
+            raise HTTPException(400, "Cookie のファイルを選んでください")
+        return store_cookies(data)
 
     @app.get("/api/playlists")
     def list_playlists() -> dict[str, object]:

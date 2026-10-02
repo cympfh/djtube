@@ -268,6 +268,134 @@ def test_this_ytdlp_drops_tv_downgraded_only_for_the_cookie_options(tmp_path):
     assert "not-a-session" not in str(logged_in["extractor_args"])
 
 
+def post_paste(client: TestClient, text: str, path: str = "/api/cookies"):
+    return client.post(path, files={"text": (None, text)})
+
+
+def test_paste_persists_and_ytdlp_uses_it(tmp_path, monkeypatch, caplog, capsys):
+    store = CookieStore(tmp_path / "cookies.txt")
+    client = TestClient(create_app(cookies=store))
+    seen = {}
+
+    class Wrapper(yt_dlp.YoutubeDL):
+        def extract_info(self, url, download=False):
+            seen["cookiefile"] = self.params.get("cookiefile")
+            seen["player_client"] = (self.params.get("extractor_args") or {}).get("youtube", {}).get("player_client")
+            seen["header"] = self.cookiejar.get_cookie_header(f"https://www.youtube.com/watch?v={VIDEO_ID}")
+            if seen["cookiefile"]:
+                seen["passed"] = Path(seen["cookiefile"]).read_text(encoding="utf-8")
+            return {"formats": [_fmt()]}
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", Wrapper)
+    caplog.set_level(logging.DEBUG)
+    special = "a+b=c%20d&e"
+    dropped = "dropped-secret-value"
+    text = (
+        "# Netscape HTTP Cookie File\n"
+        f".youtube.com\tTRUE\t/\tTRUE\t1893456000\tSID\t{SECRET}\n"
+        "#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t0\tLOGIN_INFO\tok\n"
+        ".example.com\tTRUE\t/\tTRUE\t1893456000\tOTHER\tkeep-me\n"
+        "not a cookie line\n"
+        f".youtube.com\tFALSE\t/\tTRUE\t1893456000\tBAD\t{dropped}\n"
+        f".youtube.com\tTRUE\t/\tTRUE\t1893456000\tSAPISID\t{special}\n"
+    )
+    pasted = post_paste(client, text)
+    assert pasted.status_code == 200
+    assert pasted.json() == {"present": True}
+    assert set(pasted.json()) == {"present"}
+    for secret in (SECRET, special, dropped, "keep-me"):
+        assert secret not in pasted.text
+        assert secret not in caplog.text
+    saved = store.path.read_text(encoding="utf-8")
+    assert saved == normalize_netscape(text.encode())
+    assert SECRET in saved
+    assert special in saved
+    assert "LOGIN_INFO" in saved
+    assert "example.com" in saved
+    assert "keep-me" in saved
+    assert dropped not in saved
+    assert "not a cookie line" not in saved
+    assert oct(store.path.stat().st_mode & 0o777) == "0o600"
+
+    restarted = CookieStore(store.path)
+    assert restarted.present() is True
+    assert restarted.path.read_text(encoding="utf-8") == saved
+
+    clear_audio_cache()
+    resolve_audio(VIDEO_ID)
+    assert seen["cookiefile"]
+    assert seen["player_client"] == ["web_embedded", "web_safari"]
+    assert "tv_downgraded" not in seen["player_client"]
+    assert SECRET not in str(seen["player_client"])
+    assert SECRET in seen["passed"]
+    assert special in seen["passed"]
+    assert f"SID={SECRET}" in seen["header"]
+    assert f"SAPISID={special}" in seen["header"]
+    assert not Path(seen["cookiefile"]).exists()
+    captured = capsys.readouterr()
+    blob = caplog.text + captured.out + captured.err
+    assert SECRET not in blob
+    assert special not in blob
+    assert "SAPISID" not in captured.out + captured.err
+
+    replaced = post_paste(client, netscape(("SID", REPLACEMENT)).decode(), f"{PUBLIC_PREFIX}/api/cookies")
+    assert replaced.status_code == 200
+    assert replaced.json() == {"present": True}
+    assert SECRET not in replaced.text
+    assert REPLACEMENT not in replaced.text
+    assert SECRET not in store.path.read_text(encoding="utf-8")
+    assert REPLACEMENT in store.path.read_text(encoding="utf-8")
+    seen.clear()
+    resolve_audio(VIDEO_ID)
+    assert seen["player_client"] == ["web_embedded", "web_safari"]
+    assert f"SID={REPLACEMENT}" in seen["header"]
+    assert SECRET not in (seen.get("header") or "")
+    assert SECRET not in (seen.get("passed") or "")
+
+    rejected = post_paste(client, "not cookies")
+    assert rejected.status_code == 400
+    assert "Netscape" in rejected.json()["detail"]
+    no_youtube = post_paste(client, netscape(("SID", SECRET), domain=".example.com").decode())
+    assert no_youtube.status_code == 400
+    assert "YouTube" in no_youtube.json()["detail"]
+    empty = post_paste(client, "   \n")
+    assert empty.status_code == 400
+    assert "選んでください" in empty.json()["detail"]
+    oversized = post_paste(client, "x" * (256 * 1024 + 1))
+    assert oversized.status_code == 400
+    assert "大きすぎます" in oversized.json()["detail"]
+    for response in (rejected, no_youtube, empty, oversized):
+        assert REPLACEMENT not in response.text
+        assert SECRET not in response.text
+    assert REPLACEMENT in store.path.read_text(encoding="utf-8")
+    assert client.get("/api/cookies").json() == {"present": True}
+    assert SECRET not in client.get("/api/cookies").text
+    assert REPLACEMENT not in client.get("/api/cookies").text
+
+    uploaded = client.post(
+        "/api/cookies",
+        files={"file": ("cookies.txt", netscape(("SID", SECRET)), "text/plain")},
+    )
+    assert uploaded.status_code == 200
+    assert uploaded.json() == {"present": True}
+    assert REPLACEMENT not in store.path.read_text(encoding="utf-8")
+    assert SECRET in store.path.read_text(encoding="utf-8")
+    seen.clear()
+    resolve_audio(VIDEO_ID)
+    assert f"SID={SECRET}" in seen["header"]
+    assert REPLACEMENT not in (seen.get("passed") or "")
+
+
+def test_cookie_post_without_a_file_or_text_is_rejected(tmp_path):
+    store = CookieStore(tmp_path / "cookies.txt")
+    client = TestClient(create_app(cookies=store))
+    rejected = client.post("/api/cookies")
+    assert rejected.status_code == 400
+    assert "選んでください" in rejected.json()["detail"]
+    assert store.path.exists() is False
+    assert client.get("/api/cookies").json() == {"present": False}
+
+
 def test_index_has_export_steps_and_upload(tmp_path):
     client = TestClient(create_app(cookies=CookieStore(tmp_path / "cookies.txt")))
     html = client.get("/djtube/").text
@@ -284,10 +412,22 @@ def test_index_has_export_steps_and_upload(tmp_path):
     assert 'id="cookie-upload"' in html
     assert ">アップロード<" in html
     assert 'action="/djtube/api/cookies"' in html
+    panel = html.split('id="cookie-panel"', 1)[1].split("</section>", 1)[0]
+    assert 'id="cookie-text"' in panel
+    assert 'id="cookie-paste"' in panel
+    assert 'name="text"' in panel
+    assert 'id="cookie-save"' in panel
+    assert ">保存<" in panel
+    assert "中身を貼り付け" in panel
     assert "音源を再生できませんでした" not in html
     js = client.get("/djtube/static/cookies.js")
     assert js.status_code == 200
     assert "/api/cookies" in js.text
+    assert 'getElementById("cookie-text")' in js.text
+    assert 'append("text"' in js.text
+    assert 'append("file"' in js.text
+    assert "Cookie を貼り付けてください" in js.text
+    assert "Cookie のファイルを選んでください" in js.text
     search_source = (Path(__file__).resolve().parents[1] / "djtube" / "search.py").read_text(encoding="utf-8")
     assert "cookiefile" not in search_source
     assert "player_client" not in search_source

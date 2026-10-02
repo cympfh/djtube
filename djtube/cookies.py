@@ -1,4 +1,4 @@
-"""Netscape cookies uploaded from the page, for yt-dlp audio only.
+"""Netscape cookies saved from the page, for yt-dlp audio only.
 
 The file starts empty. Nothing here is logged except the path and a fixed message.
 """

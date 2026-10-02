@@ -22,7 +22,7 @@ body {
   color: var(--text);
 }
 
-button, input { font: inherit; color: inherit; }
+button, input, textarea { font: inherit; color: inherit; }
 
 button {
   background: #24221c;
@@ -182,12 +182,40 @@ button:hover { border-color: #5c564b; }
   font-size: 12px;
 }
 
-#cookie-upload {
+#cookie-upload, #cookie-save {
   background: var(--text);
   color: #16140f;
   border: 0;
   font-weight: 700;
 }
+
+.cookie-paste {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.cookie-paste label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#cookie-text {
+  width: 100%;
+  min-height: 6.5em;
+  max-height: 16em;
+  resize: vertical;
+  background: #100f0c;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  padding: 8px 10px;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+#cookie-save { align-self: flex-start; }
 
 .library-page {
   min-height: 0;
