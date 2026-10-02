@@ -77,7 +77,10 @@ const actions = createActions({
   scheduleRender,
   queryValue: () => searchInput.value,
   isSearchFocused: () => document.activeElement === searchInput,
-  focusSearchElement: () => searchInput.focus(),
+  focusSearchElement: () => {
+    showLibrary("search");
+    searchInput.focus();
+  },
   blurSearchElement: () => searchInput.blur(),
   fetchSearch,
   fetchPlaylists: () => fetchJson("/api/playlists"),
@@ -95,6 +98,7 @@ const actions = createActions({
     playlistName.value = value;
   },
   focusPlaylistNameElement: () => {
+    showLibrary("playlist");
     playlistName.focus();
     playlistName.select();
   },
@@ -140,8 +144,26 @@ function renderLegend() {
   }
 }
 
+let resultPicker = null;
+let resultAddMessage = "";
+
+function resultsSignature() {
+  return JSON.stringify({
+    results: state.results,
+    selected: state.selected,
+    playlists: state.playlists.map((item) => `${item.id}\t${item.name}`),
+    picker: resultPicker,
+    note: resultAddMessage,
+  });
+}
+
+let renderedResults = "";
+
 function renderResults() {
   const list = document.getElementById("results");
+  const signature = resultsSignature();
+  if (signature === renderedResults) return;
+  renderedResults = signature;
   list.replaceChildren();
   state.results.forEach((track, index) => {
     const li = document.createElement("li");
@@ -186,12 +208,60 @@ function renderResults() {
       });
       buttons.append(button);
     }
+    const add = document.createElement("button");
+    add.type = "button";
+    add.textContent = "プレイリスト追加";
+    add.addEventListener("click", (event) => {
+      event.stopPropagation();
+      state.selected = index;
+      if (!state.playlists.length) {
+        resultPicker = null;
+        resultAddMessage = "プレイリストがありません";
+        renderAddNote();
+        renderResults();
+        return;
+      }
+      resultAddMessage = "";
+      resultPicker = index;
+      renderAddNote();
+      renderResults();
+      list.querySelector(".playlist-add-select")?.focus();
+    });
+    buttons.append(add);
 
     li.addEventListener("click", () => {
       state.selected = index;
       renderResults();
     });
     li.append(text, buttons);
+    if (resultPicker === index) {
+      const select = document.createElement("select");
+      select.className = "playlist-add-select";
+      select.setAttribute("aria-label", "追加するプレイリスト");
+      const blank = document.createElement("option");
+      blank.value = "";
+      blank.textContent = "プレイリストを選ぶ";
+      select.append(blank);
+      for (const playlist of state.playlists) {
+        const option = document.createElement("option");
+        option.value = playlist.id;
+        option.textContent = playlist.name;
+        select.append(option);
+      }
+      select.addEventListener("click", (event) => event.stopPropagation());
+      select.addEventListener("change", () => {
+        const playlistId = select.value;
+        if (!playlistId) return;
+        resultPicker = null;
+        const pending = actions.addTrackToPlaylist(playlistId, track);
+        Promise.resolve(pending).then(() => {
+          if (state.playlistError) resultAddMessage = state.playlistError;
+          renderAddNote();
+          renderResults();
+        });
+      });
+      li.append(select);
+    }
     list.append(li);
   });
   const selected = list.children[state.selected];
@@ -350,10 +420,6 @@ function renderPlaylists() {
   const busy = state.playlistBusy;
   document.getElementById("playlist-create").disabled = busy;
   document.getElementById("playlist-rename").disabled = busy;
-  document.getElementById("playlist-delete").disabled = busy || !state.playlistId;
-  document.getElementById("playlist-add-search").disabled = busy || !state.playlistId;
-  document.getElementById("playlist-add-a").disabled = busy || !state.playlistId;
-  document.getElementById("playlist-add-b").disabled = busy || !state.playlistId;
 
   const playlist = state.playlists.find((item) => item.id === state.playlistId) || null;
   const tracks = playlist?.tracks || [];
@@ -387,33 +453,24 @@ function renderPlaylists() {
     meta.className = "result-meta";
     const bits = [track.channel, track.duration ? formatTime(track.duration) : ""].filter(Boolean);
     meta.textContent = bits.join(" · ");
+    text.append(title, meta);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "削除";
+    remove.disabled = busy;
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      state.playlistIndex = index;
+      actions.removePlaylistTrack();
+    });
     const buttons = document.createElement("div");
-    buttons.className = "playlist-track-actions";
-    const actionsForTrack = [
-      ["Aへ", () => actions.loadPlaylistTrack("A")],
-      ["Bへ", () => actions.loadPlaylistTrack("B")],
-      ["上", () => actions.movePlaylistTrack(-1)],
-      ["下", () => actions.movePlaylistTrack(1)],
-      ["外す", () => actions.removePlaylistTrack()],
-    ];
-    for (const [label, run] of actionsForTrack) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = label;
-      button.disabled = busy;
-      button.addEventListener("click", (event) => {
-        event.stopPropagation();
-        state.playlistIndex = index;
-        run();
-      });
-      buttons.append(button);
-    }
-    text.append(title, meta, buttons);
+    buttons.className = "result-actions";
+    buttons.append(remove);
     li.addEventListener("click", () => {
       state.playlistIndex = index;
       renderPlaylists();
     });
-    li.append(text);
+    li.append(text, buttons);
     list.append(li);
   });
   const selected = list.children[state.playlistIndex];
@@ -428,8 +485,25 @@ function renderPlaylists() {
   }
 }
 
+function renderAddNote() {
+  const note = document.getElementById("playlist-add-note");
+  note.textContent = resultAddMessage;
+  note.classList.toggle("is-error", !!resultAddMessage);
+}
+
+function showLibrary(name) {
+  const search = name !== "playlist";
+  document.getElementById("search-panel").hidden = !search;
+  document.getElementById("playlist-panel").hidden = search;
+  document.getElementById("tab-search").setAttribute("aria-selected", search ? "true" : "false");
+  document.getElementById("tab-playlist").setAttribute("aria-selected", search ? "false" : "true");
+  if (search && document.activeElement === playlistName) playlistName.blur();
+  if (!search && document.activeElement === searchInput) searchInput.blur();
+}
+
 function render() {
   renderSearchStatus();
+  renderAddNote();
   renderResults();
   renderPlaylists();
   renderDeck("A");
@@ -444,12 +518,10 @@ function render() {
 renderLegend();
 
 document.getElementById("search-button").addEventListener("click", () => actions.submitSearch());
+document.getElementById("tab-search").addEventListener("click", () => showLibrary("search"));
+document.getElementById("tab-playlist").addEventListener("click", () => showLibrary("playlist"));
 document.getElementById("playlist-create").addEventListener("click", () => actions.createPlaylist());
 document.getElementById("playlist-rename").addEventListener("click", () => actions.renamePlaylist());
-document.getElementById("playlist-delete").addEventListener("click", () => actions.deletePlaylist());
-document.getElementById("playlist-add-search").addEventListener("click", () => actions.addSearchHit());
-document.getElementById("playlist-add-a").addEventListener("click", () => actions.addDeckTrack("A"));
-document.getElementById("playlist-add-b").addEventListener("click", () => actions.addDeckTrack("B"));
 document.getElementById("playlist-select").addEventListener("change", (event) => {
   actions.selectPlaylist(event.target.value);
 });
