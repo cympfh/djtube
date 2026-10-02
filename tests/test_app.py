@@ -188,7 +188,8 @@ def test_readme_and_docker_contract():
     assert "画面上部の丸い Cookie の印" in readme
     assert "画面上部の「Cookie」" not in readme
     assert "再生が失敗する前でも" in readme
-    assert "曲を載せると、そのデッキの音量は 100% に戻る" in readme
+    assert "曲を載せても、そのデッキの音量は戻らない" in readme
+    assert "曲を載せると、そのデッキの音量は 100% に戻る" not in readme
     assert "クロスフェーダーとは別" in readme
     assert "DJTUBE_PLAYLISTS" not in readme
     assert "DJTUBE_COOKIES" not in readme
