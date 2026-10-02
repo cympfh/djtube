@@ -90,13 +90,13 @@ docker run --rm -p 8098:8098 -e YOUTUBE_API_KEY -e DJTUBE_PLAYLISTS=/app/data/pl
 
 ## Cookie
 
-YouTube がボット確認で音源取得を止めるときは、画面から Netscape 形式の Cookie をアップロードするか、同じ形式の中身を貼り付けて保存する。ファイルが無いあいだ、yt-dlp には `cookiefile` を渡さず、player client も JS ランタイムも指定しない。保存したあとの音源取得だけ、そのファイルを渡す。そのときは player client を `web_embedded` と `web_safari` にする。`tv_downgraded` は使わない。同じ取得で、イメージの `/opt/djtube/deno` があればそれだけを JS ランタイムとして渡す。このバイナリは `PATH` に入っていない。差し替えは同じ画面で上書きする。
+YouTube がボット確認で音源取得を止めるときは、画面から Netscape 形式の Cookie をアップロードするか、同じ形式の中身を貼り付けて保存する。ファイルが無いあいだ、yt-dlp には `cookiefile` を渡さず、player client も JS ランタイムも指定しない。保存したあとの音源取得だけ、そのファイルを渡す。そのときは player client を `web_embedded` と `web_safari` にする。`tv_downgraded` は使わない。同じ取得で、イメージの `/opt/djtube/deno` があればそれだけを JS ランタイムとして渡す。このバイナリは `PATH` に入っていない。差し替えは同じ画面で上書きする。画面上部の「Cookie」から、失敗を待たずにその画面を開ける。ファイル欄と貼り付け欄は、保存してある中身では埋めない。
 
 保存先は環境変数 `DJTUBE_COOKIES`。既定は `data/cookies.txt`。イメージと compose では `/app/data/cookies.txt`。名前付きボリューム `djtube-data` の `/app/data` に載るので、コンテナを作り直しても残る。プレイリストと同じボリューム。ボリュームの無い `docker run` では、プレイリストと同じく消える。中身はログに出さない。リポジトリには置かない。
 
 `GET /api/cookies` は入っているかどうかだけを返す。`POST /api/cookies` が、ファイルのアップロードと、貼り付けた中身の保存。どちらも同じファイルを上書きする。中身は返さない。
 
-画面の案内は、サーバが今回の音源取得の失敗を認証か Cookie と判断したときだけ出す。それ以外の失敗では出さない。ブラウザは yt-dlp の文言を分類しない。`GET /api/audio/{id}/cause` は `{"cookies": true}` か `{"cookies": false}` だけを返す。
+音源が取れず、サーバが今回の失敗を認証か Cookie と判断したときも、同じ Cookie の案内を出す。それ以外の失敗では出さない。保存のあとに再生は自動ではやり直さない。ブラウザは yt-dlp の文言を分類しない。`GET /api/audio/{id}/cause` は `{"cookies": true}` か `{"cookies": false}` だけを返す。
 
 ## 検索と API キー
 

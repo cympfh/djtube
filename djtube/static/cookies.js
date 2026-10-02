@@ -2,8 +2,19 @@ export function cookiePanelOpen(decks) {
   return !!(decks?.A?.cookies || decks?.B?.cookies);
 }
 
+export function cookiePanelShown(failureOpen, chosenOpen) {
+  return !!(failureOpen || chosenOpen);
+}
+
+export function nextChosenOpen(failureOpen, chosenOpen) {
+  if (!cookiePanelShown(failureOpen, chosenOpen)) return true;
+  if (failureOpen) return !!chosenOpen;
+  return false;
+}
+
 export function bindCookies(prefix) {
   const panel = document.getElementById("cookie-panel");
+  const opener = document.getElementById("cookie-open");
   const form = document.getElementById("cookie-form");
   const status = document.getElementById("cookie-status");
   const input = document.getElementById("cookie-file");
@@ -11,12 +22,30 @@ export function bindCookies(prefix) {
   const pasteForm = document.getElementById("cookie-paste");
   const pasteText = document.getElementById("cookie-text");
   const pasteButton = document.getElementById("cookie-save");
+  let failure = false;
+  let heldOpen = false;
 
-  function setOpen(open) {
+  function apply() {
+    const open = cookiePanelShown(failure, heldOpen);
     if (panel) panel.hidden = !open;
+    if (opener) opener.setAttribute("aria-expanded", open ? "true" : "false");
   }
 
-  setOpen(false);
+  function setOpen(open) {
+    failure = !!open;
+    apply();
+  }
+
+  if (opener) {
+    opener.addEventListener("click", () => {
+      const wasShown = cookiePanelShown(failure, heldOpen);
+      heldOpen = nextChosenOpen(failure, heldOpen);
+      apply();
+      if (!wasShown && panel && !panel.hidden) panel.scrollIntoView({ block: "nearest" });
+    });
+  }
+
+  apply();
   if (!form || !status || !input || !button) return { setOpen };
 
   function show(text, isError) {
