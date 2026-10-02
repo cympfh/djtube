@@ -73,7 +73,7 @@ button:hover { border-color: #5c564b; }
   font-weight: 700;
 }
 
-.tag, .health, .hint, .status, .midi-status, .target-note, .deck-channel, .cue-readout, .gain-readout, .fader-readout {
+.tag, .health, .status, .midi-status, .target-note, .deck-channel, .cue-readout, .gain-readout, .fader-readout {
   color: var(--muted);
 }
 
@@ -137,7 +137,7 @@ button:hover { border-color: #5c564b; }
   accent-color: var(--a);
 }
 
-.hint, .status, .midi-status { margin: 0; font-size: 12px; line-height: 1.45; }
+.status, .midi-status { margin: 0; font-size: 12px; line-height: 1.45; }
 
 .status:empty { display: none; }
 
