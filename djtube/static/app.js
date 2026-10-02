@@ -1,4 +1,4 @@
-import { createActions, freshState } from "./actions.js";
+import { SOURCE_UNAVAILABLE, createActions, freshState, sourcePlaybackBlocked } from "./actions.js";
 import { connectController, controllerStatusText } from "./controller.js";
 import { deckGains } from "./gains.js";
 import { eqGainDb, formatEqDb } from "./eq.js";
@@ -227,6 +227,7 @@ function renderDeck(deck) {
   status.textContent = deckStatusText(deckState);
   const play = document.getElementById(`play-${deck}`);
   play.textContent = deckState.playing ? "一時停止" : "再生";
+  play.disabled = sourcePlaybackBlocked(deckState);
   play.classList.toggle("is-on", !!deckState.playing);
   const cue = deckState.cue > 0.05 ? formatTime(deckState.cue) : "先頭";
   document.getElementById(`cue-readout-${deck}`).textContent = `キュー位置 ${cue}`;
@@ -586,7 +587,7 @@ startDeckAudio(audios, {
     if (!deckState.id) return;
     deckState.status = "error";
     deckState.playing = false;
-    deckState.error = "音源を再生できませんでした";
+    deckState.error = SOURCE_UNAVAILABLE;
     renderDeck(deck);
   },
 });

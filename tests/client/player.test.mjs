@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createActions, freshState } from "../../djtube/static/actions.js";
+import { SOURCE_UNAVAILABLE, createActions, freshState, sourcePlaybackBlocked } from "../../djtube/static/actions.js";
 import {
   FLX4_MAP,
   JOG_SEARCH_STEP_SECONDS,
@@ -1409,6 +1409,98 @@ test("playlists stay off reserved keys and load through the search path", async 
   assert.equal(handleKeydown(keyEvent("Backspace", bodyTarget(), { shiftKey: true }), actions), true);
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(state.playlists.length, 0);
+});
+
+test("a deck with no audio source does not start, and the other deck is left alone", async () => {
+  const { state, audios, actions } = harness();
+  state.results = [
+    { id: "abcdefghijk", title: "夜", channel: "A店", duration: 90 },
+    { id: "zzzzzzzzzzz", title: "昼", channel: "B店", duration: 80 },
+  ];
+  await actions.loadSelected("A");
+  state.selected = 1;
+  await actions.loadSelected("B");
+  state.decks.B.rate = 1.2;
+  state.decks.B.eq = { high: 0.8, mid: 0.4, low: 0.2 };
+  audios.B.playbackRate = 1.2;
+  actions.togglePlay("B");
+  assert.equal(audios.B.paused, false);
+
+  state.decks.A.status = "error";
+  state.decks.A.playing = false;
+  state.decks.A.error = SOURCE_UNAVAILABLE;
+  audios.A.pause();
+  const deckB = {
+    id: state.decks.B.id,
+    status: state.decks.B.status,
+    error: state.decks.B.error,
+    playError: state.decks.B.playError,
+    playing: state.decks.B.playing,
+    rate: state.decks.B.rate,
+    eq: { ...state.decks.B.eq },
+    videoId: audios.B.videoId,
+  };
+
+  assert.equal(sourcePlaybackBlocked(state.decks.A), true);
+  assert.equal(sourcePlaybackBlocked(state.decks.B), false);
+  assert.equal(FLX4_MAP["note:0:11"].action, "togglePlay");
+  assert.deepEqual(FLX4_MAP["note:0:11"].args, ["A"]);
+  assert.equal(FLX4_MAP["note:1:11"].action, "togglePlay");
+  assert.deepEqual(FLX4_MAP["note:1:11"].args, ["B"]);
+
+  assert.equal(handleKeydown(keyEvent("q", bodyTarget()), actions), true);
+  assert.equal(audios.A.paused, true);
+  assert.equal(state.decks.A.playing, false);
+  assert.equal(state.decks.A.status, "error");
+  assert.equal(state.decks.A.error, SOURCE_UNAVAILABLE);
+  actions.togglePlay("A");
+  assert.equal(audios.A.paused, true);
+  assert.equal(
+    dispatchControllerEvent(messageFromMidi(new Uint8Array([0x90, 0x0b, 127])), actions),
+    true,
+  );
+  assert.equal(audios.A.paused, true);
+  assert.equal(state.decks.A.error, SOURCE_UNAVAILABLE);
+
+  assert.equal(audios.B.paused, false);
+  assert.equal(state.decks.B.playing, true);
+  assert.equal(state.decks.B.rate, deckB.rate);
+  assert.deepEqual(state.decks.B.eq, deckB.eq);
+  assert.equal(state.decks.B.error, "");
+  assert.equal(handleKeydown(keyEvent("w", bodyTarget()), actions), true);
+  assert.equal(audios.B.paused, true);
+  assert.equal(state.decks.A.error, SOURCE_UNAVAILABLE);
+  assert.equal(audios.A.videoId, "abcdefghijk");
+  assert.equal(audios.B.videoId, deckB.videoId);
+
+  state.decks.A.playError = "再生がブロックされました";
+  state.decks.A.status = "ready";
+  state.decks.A.error = "";
+  assert.equal(sourcePlaybackBlocked(state.decks.A), false);
+  actions.togglePlay("A");
+  assert.equal(audios.A.paused, false);
+  audios.A.pause();
+  state.decks.A.playing = false;
+  state.decks.A.playError = "";
+  state.decks.A.status = "error";
+  state.decks.A.error = SOURCE_UNAVAILABLE;
+
+  state.selected = 1;
+  await actions.loadSelected("A");
+  assert.equal(state.decks.A.error, "");
+  assert.equal(state.decks.A.playError, "");
+  assert.equal(state.decks.A.status, "ready");
+  assert.equal(state.decks.A.id, "zzzzzzzzzzz");
+  assert.equal(sourcePlaybackBlocked(state.decks.A), false);
+  assert.equal(state.decks.B.id, deckB.id);
+  assert.equal(state.decks.B.rate, deckB.rate);
+  assert.deepEqual(state.decks.B.eq, deckB.eq);
+  assert.equal(state.decks.B.status, deckB.status);
+  assert.equal(audios.B.videoId, deckB.videoId);
+  assert.equal(audios.B.paused, true);
+  actions.togglePlay("A");
+  assert.equal(audios.A.paused, false);
+  assert.equal(state.decks.A.playing, true);
 });
 
 test("cue while playing returns and pauses", () => {

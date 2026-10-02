@@ -47,6 +47,14 @@ export function freshState() {
   };
 }
 
+export const SOURCE_UNAVAILABLE = "音源を再生できませんでした";
+
+export function sourcePlaybackBlocked(deckState) {
+  if (!deckState) return false;
+  if (deckState.playError) return deckState.playError === SOURCE_UNAVAILABLE;
+  return deckState.status === "error" && deckState.error === SOURCE_UNAVAILABLE;
+}
+
 function deckOf(state, deck) {
   if (deck !== "A" && deck !== "B") return null;
   return state.decks[deck];
@@ -205,6 +213,7 @@ export function createActions(deps) {
     const deckState = deckOf(state, deck);
     const audio = audios[deck];
     if (!deckState?.id || (deckState.status !== "ready" && deckState.status !== "error")) return;
+    if (sourcePlaybackBlocked(deckState)) return;
     deckState.playError = "";
     deckState.error = "";
     deckState.status = "ready";
