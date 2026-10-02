@@ -280,6 +280,35 @@ test("jog seeks the deck and does not move cue or the crossfader", () => {
   });
 });
 
+test("jog keeps adding while the player still reports the old time", () => {
+  const { state, audios, actions } = harness();
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 120 }];
+  return actions.loadSelected("A").then(() => {
+    let reported = 10;
+    let commanded = 10;
+    Object.defineProperty(audios.A, "currentTime", {
+      configurable: true,
+      get() {
+        return reported;
+      },
+      set(value) {
+        commanded = value;
+      },
+    });
+    audios.A.duration = 80;
+    actions.jog("A", 1);
+    assert.equal(commanded, 11);
+    actions.jog("A", 1);
+    assert.equal(commanded, 12);
+    actions.jog("A", 10);
+    assert.equal(commanded, 22);
+    reported = 22;
+    actions.jog("A", 1);
+    assert.equal(commanded, 23);
+    assert.equal(state.decks.A.cue, 0);
+  });
+});
+
 test("cue while playing returns and pauses", () => {
   const { state, audios, actions } = harness();
   state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 10 }];
