@@ -49,8 +49,9 @@ def test_index_uses_public_asset_prefix():
     assert "プレイリスト" in html
     assert "デッキ A" in html
     assert "テンポ" in html
-    assert 'id="rate-A"' in html
-    assert 'id="rate-B"' in html
+    assert 'id="rate-A" type="range" min="50" max="200" step="1"' in html
+    assert 'id="rate-B" type="range" min="50" max="200" step="1"' in html
+    assert 'step="25"' not in html
     assert 'id="midi-status"' in html
     assert "未接続 — MIDI を開く（要 HTTPS）" in html
     js = client.get("/djtube/static/player.js")

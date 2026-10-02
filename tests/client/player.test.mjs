@@ -217,6 +217,10 @@ test("FLX4 map sends notes and CCs to deck actions", async () => {
   assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb0, 0x00, 64])), actions), true);
   assert.equal(state.decks.A.rate, rateFromMidi(64));
   assert.equal(audios.A.playbackRate, rateFromMidi(64));
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb0, 0x00, 96])), actions), true);
+  assert.equal(state.decks.A.rate, 1.51);
+  assert.equal(audios.A.playbackRate, 1.51);
+  assert.equal(state.decks.A.rate, rateFromMidi(96));
   assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb0, 0x00, 0])), actions), true);
   assert.equal(state.decks.A.rate, 0.5);
   assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb1, 0x00, 127])), actions), true);
@@ -764,7 +768,9 @@ test("tempo clamps, nudges, resets, and stays callable from the action table", a
   assert.equal(rateFromMidi(64), 1);
   assert.equal(rateFromMidi(127), 2);
   assert.equal(formatRate(1), "1.00×");
-  assert.equal(RATE_STEP, 0.25);
+  assert.equal(formatRate(1.13), "1.13×");
+  assert.equal(RATE_STEP, 0.01);
+  assert.ok(RATE_STEP < 0.25);
 
   const labels = legendGroups().find((group) => group.name === "テンポ").items.map((item) => item.label);
   assert.ok(labels.includes("デッキ A のテンポを上げる"));
@@ -800,11 +806,14 @@ test("tempo clamps, nudges, resets, and stays callable from the action table", a
 
   const { state, audios, actions } = harness();
   assert.equal(state.decks.A.rate, 1);
+  actions.setRate("A", 1.13);
+  assert.equal(state.decks.A.rate, 1.13);
+  assert.equal(audios.A.playbackRate, 1.13);
   actions.setRate("A", 1.5);
   assert.equal(state.decks.A.rate, 1.5);
   assert.equal(audios.A.playbackRate, 1.5);
   actions.nudgeRate("A", RATE_STEP);
-  assert.equal(state.decks.A.rate, 1.75);
+  assert.equal(state.decks.A.rate, 1.51);
   actions.nudgeRate("A", 1);
   assert.equal(state.decks.A.rate, 2);
   actions.nudgeRate("B", -1);
@@ -826,8 +835,8 @@ test("tempo clamps, nudges, resets, and stays callable from the action table", a
   assert.equal(state.decks.A.rate, 1);
   actions.resetRate("A");
   assert.equal(handleKeydown(keyEvent("2", bodyTarget()), actions), true);
-  assert.equal(state.decks.A.rate, 1.25);
-  assert.equal(audios.A.playbackRate, 1.25);
+  assert.equal(state.decks.A.rate, 1.01);
+  assert.equal(audios.A.playbackRate, 1.01);
   assert.equal(handleKeydown(keyEvent("1", bodyTarget()), actions), true);
   assert.equal(state.decks.A.rate, 1);
   assert.equal(handleKeydown(keyEvent("3", bodyTarget()), actions), true);
@@ -964,8 +973,8 @@ test("loading a track resets only that deck tempo to 1.0 and centers its EQ", as
   assert.deepEqual(FLX4_MAP, mapBefore);
 
   assert.equal(handleKeydown(keyEvent("1", bodyTarget()), actions), true);
-  assert.equal(state.decks.A.rate, 0.75);
-  assert.equal(audios.A.playbackRate, 0.75);
+  assert.equal(state.decks.A.rate, 0.99);
+  assert.equal(audios.A.playbackRate, 0.99);
   assert.equal(handleKeydown(keyEvent("2", bodyTarget()), actions), true);
   assert.equal(state.decks.A.rate, 1);
   assert.equal(handleKeydown(keyEvent("3", bodyTarget()), actions), true);
@@ -973,8 +982,8 @@ test("loading a track resets only that deck tempo to 1.0 and centers its EQ", as
   assert.equal(audios.A.playbackRate, 1);
 
   assert.equal(handleKeydown(keyEvent("9", bodyTarget()), actions), true);
-  assert.equal(state.decks.B.rate, 0.75);
-  assert.equal(audios.B.playbackRate, 0.75);
+  assert.equal(state.decks.B.rate, 0.51);
+  assert.equal(audios.B.playbackRate, 0.51);
   assert.equal(handleKeydown(keyEvent("8", bodyTarget()), actions), true);
   assert.equal(state.decks.B.rate, 0.5);
   assert.equal(handleKeydown(keyEvent("0", bodyTarget()), actions), true);

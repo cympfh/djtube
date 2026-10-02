@@ -1,6 +1,7 @@
 export const RATE_MIN = 0.5;
 export const RATE_MAX = 2;
-export const RATE_STEP = 0.25;
+/** Keyboard nudge. The deck slider and the FLX4 tempo fader are not snapped to this. */
+export const RATE_STEP = 0.01;
 
 export function clampRate(value) {
   const numeric = Number(value);
