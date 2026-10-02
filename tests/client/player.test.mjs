@@ -16,6 +16,7 @@ import { EQ_BOOST_DB, EQ_CUT_DB, EQ_STEP, connectEqGraph, eqGainDb, eqUnitFromMi
 import { deckGains } from "../../djtube/static/gains.js";
 import { BINDINGS, handleKeydown, legendGroups } from "../../djtube/static/keys.js";
 import { RATE_STEP, clampRate, formatRate, rateFromMidi } from "../../djtube/static/rate.js";
+import { cookiePanelOpen } from "../../djtube/static/cookies.js";
 import { createDeckPlayer } from "../../djtube/static/player.js";
 
 function fakeAudio() {
@@ -1533,6 +1534,24 @@ test("a deck with no audio source does not start, and the other deck is left alo
   actions.togglePlay("A");
   assert.equal(audios.A.paused, false);
   assert.equal(state.decks.A.playing, true);
+});
+
+test("cookie panel follows the server flag, not the yt-dlp sentence", async () => {
+  const { state, actions } = harness();
+  state.decks.A.status = "error";
+  state.decks.A.error = SOURCE_UNAVAILABLE;
+  state.decks.B.error = "Sign in to confirm you're not a bot";
+  assert.equal(cookiePanelOpen(state.decks), false);
+  assert.equal(sourcePlaybackBlocked(state.decks.A), true);
+  state.decks.A.cookies = true;
+  assert.equal(cookiePanelOpen(state.decks), true);
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 10 }];
+  await actions.loadSelected("A");
+  assert.equal(state.decks.A.cookies, false);
+  assert.equal(state.decks.A.error, "");
+  assert.equal(cookiePanelOpen(state.decks), false);
+  state.decks.B.cookies = true;
+  assert.equal(cookiePanelOpen(state.decks), true);
 });
 
 test("cue while playing returns and pauses", () => {

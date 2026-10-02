@@ -6,6 +6,7 @@ import { formatTime } from "./format.js";
 import { formatRate } from "./rate.js";
 import { handleKeydown, legendGroups } from "./keys.js";
 import { createDeckPlayer, startDeckAudio } from "./player.js";
+import { bindCookies, cookiePanelOpen } from "./cookies.js";
 import { publicPrefix } from "./prefix.js";
 
 const prefix = publicPrefix();
@@ -521,6 +522,7 @@ function render() {
   renderDeck("A");
   renderDeck("B");
   renderFader();
+  cookiesUi.setOpen(cookiePanelOpen(state.decks));
   document.getElementById("search-button").disabled = state.searching;
   document.getElementById("search-button").textContent = state.searching ? "検索中" : "検索";
   const music = document.getElementById("music-only");
@@ -608,6 +610,7 @@ midiButton.addEventListener("click", () => {
   });
 });
 
+const cookiesUi = bindCookies(prefix);
 actions.loadPlaylists();
 
 fetch(`${prefix}/api/health`)
@@ -639,6 +642,7 @@ startDeckAudio(audios, {
     deckState.playing = true;
     deckState.playError = "";
     deckState.error = "";
+    deckState.cookies = false;
     if (deckState.status !== "error") deckState.status = "ready";
     updateTime(deck);
     renderDeck(deck);
@@ -660,10 +664,24 @@ startDeckAudio(audios, {
   onError(deck) {
     const deckState = state.decks[deck];
     if (!deckState.id) return;
+    const videoId = deckState.id;
     deckState.status = "error";
     deckState.playing = false;
     deckState.error = SOURCE_UNAVAILABLE;
+    deckState.cookies = false;
     renderDeck(deck);
+    fetch(`${prefix}/api/audio/${encodeURIComponent(videoId)}/cause`)
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body) => {
+        if (state.decks[deck].id !== videoId) return;
+        state.decks[deck].cookies = body?.cookies === true;
+        scheduleRender();
+      })
+      .catch(() => {
+        if (state.decks[deck].id !== videoId) return;
+        state.decks[deck].cookies = false;
+        scheduleRender();
+      });
   },
 });
 setInterval(() => {

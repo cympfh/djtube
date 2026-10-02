@@ -14,6 +14,7 @@ export function freshDeck() {
     status: "empty",
     error: "",
     playError: "",
+    cookies: false,
     cue: 0,
     playing: false,
     rate: 1,
@@ -174,6 +175,7 @@ export function createActions(deps) {
     deckState.thumbnail = trackThumbnail(track);
     deckState.error = "";
     deckState.playError = "";
+    deckState.cookies = false;
     deckState.cue = 0;
     deckState.playing = false;
     deckState.jogCommand = null;
