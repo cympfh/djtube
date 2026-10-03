@@ -297,7 +297,8 @@ test("FLX4 map sends notes and CCs to deck actions", async () => {
   assert.equal(audios.A.paused, false);
   assert.equal(state.decks.A.volume, 0);
 
-  assert.match(controllerStatusText(), /未接続/);
+  assert.equal(controllerStatusText(), "MIDI未接続");
+  assert.equal(controllerStatusText({ state: "idle" }), "MIDI未接続");
   assert.match(controllerStatusText({ state: "insecure" }), /HTTPS/);
   assert.equal(controllerStatusText({ state: "open", names: ["DDJ-FLX4"], connected: true }), "接続: DDJ-FLX4");
   assert.equal(controllerStatusText({ state: "open", names: [] }), "未接続");
