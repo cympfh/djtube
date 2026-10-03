@@ -291,6 +291,44 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
     );
   }
 
+  function placePlaylistTrack(from, to, trackId) {
+    const playlist = currentPlaylist();
+    if (!playlist?.tracks?.length) return;
+    if (state.playlistBusy) return;
+    if (!Number.isInteger(to)) return;
+    const count = playlist.tracks.length;
+    let source = from;
+    if (typeof trackId === "string" && trackId) {
+      if (playlist.tracks[from]?.id === trackId) source = from;
+      else source = playlist.tracks.findIndex((track) => track.id === trackId);
+      if (source < 0) return;
+    }
+    if (!Number.isInteger(source) || source === to) return;
+    if (source < 0 || to < 0 || source >= count || to >= count) return;
+    if (typeof deps.movePlaylistTrack !== "function") return;
+    const snapshot = playlist.tracks.slice();
+    const previousIndex = state.playlistIndex;
+    const tracks = snapshot.slice();
+    const [item] = tracks.splice(source, 1);
+    tracks.splice(to, 0, item);
+    playlist.tracks = tracks;
+    state.playlistIndex = to;
+    const pending = mutate(
+      () => deps.movePlaylistTrack(playlist.id, source, to),
+      (updated) => {
+        adopt(updated, to);
+      },
+    );
+    return pending.finally(() => {
+      if (state.playlistBusy) return;
+      if (state.playlistError && currentPlaylist() === playlist) {
+        playlist.tracks = snapshot;
+        state.playlistIndex = previousIndex;
+        scheduleRender();
+      }
+    });
+  }
+
   function loadPlaylistTrack(deck) {
     const playlist = currentPlaylist();
     const track = playlist?.tracks?.[state.playlistIndex];
@@ -315,6 +353,7 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
     addDeckTrack,
     removePlaylistTrack,
     movePlaylistTrack,
+    placePlaylistTrack,
     loadPlaylistTrack,
   };
 }
