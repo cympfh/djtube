@@ -1,5 +1,5 @@
 import { SOURCE_UNAVAILABLE, createActions, freshState, sourcePlaybackBlocked } from "./actions.js";
-import { connectController, controllerStatusText } from "./controller.js";
+import { connectController, controllerStatusText, midiButtonState } from "./controller.js";
 import { deckGains } from "./gains.js";
 import { eqGainDb, formatEqDb } from "./eq.js";
 import { formatTime } from "./format.js";
@@ -886,12 +886,13 @@ function showMidiStatus(status) {
 const midiButton = document.getElementById("midi-button");
 
 function paintMidiButton(status) {
-  midiButton.dataset.midi = status && status.state === "open" ? "on" : "off";
+  midiButton.dataset.midi = midiButtonState(status);
 }
 
 midiButton.addEventListener("click", () => {
-  showMidiStatus({ state: "opening", names: [], connected: false });
-  midiButton.dataset.midi = "wait";
+  const opening = { state: "opening", names: [], connected: false };
+  showMidiStatus(opening);
+  paintMidiButton(opening);
   connectController(actions, (status) => {
     paintMidiButton(status);
     showMidiStatus(status);

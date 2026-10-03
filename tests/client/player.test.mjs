@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { SOURCE_UNAVAILABLE, createActions, freshState, sourcePlaybackBlocked } from "../../djtube/static/actions.js";
@@ -8,6 +9,7 @@ import {
   JOG_STEP_SECONDS,
   controllerStatusText,
   dispatchControllerEvent,
+  midiButtonState,
   messageFromMidi,
   relativeMidiTicks,
 } from "../../djtube/static/controller.js";
@@ -304,6 +306,28 @@ test("FLX4 map sends notes and CCs to deck actions", async () => {
   assert.equal(controllerStatusText({ state: "open", names: [] }), "未接続");
   assert.equal(controllerStatusText({ state: "unsupported" }), "Web MIDI 非対応");
   assert.equal(controllerStatusText({ state: "denied" }), "MIDI が拒否されました");
+  assert.equal(controllerStatusText({ state: "opening" }), "MIDI を開いています…");
+});
+
+test("MIDI button is on only after a device connects", () => {
+  assert.equal(midiButtonState(), "off");
+  assert.equal(midiButtonState({ state: "idle" }), "off");
+  assert.equal(midiButtonState({ state: "opening", names: [], connected: false }), "off");
+  assert.equal(midiButtonState({ state: "unsupported", names: [], connected: false }), "off");
+  assert.equal(midiButtonState({ state: "insecure", names: [], connected: false }), "off");
+  assert.equal(midiButtonState({ state: "denied", names: [], connected: false }), "off");
+  assert.equal(midiButtonState({ state: "open", names: [], connected: false }), "off");
+  assert.equal(midiButtonState({ state: "open", names: ["DDJ-FLX4"], connected: true }), "on");
+  assert.equal(midiButtonState({ state: "open", names: ["DDJ-FLX4"] }), "on");
+
+  const app = readFileSync(new URL("../../djtube/static/app.js", import.meta.url), "utf8");
+  const click = app.slice(app.indexOf('midiButton.addEventListener("click"'));
+  assert.equal(click.includes('dataset.midi = "wait"'), false);
+  assert.equal(click.includes('dataset.midi = "on"'), false);
+  assert.match(app, /midiButton\.dataset\.midi = midiButtonState\(status\)/);
+  const css = readFileSync(new URL("../../djtube/static/app.css", import.meta.url), "utf8");
+  assert.equal(css.includes('[data-midi="wait"]'), false);
+  assert.match(css, /\.midi-button\[data-midi="on"\][\s\S]*background:\s*var\(--a\)/);
 });
 
 test("keyboard map covers deck operations and skips typed search", async () => {
