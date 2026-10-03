@@ -4,9 +4,9 @@ import mimetypes
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
+from djtube.assets import DOCUMENT_CACHE, VersionedStaticFiles, asset_version, stamp_document
 from djtube.audio import AudioError, audio_needs_cookies, clear_audio_cache, open_audio
 from djtube.cookies import MAX_COOKIE_BYTES, CookieError, CookieStore, cookie_path, install_store
 from djtube.ids import is_video_id
@@ -44,7 +44,8 @@ class StripPrefixMiddleware:
 
 def render_index() -> str:
     html = INDEX_PATH.read_text(encoding="utf-8")
-    return html.replace("__PUBLIC_PREFIX__", PUBLIC_PREFIX)
+    html = html.replace("__PUBLIC_PREFIX__", PUBLIC_PREFIX)
+    return stamp_document(html, asset_version())
 
 
 class PlaylistNameBody(BaseModel):
@@ -188,9 +189,9 @@ def create_app(playlist_store: PlaylistStore | None = None, cookies: CookieStore
 
     @app.get("/")
     def index() -> HTMLResponse:
-        return HTMLResponse(render_index())
+        return HTMLResponse(render_index(), headers={"Cache-Control": DOCUMENT_CACHE})
 
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    app.mount("/static", VersionedStaticFiles(directory=str(STATIC_DIR)), name="static")
     app.add_middleware(StripPrefixMiddleware, prefix=PUBLIC_PREFIX)
     return app
 

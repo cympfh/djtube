@@ -31,8 +31,8 @@ def test_index_uses_public_asset_prefix():
     client = TestClient(create_app())
     html = client.get("/djtube/").text
     assert "__PUBLIC_PREFIX__" not in html
-    assert 'href="/djtube/static/app.css"' in html
-    assert 'src="/djtube/static/app.js"' in html
+    assert 'href="/djtube/static/app.css?v=' in html
+    assert 'src="/djtube/static/app.js?v=' in html
     assert 'id="player-A"' in html
     assert 'id="player-B"' in html
     assert 'id="picture-A"' in html
