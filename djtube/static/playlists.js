@@ -147,13 +147,13 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
     );
   }
 
-  function renamePlaylist() {
+  function renamePlaylist(explicitName) {
     const playlist = currentPlaylist();
     if (!playlist) {
       fail("プレイリストを作ってください");
       return;
     }
-    const name = nameValue();
+    const name = (typeof explicitName === "string" ? explicitName : nameValue()).trim();
     if (!name) {
       fail("名前を入れてください");
       return;

@@ -55,7 +55,16 @@ def test_index_uses_public_asset_prefix():
     assert "hidden" in html
     assert 'id="playlist-name"' in html
     assert 'id="playlist-tracks"' in html
-    assert 'id="playlist-delete"' not in html
+    assert 'id="playlist-select"' in html
+    assert 'id="playlist-edit"' in html
+    assert ">編集</button>" in html
+    assert html.index('id="playlist-select"') < html.index('id="playlist-edit"')
+    assert 'id="playlist-edit-dialog"' in html
+    assert 'id="playlist-rename"' in html
+    assert ">リネーム</button>" in html
+    assert 'id="playlist-delete"' in html
+    assert ">プレイリスト削除</button>" in html
+    assert ">変える</button>" not in html
     assert 'id="playlist-add-search"' not in html
     assert "プレイリスト" in html
     assert "デッキ A" in html

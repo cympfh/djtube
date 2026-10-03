@@ -262,7 +262,65 @@ button:hover { border-color: #5c564b; }
 
 .library-page[hidden] { display: none; }
 
-#playlist-rename { align-self: flex-start; }
+#playlist-edit { align-self: flex-start; }
+
+#playlist-edit-dialog {
+  margin: auto;
+  padding: 16px;
+  width: min(320px, calc(100vw - 32px));
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+}
+
+#playlist-edit-dialog::backdrop {
+  background: rgba(16, 15, 12, 0.72);
+}
+
+.playlist-edit-body {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.playlist-edit-body h2 {
+  margin: 0;
+  font-size: 13px;
+  letter-spacing: 0.12em;
+  font-weight: 700;
+}
+
+.playlist-edit-body label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#playlist-rename-name {
+  width: 100%;
+  background: #100f0c;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  padding: 8px 10px;
+}
+
+.playlist-edit-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.playlist-edit-actions button { width: 100%; }
+
+#playlist-delete,
+#playlist-delete:hover {
+  color: #1c0c0a;
+  background: #ff4d3a;
+  border-color: #ff4d3a;
+}
+
+#playlist-edit-close { align-self: flex-start; }
 
 .panel-head h1, .deck-head h2, .fader-label {
   margin: 0;
