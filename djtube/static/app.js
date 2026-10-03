@@ -456,7 +456,7 @@ function renderPlaylists() {
   select.disabled = state.playlistBusy || state.playlists.length === 0;
 
   const note = document.getElementById("playlist-name-note");
-  note.textContent = state.playlistNaming === "rename" ? "Enter で変える" : "Enter で作る";
+  note.textContent = state.playlistNaming === "rename" ? "Enter で変える" : "";
   const status = document.getElementById("playlist-status");
   status.textContent = state.playlistError || "";
   status.classList.toggle("is-error", !!state.playlistError);
