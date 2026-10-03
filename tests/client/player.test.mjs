@@ -1687,6 +1687,45 @@ test("a failed drag puts the playlist order back", async () => {
   assert.equal(state.playlistError, "保存できません");
 });
 
+test("a drag release moves the grabbed song after 6 changed the indexes", async () => {
+  const moves = [];
+  const song = (id, title) => ({ id, title, channel: "", duration: 1, thumbnail: null });
+  const afterKey = [song("bbbbbbbbbbb", "B"), song("aaaaaaaaaaa", "A"), song("ccccccccccc", "C")];
+  let saved = afterKey.map((track) => ({ ...track }));
+  const { state, actions } = harness({
+    deps: {
+      async movePlaylistTrack(id, from, to) {
+        moves.push({ id, from, to });
+        const next = saved.map((track) => ({ ...track }));
+        const [item] = next.splice(from, 1);
+        next.splice(to, 0, item);
+        saved = next;
+        return { id, name: "夜", tracks: next.map((track) => ({ ...track })) };
+      },
+    },
+  });
+  state.playlists = [{ id: "abc00000001", name: "夜", tracks: afterKey.map((track) => ({ ...track })) }];
+  state.playlistId = "abc00000001";
+  state.playlistIndex = 1;
+
+  await actions.placePlaylistTrack(0, 2, "missing-song");
+  assert.deepEqual(moves, []);
+  assert.deepEqual(
+    state.playlists[0].tracks.map((track) => track.id),
+    ["bbbbbbbbbbb", "aaaaaaaaaaa", "ccccccccccc"],
+  );
+
+  // A was grabbed at index 0. 6 then moved A down, so the list is [B, A, C].
+  // Dropping A at the bottom must not apply index 0 to this later list.
+  await actions.placePlaylistTrack(0, 2, "aaaaaaaaaaa");
+  assert.deepEqual(moves, [{ id: "abc00000001", from: 1, to: 2 }]);
+  assert.deepEqual(
+    state.playlists[0].tracks.map((track) => track.id),
+    ["bbbbbbbbbbb", "ccccccccccc", "aaaaaaaaaaa"],
+  );
+  assert.equal(state.playlistIndex, 2);
+});
+
 test("playlist tab j/k, browse, and LOAD use that playlist", async () => {
   const { state, audios, actions } = harness();
   state.results = [

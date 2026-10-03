@@ -4,7 +4,7 @@ import { deckGains } from "./gains.js";
 import { eqGainDb, formatEqDb } from "./eq.js";
 import { formatTime } from "./format.js";
 import { formatRate } from "./rate.js";
-import { handleKeydown, legendGroups } from "./keys.js";
+import { handleKeydown, isSearchTarget, isTypingTarget, legendGroups } from "./keys.js";
 import { createDeckPlayer, startDeckAudio } from "./player.js";
 import { bindCookies, cookiePanelOpen } from "./cookies.js";
 import { discRotationDegrees } from "./disc.js";
@@ -463,7 +463,7 @@ function trackGripElement() {
   return grip;
 }
 
-function bindTrackReorder(grip, row, fromIndex) {
+function bindTrackReorder(grip, row, fromIndex, trackId) {
   grip.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -549,9 +549,9 @@ function bindTrackReorder(grip, row, fromIndex) {
       if (moved && typeof ev.clientY === "number" && (ev.type === "pointerup" || ev.type === "mouseup")) placeRow(ev.clientY);
       const order = [...list.children].indexOf(row);
       const released = ev.type === "pointerup" || ev.type === "mouseup";
-      const commit = released && moved && order !== fromIndex && state.playlistId === playlistId;
+      const commit = released && moved && state.playlistId === playlistId;
       if (commit) {
-        const pending = actions.placePlaylistTrack(fromIndex, order);
+        const pending = actions.placePlaylistTrack(fromIndex, order, trackId);
         if (pending) return;
       }
       renderPlaylists();
@@ -634,7 +634,7 @@ function renderPlaylists() {
     li.id = `playlist-track-${index}`;
 
     const grip = trackGripElement();
-    bindTrackReorder(grip, li, index);
+    bindTrackReorder(grip, li, index, track.id);
     li.append(grip);
 
     if (track.thumbnail) {
@@ -858,6 +858,19 @@ window.addEventListener(
   "keydown",
   (event) => {
     if (playlistEditDialog.open) return;
+    if (
+      sortingTrack &&
+      (event.key === "5" || event.key === "6") &&
+      !event.shiftKey &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      !isSearchTarget(event.target) &&
+      !isTypingTarget(event.target)
+    ) {
+      event.preventDefault();
+      return;
+    }
     handleKeydown(event, actions, state.library);
   },
   true,

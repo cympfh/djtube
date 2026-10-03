@@ -148,12 +148,12 @@ def test_playlist_rows_load_onto_a_deck_and_remove_is_red():
     assert "actions.movePlaylistTrack" not in body
     assert "actions.placePlaylistTrack" not in body
     assert "trackGripElement()" in body
-    assert "bindTrackReorder(grip, li, index)" in body
+    assert "bindTrackReorder(grip, li, index, track.id)" in body
     assert body.index("trackGripElement()") < body.index('className = "thumb"')
     assert "img.draggable = false" in body
     assert "draggable = true" not in js
     assert 'className = "track-grip"' in js
-    assert "actions.placePlaylistTrack(fromIndex, order)" in js
+    assert "actions.placePlaylistTrack(fromIndex, order, trackId)" in js
     assert 'grip.addEventListener("pointerdown"' in js
     assert '"上"' not in body
     assert '"下"' not in body
