@@ -78,7 +78,7 @@ def test_index_uses_public_asset_prefix():
     assert "フェード" in html
     assert 'step="25"' not in html
     assert 'id="midi-status"' in html
-    assert "未接続 — MIDI を開く（要 HTTPS）" in html
+    assert "MIDI未接続" in html
     assert "T で切り替え" not in html
     assert "次のロード先" not in html
     assert 'id="target-A"' not in html

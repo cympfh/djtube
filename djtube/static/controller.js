@@ -43,7 +43,7 @@ export const JOG_STEP_SECONDS = 0.05;
 /** Shift+platter uses its own CC and seeks faster. */
 export const JOG_SEARCH_STEP_SECONDS = 0.5;
 
-export const MIDI_STATUS_IDLE = "未接続 — MIDI を開く（要 HTTPS）";
+export const MIDI_STATUS_IDLE = "MIDI未接続";
 
 function binding(action, args, extra) {
   const spec = { action };
