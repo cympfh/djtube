@@ -39,7 +39,7 @@ nginx は `/djtube/` を外してコンテナへ渡す。コンテナはポー�
 
 フロントの基準パスは `/djtube/`。直に `http://127.0.0.1:8098/djtube/` を開いても、同じプレフィックスをコンテナ側で剥がすので動く。
 
-フロントのファイルは `djtube/static/` にあり、本番ビルドで別の `dist/` は作りません。配布単位は Docker イメージです。
+フロントのファイルは `djtube/static/` にあり、本番ビルドで別の `dist/` は作りません。配布単位は Docker イメージです。HTML は `Cache-Control: no-cache`。`app.css` と `app.js` の URL、および各モジュールの相対 import には同じ `?v=` が付く。`v` は `templates/index.html` と `static/` の内容のハッシュです。再読み込みは HTML を取り直し、その `v` の `app.js` と、そこから import される `actions.js` や `player.js` や `filter.js` を取ります。以前のモジュールは別の URL なので、一つの読み込みに混ざりません。
 
 ## ローカル起動
 
