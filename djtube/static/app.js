@@ -432,6 +432,141 @@ function renderSearchStatus() {
 }
 
 let pendingRemove = null;
+let sortingTrack = false;
+
+function trackGripElement() {
+  const grip = document.createElement("span");
+  grip.className = "track-grip";
+  grip.title = "ドラッグして順番を変える";
+  grip.setAttribute("aria-label", "ドラッグして順番を変える");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 12 18");
+  svg.setAttribute("width", "16");
+  svg.setAttribute("height", "24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  for (const [cx, cy] of [
+    [3.5, 3],
+    [8.5, 3],
+    [3.5, 9],
+    [8.5, 9],
+    [3.5, 15],
+    [8.5, 15],
+  ]) {
+    const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    dot.setAttribute("cx", String(cx));
+    dot.setAttribute("cy", String(cy));
+    dot.setAttribute("r", "1.35");
+    svg.append(dot);
+  }
+  grip.append(svg);
+  return grip;
+}
+
+function bindTrackReorder(grip, row, fromIndex) {
+  grip.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  grip.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || sortingTrack || state.playlistBusy) return;
+    const list = row.parentElement;
+    if (!list || list.id !== "playlist-tracks") return;
+    event.preventDefault();
+    event.stopPropagation();
+    const playlistId = state.playlistId;
+    const originY = event.clientY;
+    let moved = false;
+    let done = false;
+    sortingTrack = true;
+    state.playlistIndex = fromIndex;
+    for (const item of list.children) {
+      const selected = item === row;
+      item.classList.toggle("is-selected", selected);
+      item.setAttribute("aria-selected", selected ? "true" : "false");
+    }
+    if (row.id) list.setAttribute("aria-activedescendant", row.id);
+    row.classList.add("is-dragging");
+    row.setAttribute("aria-grabbed", "true");
+    list.classList.add("is-sorting");
+    document.body.classList.add("is-track-sorting");
+    grip.setPointerCapture(event.pointerId);
+
+    function placeRow(clientY) {
+      const bounds = list.getBoundingClientRect();
+      const y = Math.min(bounds.bottom - 1, Math.max(bounds.top + 1, clientY));
+      const siblings = [...list.children].filter((item) => item !== row);
+      let before = null;
+      for (const item of siblings) {
+        const rect = item.getBoundingClientRect();
+        if (y < rect.top + rect.height / 2) {
+          before = item;
+          break;
+        }
+      }
+      if (before) {
+        if (row.nextElementSibling !== before) list.insertBefore(row, before);
+      } else if (list.lastElementChild !== row) {
+        list.append(row);
+      }
+    }
+
+    function onMove(ev) {
+      if (done) return;
+      if (!moved && Math.abs(ev.clientY - originY) <= 4) return;
+      moved = true;
+      const bounds = list.getBoundingClientRect();
+      if (ev.clientY < bounds.top + 24) list.scrollTop -= 12;
+      else if (ev.clientY > bounds.bottom - 24) list.scrollTop += 12;
+      placeRow(ev.clientY);
+    }
+
+    function finish(ev) {
+      if (done) return;
+      done = true;
+      grip.removeEventListener("pointermove", onMove);
+      grip.removeEventListener("pointerup", finish);
+      grip.removeEventListener("pointercancel", finish);
+      window.removeEventListener("keydown", onKey, true);
+      sortingTrack = false;
+      list.classList.remove("is-sorting");
+      document.body.classList.remove("is-track-sorting");
+      if (moved) {
+        const stopClick = (clickEvent) => {
+          clickEvent.preventDefault();
+          clickEvent.stopPropagation();
+        };
+        window.addEventListener("click", stopClick, true);
+        setTimeout(() => window.removeEventListener("click", stopClick, true), 0);
+      }
+      const order = [...list.children].indexOf(row);
+      const commit = ev.type === "pointerup" && moved && order !== fromIndex && state.playlistId === playlistId;
+      if (commit) {
+        const pending = actions.placePlaylistTrack(fromIndex, order);
+        if (pending) return;
+      }
+      renderPlaylists();
+    }
+
+    function onKey(ev) {
+      if (ev.key !== "Escape") return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      moved = false;
+      try {
+        grip.releasePointerCapture(event.pointerId);
+      } catch {
+        /* already released */
+      }
+      finish({ type: "pointercancel" });
+    }
+
+    grip.addEventListener("pointermove", onMove);
+    grip.addEventListener("pointerup", finish);
+    grip.addEventListener("pointercancel", finish);
+    window.addEventListener("keydown", onKey, true);
+  });
+}
 
 function renderPlaylists() {
   const select = document.getElementById("playlist-select");
@@ -479,6 +614,7 @@ function renderPlaylists() {
     pendingRemove && pendingRemove.playlistId === playlist?.id ? tracks[pendingRemove.index] : null;
   if (!pendingTrack || pendingTrack.id !== pendingRemove?.trackId) pendingRemove = null;
   const list = document.getElementById("playlist-tracks");
+  if (sortingTrack) return;
   list.replaceChildren();
   tracks.forEach((track, index) => {
     const li = document.createElement("li");
@@ -487,10 +623,15 @@ function renderPlaylists() {
     li.setAttribute("aria-selected", index === state.playlistIndex ? "true" : "false");
     li.id = `playlist-track-${index}`;
 
+    const grip = trackGripElement();
+    bindTrackReorder(grip, li, index);
+    li.append(grip);
+
     if (track.thumbnail) {
       const img = document.createElement("img");
       img.className = "thumb";
       img.alt = "";
+      img.draggable = false;
       img.src = track.thumbnail;
       li.append(img);
     } else {

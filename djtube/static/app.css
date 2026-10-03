@@ -400,6 +400,52 @@ button:disabled { opacity: 0.45; cursor: default; }
 
 .results li.is-selected { border-color: var(--a); }
 
+#playlist-tracks > li {
+  grid-template-columns: 28px 52px minmax(0, 1fr);
+  grid-template-areas:
+    "grip thumb copy"
+    "actions actions actions";
+}
+
+#playlist-tracks > li > .track-grip {
+  grid-area: grip;
+  justify-self: center;
+  align-self: center;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 36px;
+  margin: 0;
+  padding: 0;
+  border-radius: 2px;
+  background: #2a261f;
+  color: var(--text);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+#playlist-tracks > li > .track-grip svg {
+  display: block;
+  fill: currentColor;
+  pointer-events: none;
+}
+
+#playlist-tracks > li > .track-grip:hover { color: var(--a); }
+
+#playlist-tracks > li.is-dragging {
+  position: relative;
+  z-index: 1;
+  border-color: var(--a);
+  background: #1c1b16;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.45);
+}
+
+#playlist-tracks.is-sorting { user-select: none; }
+
+#playlist-tracks.is-sorting,
+#playlist-tracks.is-sorting .track-grip { cursor: grabbing; }
+
 .results li > .thumb { grid-area: thumb; }
 
 .result-copy { grid-area: copy; min-width: 0; }

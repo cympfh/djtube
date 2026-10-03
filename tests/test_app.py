@@ -146,6 +146,15 @@ def test_playlist_rows_load_onto_a_deck_and_remove_is_red():
     assert click.index("return") < click.index("actions.removePlaylistTrack()")
     assert "actions.removePlaylistTrack()" in click
     assert "actions.movePlaylistTrack" not in body
+    assert "actions.placePlaylistTrack" not in body
+    assert "trackGripElement()" in body
+    assert "bindTrackReorder(grip, li, index)" in body
+    assert body.index("trackGripElement()") < body.index('className = "thumb"')
+    assert "img.draggable = false" in body
+    assert "draggable = true" not in js
+    assert 'className = "track-grip"' in js
+    assert "actions.placePlaylistTrack(fromIndex, order)" in js
+    assert 'grip.addEventListener("pointerdown"' in js
     assert '"上"' not in body
     assert '"下"' not in body
     rule = css.split(".result-actions button.is-remove", 1)[1].split("}", 1)[0]
@@ -159,6 +168,13 @@ def test_playlist_rows_load_onto_a_deck_and_remove_is_red():
     row = css.split(".results li {", 1)[1].split("}", 1)[0]
     assert "52px minmax(0, 1fr)" in row
     assert '"actions actions"' in row
+    playlist_row = css.split("#playlist-tracks > li {", 1)[1].split("}", 1)[0]
+    assert "28px 52px minmax(0, 1fr)" in playlist_row
+    assert '"grip thumb copy"' in playlist_row
+    assert '"actions actions actions"' in playlist_row
+    grip_rule = css.split("#playlist-tracks > li > .track-grip {", 1)[1].split("}", 1)[0]
+    assert "grid-area: grip" in grip_rule
+    assert "cursor: grab" in grip_rule
 
 
 def test_readme_and_docker_contract():
@@ -187,6 +203,7 @@ def test_readme_and_docker_contract():
     assert "Shift+A" in readme
     assert "各曲の「Aへ」「Bへ」で、そのデッキに載せる" in readme
     assert "「削除」を一度押すとボタンが「本当に削除？」になり、もう一度押すとその曲だけ外れる" in readme
+    assert "曲の絵の左を掴んでドラッグすると、離した位置にその曲の順番が移る" in readme
     assert "`A` で選択中の曲をデッキ A へ" in readme
     assert "`B` で選択中の曲をデッキ B へ" in readme
     assert "`Enter` で検索する" in readme

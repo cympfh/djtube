@@ -1598,6 +1598,18 @@ test("playlists stay off reserved keys and load through the search path", async 
   assert.equal(state.playlists[0].tracks[0].id, "zzzzzzzzzzz");
   assert.equal(state.playlistIndex, 0);
 
+  await actions.placePlaylistTrack(0, 1);
+  assert.equal(state.playlists[0].tracks[0].id, "abcdefghijk");
+  assert.equal(state.playlists[0].tracks[1].id, "zzzzzzzzzzz");
+  assert.equal(state.playlistIndex, 1);
+  await actions.placePlaylistTrack(1, 1);
+  assert.equal(state.playlists[0].tracks[1].id, "zzzzzzzzzzz");
+  await actions.placePlaylistTrack(1, 0);
+  assert.equal(state.playlists[0].tracks[0].id, "zzzzzzzzzzz");
+  assert.equal(state.playlistIndex, 0);
+  await actions.placePlaylistTrack(-1, 0);
+  assert.equal(state.playlists[0].tracks[0].id, "zzzzzzzzzzz");
+
   assert.equal(handleKeydown(keyEvent("a", bodyTarget()), actions), true);
   await Promise.resolve();
   assert.equal(audios.A.videoId, "abcdefghijk");
@@ -1646,6 +1658,33 @@ test("playlists stay off reserved keys and load through the search path", async 
   assert.equal(state.playlists[0].tracks[0].id, "abcdefghijk");
   await actions.addTrackToPlaylist("missing-id", morning);
   assert.equal(state.playlistError, "プレイリストを作ってください");
+});
+
+test("a failed drag puts the playlist order back", async () => {
+  const { state, actions } = harness({
+    deps: {
+      async movePlaylistTrack() {
+        throw new Error("保存できません");
+      },
+    },
+  });
+  state.playlists = [
+    {
+      id: "abc00000001",
+      name: "夜",
+      tracks: [
+        { id: "aaaaaaaaaaa", title: "朝", channel: "", duration: 1, thumbnail: null },
+        { id: "bbbbbbbbbbb", title: "昼", channel: "", duration: 1, thumbnail: null },
+      ],
+    },
+  ];
+  state.playlistId = "abc00000001";
+  state.playlistIndex = 0;
+  await actions.placePlaylistTrack(0, 1);
+  assert.equal(state.playlists[0].tracks[0].id, "aaaaaaaaaaa");
+  assert.equal(state.playlists[0].tracks[1].id, "bbbbbbbbbbb");
+  assert.equal(state.playlistIndex, 0);
+  assert.equal(state.playlistError, "保存できません");
 });
 
 test("playlist tab j/k, browse, and LOAD use that playlist", async () => {
