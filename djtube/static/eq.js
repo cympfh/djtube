@@ -39,7 +39,13 @@ export function formatEqDb(db) {
   return `${rounded.toFixed(1)} dB`;
 }
 
-export function connectEqGraph(source, context) {
+/**
+ * HIGH, then MID, then LOW. `output` is the next node. It defaults to the
+ * speakers. Pass null to leave LOW open so the deck filter can be that next
+ * node. Connecting LOW to the speakers and then disconnecting it leaves the
+ * dry signal in the heard path.
+ */
+export function connectEqGraph(source, context, output = context.destination) {
   const nodes = {};
   let previous = source;
   for (const band of EQ_BANDS) {
@@ -53,6 +59,6 @@ export function connectEqGraph(source, context) {
     previous = filter;
     nodes[band] = filter;
   }
-  previous.connect(context.destination);
+  if (output) previous.connect(output);
   return nodes;
 }

@@ -2054,8 +2054,7 @@ test("each deck filter is a bypass at center and stacks with the rest of the dec
         this.next = target;
       },
       disconnect() {
-        this.connections = [];
-        this.next = null;
+        throw new Error("the filter is part of the EQ chain and is not spliced in later");
       },
     };
   }
@@ -2064,12 +2063,15 @@ test("each deck filter is a bypass at center and stacks with the rest of the dec
     destination: { name: "out" },
     createBiquadFilter: biquad,
   };
-  const eq = connectEqGraph(source, context);
-  assert.equal(eq.low.next, context.destination);
+  const eq = connectEqGraph(source, context, null);
+  assert.equal(eq.low.next, null);
+  assert.deepEqual(eq.low.connections, []);
   const color = connectDeckFilter(eq.low, context);
   assert.deepEqual(eq.low.connections, [color]);
   assert.equal(eq.low.next, color);
+  assert.equal(eq.low.connections.includes(context.destination), false);
   assert.equal(color.next, context.destination);
+  assert.deepEqual(color.connections, [context.destination]);
   assert.equal(source.next, eq.high);
   assert.equal(eq.high.next, eq.mid);
   assert.equal(eq.mid.next, eq.low);
@@ -2252,4 +2254,106 @@ test("each deck filter is a bypass at center and stacks with the rest of the dec
   assert.equal(state.decks.A.filterError, "");
   assert.equal(audios.A.color.type, "peaking");
   assert.equal(audios.A.color.gain.value, 0);
+});
+
+test("the filter node is the only path from the EQ tail to the speakers", () => {
+  function node() {
+    return {
+      type: "",
+      frequency: { value: 0 },
+      Q: { value: 0 },
+      gain: { value: 0 },
+      connections: [],
+      connect(target) {
+        this.connections.push(target);
+      },
+      disconnect() {
+        throw new Error("disconnect leaves the dry signal connected to the speakers");
+      },
+    };
+  }
+  const destination = { name: "speakers" };
+  const made = [];
+  const previousWindow = globalThis.window;
+  globalThis.window = {
+    AudioContext: function AudioContext() {
+      this.destination = destination;
+      this.state = "running";
+      this.resume = function resume() {};
+      this.createMediaElementSource = function createMediaElementSource(audio) {
+        const source = node();
+        source.media = audio;
+        made.push(source);
+        return source;
+      };
+      this.createBiquadFilter = function createBiquadFilter() {
+        const filter = node();
+        made.push(filter);
+        return filter;
+      };
+    },
+  };
+  try {
+    const player = createDeckPlayer("A", "player-A");
+    player.audio = { volume: 1 };
+    assert.equal(player.setFilter(0), true);
+    assert.equal(made.length, 5);
+    const [source, high, mid, low, color] = made;
+    assert.deepEqual(source.connections, [high]);
+    assert.deepEqual(high.connections, [mid]);
+    assert.deepEqual(mid.connections, [low]);
+    assert.deepEqual(low.connections, [color]);
+    assert.deepEqual(color.connections, [destination]);
+    assert.equal(player._color, color);
+    assert.equal(color.type, "lowpass");
+    assert.equal(color.frequency.value, FILTER_LPF_MIN_HZ);
+    assert.equal(player.setEqGain("low", -12), true);
+    assert.equal(low.gain.value, -12);
+    assert.deepEqual(low.connections, [color]);
+
+    assert.equal(player.setFilter(50 / 100), true);
+    assert.equal(color.type, "peaking");
+    assert.equal(color.gain.value, 0);
+    assert.equal(color.frequency.value, 1000);
+    assert.equal(made.length, 5);
+
+    assert.equal(player.setFilter(100 / 100), true);
+    assert.equal(color.type, "highpass");
+    assert.equal(color.frequency.value, FILTER_HPF_MAX_HZ);
+    assert.equal(player.audio.volume, 1);
+
+    const state = freshState();
+    const other = fakeAudio();
+    const actions = createActions({
+      state,
+      audios: { A: player, B: other },
+      scheduleRender() {},
+      queryValue: () => "",
+    });
+    assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb6, 0x17, 0])), actions), true);
+    assert.equal(state.decks.A.filter, 0);
+    assert.equal(color.type, "lowpass");
+    assert.equal(color.frequency.value, FILTER_LPF_MIN_HZ);
+    assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb6, 0x18, 127])), actions), true);
+    assert.equal(state.decks.B.filter, 1);
+    assert.equal(color.type, "lowpass");
+    assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb6, 0x37, 10])), actions), false);
+    assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb6, 0x38, 10])), actions), false);
+    assert.equal(state.decks.A.filter, 0);
+    actions.setVolume("A", 0.4);
+    actions.setCrossfader(0);
+    assert.equal(player.audio.volume, 0.4);
+    assert.equal(color.type, "lowpass");
+    assert.equal(color.frequency.value, FILTER_LPF_MIN_HZ);
+    assert.equal(made.length, 5);
+
+    const appJs = readFileSync(new URL("../../djtube/static/app.js", import.meta.url), "utf8");
+    assert.match(appJs, /volume\.addEventListener\("input", \(\) => \{\s*actions\.setVolume\(deck, Number\(volume\.value\) \/ 100\);/);
+    assert.match(appJs, /filter\.addEventListener\("input", \(\) => \{\s*actions\.setFilter\(deck, Number\(filter\.value\) \/ 100\);/);
+    const filterJs = readFileSync(new URL("../../djtube/static/filter.js", import.meta.url), "utf8");
+    assert.equal(filterJs.includes("disconnect"), false);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
 });

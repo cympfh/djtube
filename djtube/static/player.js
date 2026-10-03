@@ -120,7 +120,9 @@ export function createDeckPlayer(deck, elementId) {
         if (this._context.state === "suspended") this._context.resume();
         if (!this._filters) {
           const source = this._context.createMediaElementSource(this.audio);
-          this._filters = connectEqGraph(source, this._context);
+          // Channel volume and the crossfader are already audio.volume.
+          // Leave LOW unconnected so the filter is the next node, not a second graph.
+          this._filters = connectEqGraph(source, this._context, null);
           this._color = connectDeckFilter(this._filters.low, this._context);
           for (const band of EQ_BANDS) this._filters[band].gain.value = this._eqDb[band] || 0;
           applyFilter(this._color, this._filterUnit);

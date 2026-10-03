@@ -93,11 +93,13 @@ export function applyFilter(node, unit) {
   return spec;
 }
 
-/** Insert the deck filter after the EQ tail, before the context destination. */
+/**
+ * Connect the deck filter after the EQ tail and on to the speakers.
+ * `tail` must not already be connected. This is the only path out of the deck.
+ */
 export function connectDeckFilter(tail, context) {
   const filter = context.createBiquadFilter();
   applyFilter(filter, FILTER_CENTER);
-  if (typeof tail.disconnect === "function") tail.disconnect();
   tail.connect(filter);
   filter.connect(context.destination);
   return filter;
