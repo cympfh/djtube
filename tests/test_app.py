@@ -74,7 +74,7 @@ def test_index_uses_public_asset_prefix():
     assert "次のロード先" not in html
     assert 'id="target-A"' not in html
     assert 'id="target-B"' not in html
-    assert "Enter で作る" in html
+    assert "Enter で作る" not in html
     js = client.get("/djtube/static/player.js")
     assert js.status_code == 200
     assert "createMediaElementSource" in js.text
