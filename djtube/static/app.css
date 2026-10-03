@@ -134,11 +134,6 @@ button:hover { border-color: #5c564b; }
   display: block;
 }
 
-.midi-button[data-midi="wait"] {
-  color: var(--text);
-  border-color: var(--a);
-}
-
 .midi-button[data-midi="on"] {
   color: #16140f;
   background: var(--a);

@@ -158,6 +158,12 @@ export function controllerStatusText(status) {
   return "未接続";
 }
 
+/** Header button face. "on" only after a device is actually connected. */
+export function midiButtonState(status) {
+  const connected = !!(status?.connected || (status?.state === "open" && status.names?.length));
+  return connected ? "on" : "off";
+}
+
 export async function connectController(actions, onStatus) {
   const nav = typeof navigator === "undefined" ? undefined : navigator;
   const secure = typeof window === "undefined" || window.isSecureContext !== false;

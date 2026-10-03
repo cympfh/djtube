@@ -77,6 +77,8 @@ def test_index_uses_public_asset_prefix():
     assert 'id="volume-reset-B"' in html
     assert "フェード" in html
     assert 'step="25"' not in html
+    assert 'id="midi-button"' in html
+    assert 'data-midi="off"' in html
     assert 'id="midi-status"' in html
     assert "MIDI未接続" in html
     assert "T で切り替え" not in html
