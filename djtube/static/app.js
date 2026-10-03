@@ -490,7 +490,11 @@ function bindTrackReorder(grip, row, fromIndex) {
     row.setAttribute("aria-grabbed", "true");
     list.classList.add("is-sorting");
     document.body.classList.add("is-track-sorting");
-    grip.setPointerCapture(event.pointerId);
+    try {
+      grip.setPointerCapture(event.pointerId);
+    } catch {
+      /* the window listeners still receive the release */
+    }
 
     function placeRow(clientY) {
       const bounds = list.getBoundingClientRect();
@@ -523,10 +527,13 @@ function bindTrackReorder(grip, row, fromIndex) {
 
     function finish(ev) {
       if (done) return;
+      if (ev.type === "mouseup" && ev.button !== 0) return;
+      if (ev.pointerId != null && ev.type !== "mouseup" && ev.pointerId !== event.pointerId) return;
       done = true;
-      grip.removeEventListener("pointermove", onMove);
-      grip.removeEventListener("pointerup", finish);
-      grip.removeEventListener("pointercancel", finish);
+      window.removeEventListener("pointermove", onMove, true);
+      window.removeEventListener("pointerup", finish, true);
+      window.removeEventListener("pointercancel", finish, true);
+      window.removeEventListener("mouseup", finish, true);
       window.removeEventListener("keydown", onKey, true);
       sortingTrack = false;
       list.classList.remove("is-sorting");
@@ -539,8 +546,10 @@ function bindTrackReorder(grip, row, fromIndex) {
         window.addEventListener("click", stopClick, true);
         setTimeout(() => window.removeEventListener("click", stopClick, true), 0);
       }
+      if (moved && typeof ev.clientY === "number" && (ev.type === "pointerup" || ev.type === "mouseup")) placeRow(ev.clientY);
       const order = [...list.children].indexOf(row);
-      const commit = ev.type === "pointerup" && moved && order !== fromIndex && state.playlistId === playlistId;
+      const released = ev.type === "pointerup" || ev.type === "mouseup";
+      const commit = released && moved && order !== fromIndex && state.playlistId === playlistId;
       if (commit) {
         const pending = actions.placePlaylistTrack(fromIndex, order);
         if (pending) return;
@@ -561,9 +570,10 @@ function bindTrackReorder(grip, row, fromIndex) {
       finish({ type: "pointercancel" });
     }
 
-    grip.addEventListener("pointermove", onMove);
-    grip.addEventListener("pointerup", finish);
-    grip.addEventListener("pointercancel", finish);
+    window.addEventListener("pointermove", onMove, true);
+    window.addEventListener("pointerup", finish, true);
+    window.addEventListener("pointercancel", finish, true);
+    window.addEventListener("mouseup", finish, true);
     window.addEventListener("keydown", onKey, true);
   });
 }
