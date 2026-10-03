@@ -2,6 +2,7 @@ import { SOURCE_UNAVAILABLE, createActions, freshState, sourcePlaybackBlocked } 
 import { connectController, controllerStatusText, midiButtonState } from "./controller.js";
 import { deckGains } from "./gains.js";
 import { eqGainDb, formatEqDb } from "./eq.js";
+import { formatFilter } from "./filter.js";
 import { formatTime } from "./format.js";
 import { formatRate } from "./rate.js";
 import { handleKeydown, isSearchTarget, isTypingTarget, legendGroups } from "./keys.js";
@@ -305,6 +306,7 @@ function renderDeck(deck) {
   document.getElementById(`cue-readout-${deck}`).textContent = `キュー位置 ${cue}`;
   renderTempo(deck);
   renderEq(deck);
+  renderFilter(deck);
   renderVolume(deck);
   updateTime(deck);
   paintDisc(deck);
@@ -319,6 +321,26 @@ function renderTempo(deck) {
   slider.setAttribute("aria-valuenow", value);
   slider.setAttribute("aria-valuetext", shown);
   document.getElementById(`rate-readout-${deck}`).textContent = shown;
+}
+
+function renderFilter(deck) {
+  const deckState = state.decks[deck];
+  const unit = deckState.filter ?? 0.5;
+  const slider = document.getElementById(`filter-${deck}`);
+  const shown = formatFilter(unit);
+  const value = String(Math.round(unit * 100));
+  if (document.activeElement !== slider) slider.value = value;
+  slider.setAttribute("aria-valuenow", value);
+  slider.setAttribute("aria-valuetext", shown);
+  document.getElementById(`filter-readout-${deck}`).textContent = shown;
+  const error = document.getElementById(`filter-error-${deck}`);
+  if (deckState.filterError) {
+    error.hidden = false;
+    error.textContent = deckState.filterError;
+  } else {
+    error.hidden = true;
+    error.textContent = "";
+  }
 }
 
 function renderVolume(deck) {
@@ -827,6 +849,13 @@ for (const deck of ["A", "B"]) {
   });
   document.getElementById(`volume-reset-${deck}`).addEventListener("click", () => {
     actions.resetVolume(deck);
+  });
+  const filter = document.getElementById(`filter-${deck}`);
+  filter.addEventListener("input", () => {
+    actions.setFilter(deck, Number(filter.value) / 100);
+  });
+  document.getElementById(`filter-reset-${deck}`).addEventListener("click", () => {
+    actions.resetFilter(deck);
   });
   for (const band of ["high", "mid", "low"]) {
     const slider = document.getElementById(`eq-${band}-${deck}`);

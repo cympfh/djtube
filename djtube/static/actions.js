@@ -1,4 +1,5 @@
 import { EQ_BANDS, clampEqUnit, eqGainDb, eqUnitFromMidi } from "./eq.js";
+import { clampFilterUnit, filterUnitFromMidi } from "./filter.js";
 import { deckGains } from "./gains.js";
 import { createPlaylistActions, freshPlaylistState, trackSnapshot } from "./playlists.js";
 import { clampRate, rateFromMidi } from "./rate.js";
@@ -21,6 +22,8 @@ export function freshDeck() {
     volume: 1,
     eq: { high: 0.5, mid: 0.5, low: 0.5 },
     eqError: "",
+    filter: 0.5,
+    filterError: "",
     track: null,
   };
 }
@@ -400,6 +403,37 @@ export function createActions(deps) {
     setEq(deck, band, eqUnitFromMidi(numeric));
   }
 
+  function setFilter(deck, value) {
+    const deckState = deckOf(state, deck);
+    const audio = audios[deck];
+    if (!deckState || !audio) return;
+    const unit = clampFilterUnit(value);
+    deckState.filter = unit;
+    const applied = audio.setFilter?.(unit);
+    deckState.filterError = applied === false ? "フィルターを音声に接続できませんでした" : "";
+    scheduleRender();
+  }
+
+  function nudgeFilter(deck, delta) {
+    const deckState = deckOf(state, deck);
+    if (!deckState) return;
+    const step = Number(delta);
+    if (!Number.isFinite(step) || step === 0) return;
+    const current = Number(deckState.filter);
+    const base = Number.isFinite(current) ? current : 0.5;
+    setFilter(deck, Math.round((base + step) * 1000) / 1000);
+  }
+
+  function resetFilter(deck) {
+    setFilter(deck, 0.5);
+  }
+
+  function setFilterFromController(deck, value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return;
+    setFilter(deck, filterUnitFromMidi(numeric));
+  }
+
   function jog(deck, delta) {
     const deckState = deckOf(state, deck);
     const audio = audios[deck];
@@ -466,6 +500,10 @@ export function createActions(deps) {
     nudgeEq,
     resetEq,
     setEqFromController,
+    setFilter,
+    nudgeFilter,
+    resetFilter,
+    setFilterFromController,
     nudgeCrossfader,
     setCrossfader,
     setCrossfaderFromController,

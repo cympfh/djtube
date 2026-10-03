@@ -17,6 +17,11 @@
 // Deck 2 (channel 1, right) is deck B. The LSB is CC 51 (0x33) and is not
 // mapped. Notes 102 and 82 are fader-start play/cue, not the level.
 // The other LSB companions (CC 32, 39, 43, 47, and crossfader CC 63) are not mapped.
+// CFX (Sound Color FX) MSB is on the mixer channel, not the deck channel.
+// Deck 1 (left, A) is CC 23 (0x17). Deck 2 (right, B) is CC 24 (0x18).
+// Official DDJ-FLX4 MIDI Message List E1, figure 3-5, status 0xB6.
+// Mixxx Pioneer-DDJ-FLX4 maps those bytes as FILTER CH1 / FILTER CH2.
+// The LSB is CC 55 (0x37) and CC 56 (0x38) and is not mapped.
 
 const DECK_A = 0;
 const DECK_B = 1;
@@ -37,6 +42,8 @@ const EQ_HI = 0x07;
 const EQ_MID = 0x0b;
 const EQ_LOW = 0x0f;
 const CHANNEL_FADER = 0x13;
+const CFX_A = 0x17;
+const CFX_B = 0x18;
 
 /** Seconds of seek for one jog tick (value 65 or 63). */
 export const JOG_STEP_SECONDS = 0.05;
@@ -89,6 +96,8 @@ export const FLX4_MAP = {
   [`note:${MIXER}:${LOAD_A}`]: binding("loadOpenSelection", ["A"]),
   [`note:${MIXER}:${LOAD_B}`]: binding("loadOpenSelection", ["B"]),
   [`cc:${MIXER}:${CROSSFADER}`]: binding("setCrossfaderFromController", undefined, { passValue: true }),
+  [`cc:${MIXER}:${CFX_A}`]: binding("setFilterFromController", ["A"], { passValue: true }),
+  [`cc:${MIXER}:${CFX_B}`]: binding("setFilterFromController", ["B"], { passValue: true }),
   [`cc:${MIXER}:${BROWSE}`]: binding("moveSelection", undefined, { relative: "signed7", scale: 1 }),
   ...deckJog(DECK_A, "A"),
   ...deckJog(DECK_B, "B"),

@@ -1,4 +1,5 @@
 import { EQ_STEP } from "./eq.js";
+import { FILTER_STEP } from "./filter.js";
 import { RATE_STEP } from "./rate.js";
 
 export const FADER_STEP = 0.04;
@@ -68,6 +69,31 @@ export const BINDINGS = [
   { keys: ["n"], action: "nudgeEq", args: ["B", "low", -EQ_STEP], label: "デッキ B の LOW を下げる", group: "イコライザー" },
   { keys: ["h"], action: "nudgeEq", args: ["B", "low", EQ_STEP], label: "デッキ B の LOW を上げる", group: "イコライザー" },
   { keys: ["7"], action: "resetEq", args: ["B"], label: "デッキ B のイコライザーを 0 dB に戻す", group: "イコライザー" },
+  { keys: ["t"], action: "nudgeFilter", args: ["A", -FILTER_STEP], label: "デッキ A のフィルターをローパス側へ", group: "フィルター" },
+  {
+    keys: ["t"],
+    action: "nudgeFilter",
+    args: ["A", FILTER_STEP],
+    shift: true,
+    label: "デッキ A のフィルターをハイパス側へ",
+    group: "フィルター",
+  },
+  {
+    keys: ["q"],
+    action: "nudgeFilter",
+    args: ["B", -FILTER_STEP],
+    shift: true,
+    label: "デッキ B のフィルターをローパス側へ",
+    group: "フィルター",
+  },
+  {
+    keys: ["w"],
+    action: "nudgeFilter",
+    args: ["B", FILTER_STEP],
+    shift: true,
+    label: "デッキ B のフィルターをハイパス側へ",
+    group: "フィルター",
+  },
   {
     keys: ["ArrowLeft", ","],
     action: "nudgeCrossfader",
