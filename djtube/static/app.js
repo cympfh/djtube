@@ -462,10 +462,18 @@ function renderPlaylists() {
   status.classList.toggle("is-error", !!state.playlistError);
 
   const busy = state.playlistBusy;
-  document.getElementById("playlist-create").disabled = busy;
-  document.getElementById("playlist-rename").disabled = busy;
-
   const playlist = state.playlists.find((item) => item.id === state.playlistId) || null;
+  const canEdit = !!playlist && !busy;
+  document.getElementById("playlist-create").disabled = busy;
+  document.getElementById("playlist-edit").disabled = !canEdit;
+  document.getElementById("playlist-rename").disabled = !canEdit;
+  document.getElementById("playlist-delete").disabled = !canEdit;
+  const editDialog = document.getElementById("playlist-edit-dialog");
+  const editOpen = editDialog.open;
+  document.getElementById("playlist-edit").setAttribute("aria-expanded", editOpen ? "true" : "false");
+  const editError = document.getElementById("playlist-edit-error");
+  editError.textContent = editOpen ? state.playlistError || "" : "";
+  editError.classList.toggle("is-error", editOpen && !!state.playlistError);
   const tracks = playlist?.tracks || [];
   const pendingTrack =
     pendingRemove && pendingRemove.playlistId === playlist?.id ? tracks[pendingRemove.index] : null;
@@ -591,7 +599,53 @@ document.getElementById("search-button").addEventListener("click", () => actions
 document.getElementById("tab-search").addEventListener("click", () => showLibrary("search"));
 document.getElementById("tab-playlist").addEventListener("click", () => showLibrary("playlist"));
 document.getElementById("playlist-create").addEventListener("click", () => actions.createPlaylist());
-document.getElementById("playlist-rename").addEventListener("click", () => actions.renamePlaylist());
+const playlistEditDialog = document.getElementById("playlist-edit-dialog");
+const playlistRenameName = document.getElementById("playlist-rename-name");
+
+function openPlaylistEdit() {
+  const playlist = state.playlists.find((item) => item.id === state.playlistId);
+  if (!playlist || state.playlistBusy || playlistEditDialog.open) return;
+  playlistRenameName.value = playlist.name;
+  state.playlistError = "";
+  playlistEditDialog.showModal();
+  playlistRenameName.focus();
+  playlistRenameName.select();
+  scheduleRender();
+}
+
+async function submitPlaylistRename() {
+  if (!playlistEditDialog.open || state.playlistBusy) return;
+  const pending = actions.renamePlaylist(playlistRenameName.value);
+  if (pending) await pending;
+  if (playlistEditDialog.open && !state.playlistError) playlistEditDialog.close();
+}
+
+async function submitPlaylistDelete() {
+  if (!playlistEditDialog.open || state.playlistBusy) return;
+  const id = state.playlistId;
+  if (!id) return;
+  const pending = actions.deletePlaylist();
+  if (pending) await pending;
+  const removed = !state.playlistError && !state.playlists.some((item) => item.id === id);
+  if (playlistEditDialog.open && removed) playlistEditDialog.close();
+}
+
+document.getElementById("playlist-edit").addEventListener("click", openPlaylistEdit);
+document.getElementById("playlist-rename").addEventListener("click", () => {
+  submitPlaylistRename();
+});
+document.getElementById("playlist-delete").addEventListener("click", () => {
+  submitPlaylistDelete();
+});
+document.getElementById("playlist-edit-close").addEventListener("click", () => playlistEditDialog.close());
+playlistEditDialog.addEventListener("click", (event) => {
+  if (event.target === playlistEditDialog) playlistEditDialog.close();
+});
+playlistRenameName.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  submitPlaylistRename();
+});
 document.getElementById("playlist-select").addEventListener("change", (event) => {
   actions.selectPlaylist(event.target.value);
 });
@@ -649,7 +703,14 @@ for (const deck of ["A", "B"]) {
   });
 }
 
-window.addEventListener("keydown", (event) => handleKeydown(event, actions, state.library), true);
+window.addEventListener(
+  "keydown",
+  (event) => {
+    if (playlistEditDialog.open) return;
+    handleKeydown(event, actions, state.library);
+  },
+  true,
+);
 
 function showMidiStatus(status) {
   const node = document.getElementById("midi-status");

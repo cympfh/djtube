@@ -90,9 +90,9 @@
               <button type="button" id="playlist-create">作る</button>
             </div>
             <p class="status" id="playlist-name-note"></p>
-            <button type="button" id="playlist-rename">変える</button>
             <label class="sr-only" for="playlist-select">プレイリストを選ぶ</label>
             <select id="playlist-select"></select>
+            <button type="button" id="playlist-edit" aria-haspopup="dialog" aria-controls="playlist-edit-dialog" aria-expanded="false">編集</button>
             <p class="status" id="playlist-status" role="status"></p>
             <ol id="playlist-tracks" class="results" role="listbox" aria-label="プレイリストの曲"></ol>
           </div>
@@ -248,6 +248,19 @@
         <div id="key-legend" class="legend"></div>
       </footer>
     </div>
+    <dialog id="playlist-edit-dialog" aria-labelledby="playlist-edit-title">
+      <div class="playlist-edit-body">
+        <h2 id="playlist-edit-title">編集</h2>
+        <label for="playlist-rename-name">名前</label>
+        <input id="playlist-rename-name" type="text" maxlength="80" autocomplete="off" spellcheck="false" />
+        <p class="status" id="playlist-edit-error" role="status"></p>
+        <div class="playlist-edit-actions">
+          <button type="button" id="playlist-rename">リネーム</button>
+          <button type="button" id="playlist-delete">プレイリスト削除</button>
+        </div>
+        <button type="button" id="playlist-edit-close">閉じる</button>
+      </div>
+    </dialog>
     <script type="module" src="__PUBLIC_PREFIX__/static/app.js"></script>
   </body>
 </html>

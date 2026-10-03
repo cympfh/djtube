@@ -1624,6 +1624,15 @@ test("playlists stay off reserved keys and load through the search path", async 
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(state.playlists[0].name, "朝");
 
+  nameValue = "残す";
+  await actions.renamePlaylist("昼");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(state.playlists[0].name, "昼");
+  assert.equal(nameValue, "残す");
+  await actions.renamePlaylist("   ");
+  assert.equal(state.playlistError, "名前を入れてください");
+  assert.equal(state.playlists[0].name, "昼");
+
   assert.equal(handleKeydown(keyEvent("Backspace", bodyTarget(), { shiftKey: true }), actions), true);
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(state.playlists.length, 0);
