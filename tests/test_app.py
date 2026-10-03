@@ -75,6 +75,11 @@ def test_index_uses_public_asset_prefix():
     assert 'id="volume-B" type="range" min="0" max="100" step="1"' in html
     assert 'id="volume-reset-A"' in html
     assert 'id="volume-reset-B"' in html
+    assert 'id="filter-A" type="range" min="0" max="100" step="1"' in html
+    assert 'id="filter-B" type="range" min="0" max="100" step="1"' in html
+    assert 'id="filter-reset-A"' in html
+    assert 'id="filter-reset-B"' in html
+    assert "中央に戻す" in html
     assert "フェード" in html
     assert 'step="25"' not in html
     assert 'id="midi-button"' in html
@@ -209,6 +214,9 @@ def test_readme_and_docker_contract():
     assert "`A` で選択中の曲をデッキ A へ" in readme
     assert "`B` で選択中の曲をデッキ B へ" in readme
     assert "`Enter` で検索する" in readme
+    assert "中央はフィルターなし" in readme
+    assert "`T` / `Shift+T`" in readme
+    assert "`Shift+Q` / `Shift+W`" in readme
     assert "名前欄で `Enter` を押すと作る" in readme
     for gone in ("T で切り替え", "次のロード先", "ロード先を切り替え", "検索 / ロード", "検索欄の外で `Enter`"):
         assert gone not in readme

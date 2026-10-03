@@ -157,6 +157,15 @@
                 </div>
                 <p class="eq-error" id="eq-error-A" hidden></p>
               </div>
+              <div class="filter">
+                <div class="filter-head">
+                  <label for="filter-A">フィルター</label>
+                  <span class="filter-readout" id="filter-readout-A">なし</span>
+                  <button type="button" id="filter-reset-A">中央に戻す</button>
+                </div>
+                <input id="filter-A" type="range" min="0" max="100" step="1" value="50" aria-label="デッキ A のフィルター" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" aria-valuetext="なし" />
+                <p class="filter-error" id="filter-error-A" hidden></p>
+              </div>
               <div class="level">
                 <div class="level-head">
                   <label for="volume-A">音量</label>
@@ -223,6 +232,15 @@
                   <button type="button" id="eq-low-reset-B">0 dB</button>
                 </div>
                 <p class="eq-error" id="eq-error-B" hidden></p>
+              </div>
+              <div class="filter">
+                <div class="filter-head">
+                  <label for="filter-B">フィルター</label>
+                  <span class="filter-readout" id="filter-readout-B">なし</span>
+                  <button type="button" id="filter-reset-B">中央に戻す</button>
+                </div>
+                <input id="filter-B" type="range" min="0" max="100" step="1" value="50" aria-label="デッキ B のフィルター" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" aria-valuetext="なし" />
+                <p class="filter-error" id="filter-error-B" hidden></p>
               </div>
               <div class="level">
                 <div class="level-head">

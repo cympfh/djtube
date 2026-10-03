@@ -15,6 +15,18 @@ import {
 } from "../../djtube/static/controller.js";
 import { formatTime } from "../../djtube/static/format.js";
 import { EQ_BOOST_DB, EQ_CUT_DB, EQ_STEP, connectEqGraph, eqGainDb, eqUnitFromMidi, formatEqDb } from "../../djtube/static/eq.js";
+import {
+  FILTER_HPF_MAX_HZ,
+  FILTER_HPF_OPEN_HZ,
+  FILTER_LPF_MIN_HZ,
+  FILTER_LPF_OPEN_HZ,
+  FILTER_STEP,
+  applyFilter,
+  connectDeckFilter,
+  filterSpec,
+  filterUnitFromMidi,
+  formatFilter,
+} from "../../djtube/static/filter.js";
 import { deckGains } from "../../djtube/static/gains.js";
 import { BINDINGS, VOLUME_STEP, handleKeydown, legendGroups } from "../../djtube/static/keys.js";
 import { RATE_STEP, clampRate, formatRate, rateFromMidi } from "../../djtube/static/rate.js";
@@ -170,6 +182,8 @@ test("FLX4 map sends notes and CCs to deck actions", async () => {
     "cc:1:15": ["setEqFromController", ["B", "low"]],
     "cc:0:19": ["setVolumeFromController", ["A"]],
     "cc:1:19": ["setVolumeFromController", ["B"]],
+    "cc:6:23": ["setFilterFromController", ["A"]],
+    "cc:6:24": ["setFilterFromController", ["B"]],
   };
   for (const [key, [action, args]] of Object.entries(expected)) {
     assert.equal(FLX4_MAP[key]?.action, action, key);
@@ -185,6 +199,8 @@ test("FLX4 map sends notes and CCs to deck actions", async () => {
   assert.equal(FLX4_MAP["cc:1:15"].passValue, true);
   assert.equal(FLX4_MAP["cc:0:19"].passValue, true);
   assert.equal(FLX4_MAP["cc:1:19"].passValue, true);
+  assert.equal(FLX4_MAP["cc:6:23"].passValue, true);
+  assert.equal(FLX4_MAP["cc:6:24"].passValue, true);
   for (const key of [
     "note:0:14",
     "note:0:72",
@@ -202,6 +218,8 @@ test("FLX4 map sends notes and CCs to deck actions", async () => {
     "cc:0:43",
     "cc:0:47",
     "cc:1:32",
+    "cc:6:55",
+    "cc:6:56",
   ]) {
     assert.equal(FLX4_MAP[key], undefined, key);
   }
@@ -343,7 +361,7 @@ test("keyboard map covers deck operations and skips typed search", async () => {
     assert.ok(actionsInMap.has(name), name);
   }
   assert.equal(actionsInMap.has("toggleLoadTarget"), false);
-  assert.equal(BINDINGS.some((binding) => binding.keys.includes("t")), false);
+  assert.equal(BINDINGS.some((binding) => binding.keys.includes("t") && binding.action === "nudgeFilter"), true);
 
   const { state, audios, actions } = harness();
   const search = searchTarget();
@@ -395,7 +413,9 @@ test("keyboard map covers deck operations and skips typed search", async () => {
   assert.equal(handleKeydown(keyEvent("Enter", bodyTarget()), actions), true);
   assert.equal(state.decks.A.id, "");
   assert.equal(state.decks.B.id, "abcdefghijk");
-  assert.equal(handleKeydown(keyEvent("t", bodyTarget()), actions), false);
+  assert.equal(handleKeydown(keyEvent("t", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.id, "");
+  assert.equal(state.decks.A.filter, 0.45);
   assert.equal(handleKeydown(keyEvent("a", bodyTarget()), actions), true);
   await Promise.resolve();
   assert.equal(state.decks.A.id, "abcdefghijk");
@@ -1972,4 +1992,264 @@ test("cue while playing returns and pauses", () => {
     assert.equal(audios.A.paused, true);
     assert.equal(audios.A.currentTime, 0);
   });
+});
+
+test("each deck filter is a bypass at center and stacks with the rest of the deck", async () => {
+  assert.equal(FILTER_STEP, 0.05);
+  assert.equal(filterUnitFromMidi(64), 0.5);
+  assert.equal(filterUnitFromMidi(0), 0);
+  assert.equal(filterUnitFromMidi(127), 1);
+  assert.ok(filterUnitFromMidi(63) < 0.5);
+  assert.ok(filterUnitFromMidi(65) > 0.5);
+  assert.equal(formatFilter(0.5), "なし");
+  assert.equal(formatFilter(filterUnitFromMidi(64)), "なし");
+  assert.match(formatFilter(0), /^ローパス /);
+  assert.match(formatFilter(1), /^ハイパス /);
+  assert.equal(formatFilter(0).includes("なし"), false);
+  assert.equal(formatFilter(1).includes("なし"), false);
+
+  const fullLow = filterSpec(0);
+  const nearCenterLow = filterSpec(0.49);
+  const nearCenterHigh = filterSpec(0.51);
+  const fullHigh = filterSpec(1);
+  assert.equal(filterSpec(0.5).bypass, true);
+  assert.equal(fullLow.bypass, false);
+  assert.equal(fullLow.type, "lowpass");
+  assert.equal(fullLow.frequency, FILTER_LPF_MIN_HZ);
+  assert.equal(nearCenterLow.type, "lowpass");
+  assert.ok(nearCenterLow.frequency > fullLow.frequency);
+  assert.ok(nearCenterLow.frequency < FILTER_LPF_OPEN_HZ);
+  assert.ok(nearCenterLow.frequency > 8000);
+  assert.equal(fullHigh.type, "highpass");
+  assert.equal(fullHigh.frequency, FILTER_HPF_MAX_HZ);
+  assert.equal(nearCenterHigh.type, "highpass");
+  assert.ok(nearCenterHigh.frequency > FILTER_HPF_OPEN_HZ);
+  assert.ok(nearCenterHigh.frequency < fullHigh.frequency);
+  assert.ok(nearCenterHigh.frequency < 200);
+  let previous = filterSpec(0).frequency;
+  for (const unit of [0.1, 0.2, 0.3, 0.4]) {
+    const spec = filterSpec(unit);
+    assert.equal(spec.type, "lowpass");
+    assert.ok(spec.frequency > previous);
+    previous = spec.frequency;
+  }
+  previous = filterSpec(0.6).frequency;
+  for (const unit of [0.7, 0.8, 0.9, 1]) {
+    const spec = filterSpec(unit);
+    assert.equal(spec.type, "highpass");
+    assert.ok(spec.frequency > previous);
+    previous = spec.frequency;
+  }
+
+  function biquad() {
+    return {
+      type: "",
+      frequency: { value: 0 },
+      Q: { value: 0 },
+      gain: { value: 1 },
+      connections: [],
+      next: null,
+      connect(target) {
+        this.connections.push(target);
+        this.next = target;
+      },
+      disconnect() {
+        this.connections = [];
+        this.next = null;
+      },
+    };
+  }
+  const source = { connections: [], next: null, connect(target) { this.connections.push(target); this.next = target; } };
+  const context = {
+    destination: { name: "out" },
+    createBiquadFilter: biquad,
+  };
+  const eq = connectEqGraph(source, context);
+  assert.equal(eq.low.next, context.destination);
+  const color = connectDeckFilter(eq.low, context);
+  assert.deepEqual(eq.low.connections, [color]);
+  assert.equal(eq.low.next, color);
+  assert.equal(color.next, context.destination);
+  assert.equal(source.next, eq.high);
+  assert.equal(eq.high.next, eq.mid);
+  assert.equal(eq.mid.next, eq.low);
+  assert.equal(color.type, "peaking");
+  assert.equal(color.gain.value, 0);
+  assert.notEqual(color.type, "lowpass");
+  assert.notEqual(color.type, "highpass");
+
+  applyFilter(color, 0);
+  assert.equal(color.type, "lowpass");
+  assert.equal(color.frequency.value, FILTER_LPF_MIN_HZ);
+  applyFilter(color, 0.5);
+  assert.equal(color.type, "peaking");
+  assert.equal(color.gain.value, 0);
+  assert.notEqual(color.type, "lowpass");
+  assert.notEqual(color.type, "highpass");
+  applyFilter(color, 1);
+  assert.equal(color.type, "highpass");
+  assert.equal(color.frequency.value, FILTER_HPF_MAX_HZ);
+
+  const labels = legendGroups().find((group) => group.name === "フィルター").items.map((item) => item.label);
+  assert.ok(labels.includes("デッキ A のフィルターをローパス側へ"));
+  assert.ok(labels.includes("デッキ A のフィルターをハイパス側へ"));
+  assert.ok(labels.includes("デッキ B のフィルターをローパス側へ"));
+  assert.ok(labels.includes("デッキ B のフィルターをハイパス側へ"));
+
+  const { state, audios, actions } = harness();
+  for (const deck of ["A", "B"]) {
+    audios[deck].color = {
+      type: "",
+      frequency: { value: 0 },
+      Q: { value: 0 },
+      gain: { value: 1 },
+    };
+    audios[deck].setFilter = (unit) => {
+      audios[deck].filterUnit = unit;
+      if (audios[deck].filterLive === false) return false;
+      applyFilter(audios[deck].color, unit);
+      return true;
+    };
+    audios[deck].eqDb = { high: 0, mid: 0, low: 0 };
+    audios[deck].setEqGain = (band, db) => {
+      audios[deck].eqDb[band] = db;
+      return true;
+    };
+  }
+
+  assert.equal(state.decks.A.filter, 0.5);
+  assert.equal(state.decks.B.filter, 0.5);
+  actions.setFilter("A", 0.5);
+  assert.equal(audios.A.color.type, "peaking");
+  assert.equal(audios.A.color.gain.value, 0);
+  actions.setVolume("A", 0.4);
+  actions.setVolume("B", 0.8);
+  actions.setRate("A", 1.4);
+  actions.setRate("B", 0.7);
+  actions.setEq("A", "high", 0.8);
+  actions.setCrossfader(0.25);
+  const stacked = {
+    volumeA: state.decks.A.volume,
+    volumeB: state.decks.B.volume,
+    rateA: state.decks.A.rate,
+    rateB: state.decks.B.rate,
+    eqHigh: state.decks.A.eq.high,
+    crossfader: state.crossfader,
+    audioA: audios.A.volume,
+    audioB: audios.B.volume,
+  };
+
+  actions.setFilter("A", 0);
+  assert.equal(state.decks.A.filter, 0);
+  assert.equal(audios.A.filterUnit, 0);
+  assert.equal(audios.A.color.type, "lowpass");
+  assert.equal(audios.A.color.frequency.value, FILTER_LPF_MIN_HZ);
+  assert.equal(state.decks.B.filter, 0.5);
+  assert.equal(state.decks.A.volume, stacked.volumeA);
+  assert.equal(state.decks.B.volume, stacked.volumeB);
+  assert.equal(state.decks.A.rate, stacked.rateA);
+  assert.equal(state.decks.B.rate, stacked.rateB);
+  assert.equal(state.decks.A.eq.high, stacked.eqHigh);
+  assert.equal(state.crossfader, stacked.crossfader);
+  assert.equal(audios.A.volume, stacked.audioA);
+  assert.equal(audios.B.volume, stacked.audioB);
+  assert.equal(audios.A.playbackRate, stacked.rateA);
+
+  actions.setVolume("A", 0.2);
+  actions.setCrossfader(0.8);
+  actions.nudgeRate("A", 0.01);
+  actions.nudgeEq("A", "low", EQ_STEP);
+  assert.equal(state.decks.A.filter, 0);
+  assert.equal(audios.A.color.type, "lowpass");
+  assert.equal(audios.A.color.frequency.value, FILTER_LPF_MIN_HZ);
+
+  actions.resetFilter("A");
+  assert.equal(state.decks.A.filter, 0.5);
+  assert.equal(audios.A.color.type, "peaking");
+  assert.equal(audios.A.color.gain.value, 0);
+  actions.setFilter("A", 1);
+  assert.equal(audios.A.color.type, "highpass");
+  assert.equal(audios.A.color.frequency.value, FILTER_HPF_MAX_HZ);
+  actions.setFilter("C", 0);
+  assert.equal(state.decks.A.filter, 1);
+
+  assert.equal(handleKeydown(keyEvent("t", searchTarget()), actions), false);
+  assert.equal(state.decks.A.filter, 1);
+  assert.equal(handleKeydown(keyEvent("t", bodyTarget()), actions), true);
+  assert.equal(state.decks.A.filter, 0.95);
+  assert.equal(audios.A.color.type, "highpass");
+  assert.ok(audios.A.color.frequency.value < FILTER_HPF_MAX_HZ);
+  assert.equal(handleKeydown(keyEvent("T", bodyTarget(), { shiftKey: true }), actions), true);
+  assert.equal(state.decks.A.filter, 1);
+  assert.equal(audios.A.paused, true);
+  assert.equal(handleKeydown(keyEvent("q", bodyTarget()), actions), true);
+  assert.equal(audios.A.paused, true);
+  assert.equal(state.decks.A.filter, 1);
+  assert.equal(state.decks.B.filter, 0.5);
+  assert.equal(handleKeydown(keyEvent("Q", bodyTarget(), { shiftKey: true }), actions), true);
+  assert.equal(state.decks.B.filter, 0.45);
+  assert.equal(audios.B.color.type, "lowpass");
+  assert.equal(audios.A.paused, true);
+  assert.equal(state.decks.A.filter, 1);
+  assert.equal(handleKeydown(keyEvent("w", bodyTarget()), actions), true);
+  assert.equal(audios.B.paused, true);
+  assert.equal(state.decks.B.filter, 0.45);
+  assert.equal(handleKeydown(keyEvent("W", bodyTarget(), { shiftKey: true }), actions), true);
+  assert.equal(state.decks.B.filter, 0.5);
+  assert.equal(audios.B.color.type, "peaking");
+  assert.equal(audios.B.color.gain.value, 0);
+  assert.equal(audios.B.paused, true);
+
+  const rateA = state.decks.A.rate;
+  const volumeA = state.decks.A.volume;
+  const eqLow = state.decks.A.eq.low;
+  const fader = state.crossfader;
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb6, 0x17, 0])), actions), true);
+  assert.equal(state.decks.A.filter, 0);
+  assert.equal(audios.A.color.type, "lowpass");
+  assert.equal(state.decks.B.filter, 0.5);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb6, 0x17, 64])), actions), true);
+  assert.equal(state.decks.A.filter, 0.5);
+  assert.equal(audios.A.color.type, "peaking");
+  assert.equal(audios.A.color.gain.value, 0);
+  assert.equal(formatFilter(state.decks.A.filter), "なし");
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb6, 0x17, 127])), actions), true);
+  assert.equal(state.decks.A.filter, 1);
+  assert.equal(audios.A.color.type, "highpass");
+  assert.equal(audios.A.color.frequency.value, FILTER_HPF_MAX_HZ);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb6, 0x18, 0])), actions), true);
+  assert.equal(state.decks.B.filter, 0);
+  assert.equal(audios.B.color.type, "lowpass");
+  assert.equal(state.decks.A.filter, 1);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb6, 0x37, 0])), actions), false);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb6, 0x38, 127])), actions), false);
+  assert.equal(state.decks.A.filter, 1);
+  assert.equal(state.decks.B.filter, 0);
+  assert.equal(state.decks.A.rate, rateA);
+  assert.equal(state.decks.A.volume, volumeA);
+  assert.equal(state.decks.A.eq.low, eqLow);
+  assert.equal(state.crossfader, fader);
+  assert.equal(audios.A.playbackRate, rateA);
+
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 10 }];
+  await actions.loadSelected("A");
+  assert.equal(state.decks.A.filter, 1);
+  assert.equal(audios.A.filterUnit, 1);
+  assert.equal(audios.A.color.type, "highpass");
+  assert.equal(state.decks.B.filter, 0);
+  assert.equal(audios.B.color.type, "lowpass");
+  assert.equal(state.decks.A.rate, 1);
+  assert.equal(state.decks.A.eq.high, 0.5);
+  assert.equal(state.decks.A.volume, volumeA);
+
+  audios.A.filterLive = false;
+  actions.setFilter("A", 0.2);
+  assert.equal(state.decks.A.filter, 0.2);
+  assert.equal(state.decks.A.filterError, "フィルターを音声に接続できませんでした");
+  assert.equal(audios.A.color.type, "highpass");
+  audios.A.filterLive = true;
+  actions.resetFilter("A");
+  assert.equal(state.decks.A.filterError, "");
+  assert.equal(audios.A.color.type, "peaking");
+  assert.equal(audios.A.color.gain.value, 0);
 });

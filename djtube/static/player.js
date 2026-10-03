@@ -2,6 +2,7 @@
 // A YouTube iframe cannot feed those filters. Tempo is the audio element's playbackRate.
 
 import { EQ_BANDS, EQ_FILTERS, connectEqGraph } from "./eq.js";
+import { FILTER_CENTER, applyFilter, clampFilterUnit, connectDeckFilter } from "./filter.js";
 import { publicPrefix } from "./prefix.js";
 import { clampRate } from "./rate.js";
 import { commandedSeekLanded } from "./seekland.js";
@@ -28,8 +29,10 @@ export function createDeckPlayer(deck, elementId) {
     _volume: 1,
     _rate: 1,
     _eqDb: { high: 0, mid: 0, low: 0 },
+    _filterUnit: FILTER_CENTER,
     _context: null,
     _filters: null,
+    _color: null,
     _graphFailed: false,
     _attached: false,
     _reportedTime() {
@@ -118,7 +121,9 @@ export function createDeckPlayer(deck, elementId) {
         if (!this._filters) {
           const source = this._context.createMediaElementSource(this.audio);
           this._filters = connectEqGraph(source, this._context);
+          this._color = connectDeckFilter(this._filters.low, this._context);
           for (const band of EQ_BANDS) this._filters[band].gain.value = this._eqDb[band] || 0;
+          applyFilter(this._color, this._filterUnit);
         }
         return true;
       } catch {
@@ -131,6 +136,12 @@ export function createDeckPlayer(deck, elementId) {
       this._eqDb[band] = Number(db);
       if (!this._ensureGraph() || !this._filters?.[band]) return false;
       this._filters[band].gain.value = this._eqDb[band];
+      return true;
+    },
+    setFilter(unit) {
+      this._filterUnit = clampFilterUnit(unit);
+      if (!this._ensureGraph() || !this._color) return false;
+      applyFilter(this._color, this._filterUnit);
       return true;
     },
     play() {
