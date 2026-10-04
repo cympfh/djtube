@@ -3,6 +3,8 @@
 
 import { EQ_BANDS, EQ_FILTERS, connectEqGraph } from "./eq.js";
 import { FILTER_CENTER, applyFilter, clampFilterUnit, connectDeckFilter } from "./filter.js";
+import { clampSpinRate } from "./jogspin.js";
+import { createScratchVoice } from "./scratch.js";
 import { publicPrefix } from "./prefix.js";
 import { clampRate } from "./rate.js";
 import { commandedSeekLanded } from "./seekland.js";
@@ -28,6 +30,9 @@ export function createDeckPlayer(deck, elementId) {
     _seekPending: false,
     _volume: 1,
     _rate: 1,
+    _spinRate: null,
+    _trackHeld: false,
+    _scratch: null,
     _eqDb: { high: 0, mid: 0, low: 0 },
     _filterUnit: FILTER_CENTER,
     _context: null,
@@ -96,10 +101,42 @@ export function createDeckPlayer(deck, elementId) {
       this._rate = clampRate(value);
       this._applyRate();
     },
+    // Platter speed while the hand is on the disc. The tempo fader stays in _rate.
+    setSpinRate(value) {
+      if (value == null) this._spinRate = null;
+      else {
+        const numeric = Number(value);
+        this._spinRate = Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+      }
+      this._applyRate();
+    },
+    holdTrack(held) {
+      this._trackHeld = !!held;
+      if (this.audio) this.audio.muted = this._trackHeld;
+    },
+    playScratch(scratch) {
+      if (!scratch || !(Number(scratch.rate) > 0)) return;
+      try {
+        if (!this._context) this._ensureGraph();
+        if (!this._context) return;
+        if (this._context.state === "suspended") this._context.resume?.();
+        if (!this._scratch) this._scratch = createScratchVoice(this._context);
+        const level = Number(this.volume);
+        this._scratch.update(scratch, Number.isFinite(level) ? level : 1);
+      } catch {
+        this._scratch = null;
+      }
+    },
+    stopScratch() {
+      this._scratch?.stop();
+      this._scratch = null;
+    },
     _applyRate() {
       if (!this.audio) return;
+      const spinning = this._spinRate != null && !this._trackHeld;
+      const rate = spinning ? clampSpinRate(this._spinRate) ?? this._rate : this._rate;
       try {
-        this.audio.playbackRate = this._rate;
+        this.audio.playbackRate = rate;
       } catch {
         /* the element applies the rate once media is ready */
       }
@@ -162,6 +199,10 @@ export function createDeckPlayer(deck, elementId) {
       this.paused = true;
     },
     loadVideo(id) {
+      this.stopScratch();
+      this._spinRate = null;
+      this._trackHeld = false;
+      if (this.audio) this.audio.muted = false;
       this.videoId = id;
       this._time = 0;
       this._seekFrom = 0;
