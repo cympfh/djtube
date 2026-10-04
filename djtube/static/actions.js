@@ -501,12 +501,14 @@ export function createActions(deps) {
     const step = Number(delta);
     if (!Number.isFinite(step) || step === 0) return;
     syncJog(deck);
+    const spin = jogSpin[deck];
     const reported = Number(audio.currentTime);
     const live = Number.isFinite(reported) ? reported : 0;
     const pending = deckState.jogCommand;
     const held = pending && Number.isFinite(pending.at) && Number.isFinite(pending.from);
-    const base = held ? pending.at : live;
-    const origin = held ? pending.from : live;
+    const spinning = !!(spin?.active && Number.isFinite(spin.at));
+    const base = spinning ? spin.at : held ? pending.at : live;
+    const origin = held ? pending.from : spinning ? spin.at : live;
     let next = base + step;
     if (next < 0) next = 0;
     const duration = Number(audio.duration);

@@ -617,8 +617,8 @@ test("jog lands when playback has left the pre-jog time toward the command", () 
     assert.equal(state.decks.A.jogCommand, null);
     assert.equal(held.audio.currentTime, 10.04);
     actions.jog("A", 1);
-    assert.equal(state.decks.A.jogCommand.at, 11.04);
-    assert.equal(state.decks.A.jogCommand.from, 10.04);
+    assert.equal(state.decks.A.jogCommand.at, 13);
+    assert.equal(state.decks.A.jogCommand.from, 12);
   });
 });
 
@@ -644,12 +644,12 @@ test("one FLX4 jog tick lands when the report reaches it", () => {
     held.at(10.2);
     assert.ok(Math.abs(held.audio.currentTime - 10.2) < 0.0001);
     assert.equal(tick(0x41), true);
-    assert.ok(Math.abs(state.decks.A.jogCommand.at - 10.25) < 0.0001);
-    assert.equal(state.decks.A.jogCommand.from, 10.2);
+    assert.ok(Math.abs(state.decks.A.jogCommand.at - 10.1) < 0.0001);
+    assert.equal(state.decks.A.jogCommand.from, 10.05);
   });
 });
 
-test("a backward FLX4 tick lands on arrival and does not stick when playback moves forward", () => {
+test("a backward FLX4 tick lands on arrival and the next tick adds to that seek", () => {
   const { state, audios, actions } = harness();
   const held = holdingDeck(state, "A");
   audios.A = held.audio;
@@ -671,8 +671,8 @@ test("a backward FLX4 tick lands on arrival and does not stick when playback mov
     held.at(10.2);
     assert.ok(Math.abs(held.audio.currentTime - 10.2) < 0.0001);
     assert.equal(tick(0x41), true);
-    assert.ok(Math.abs(state.decks.A.jogCommand.at - 10.25) < 0.0001);
-    assert.equal(state.decks.A.jogCommand.from, 10.2);
+    assert.ok(Math.abs(state.decks.A.jogCommand.at - 10) < 0.0001);
+    assert.equal(state.decks.A.jogCommand.from, 9.95);
   });
 });
 
@@ -798,13 +798,13 @@ test("jog seeks the deck and does not move cue or the crossfader", () => {
     assert.equal(handleKeydown(keyEvent('"', bodyTarget(), { shiftKey: true }), actions), true);
     assert.equal(audios.B.currentTime, 18);
 
-    audios.A.currentTime = 115;
+    actions.seek("A", 115);
     actions.jog("A", 10);
     assert.equal(audios.A.currentTime, 120);
     actions.jog("A", -1000);
     assert.equal(audios.A.currentTime, 0);
     audios.A.duration = Number.NaN;
-    audios.A.currentTime = 50;
+    actions.seek("A", 50);
     actions.jog("A", 10);
     assert.equal(audios.A.currentTime, 60);
 
@@ -3115,4 +3115,26 @@ test("keyboard jog release lands on the seek and drops the 16x coast", async () 
   assert.equal(player.playbackRate, 1.25);
   assert.equal(state.decks.A.rate, 1.25);
   assert.equal(element.playbackRate, 1.25);
+});
+
+test("a second forward jog adds to the last seek, not the coast between ticks", async () => {
+  const rig = coastingRig();
+  const { state, actions, player, element } = rig;
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 200 }];
+  await actions.loadSelected("A");
+  state.decks.A.status = "ready";
+  const start = 10;
+  const step = 0.05;
+  rig.at(start);
+  actions.jog("A", step);
+  rig.now += 20;
+  assert.ok(player.currentTime > start + step);
+  actions.jog("A", step);
+  rig.release();
+  const landing = start + step + step;
+  assert.ok(Math.abs(player.currentTime - landing) < 1e-9);
+  assert.ok(Math.abs(element.currentTime - landing) < 1e-9);
+  assert.equal(player.paused, true);
+  assert.equal(element.paused, true);
+  assert.equal(state.decks.A.playing, false);
 });
