@@ -110,6 +110,7 @@ YouTube がボット確認で音源取得を止めるときは、画面から Ne
 - 「音楽に限る」は最初オン。オンのとき Data API には `videoCategoryId=10`（Music）と `type=video` を付ける。タイトルで後から絞ることはしない。`topicId`（`/m/04rlf`）は別の絞り込みなので重ねない
 - キーが無い、API が失敗した、または API が 0 件のときは yt-dlp に落ちる。音楽オンなら `music.youtube.com` の曲検索（`#songs`）。オフなら `ytsearch50` のまま、音楽では絞らない
 - キーはクライアントの JS / HTML に埋め込まない。レスポンスにも載せない
+- 検索語全体が動画 URL または 11 文字の動画 ID のときは、その 1 件だけを返す。URL は `watch?v=`、`youtu.be`、`/shorts/`、`/embed/`、`/live/`、`/v/`、`music.youtube.com` の `watch?v=`。ホストの付いていない文中の `v=` や `youtu.be` はキーワードのまま。`videos.list` で取り、キーが無い、失敗、または 0 件のときは YouTube の oEmbed、それも取れなければ yt-dlp でその動画だけ取る。oEmbed には長さが無い。キーワード検索には落とさない。どれも取れないときは「その動画は見つかりませんでした」。この取得に `videoCategoryId` は付けない
 
 ## 操作の実装
 

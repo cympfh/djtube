@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-from djtube.ids import extract_video_id, is_video_id
+from djtube.ids import extract_video_id, is_video_id, video_id_from_query, watch_url
 
 log = logging.getLogger(__name__)
 
@@ -18,6 +18,7 @@ MAX_SEARCH_PAGES = 3
 MUSIC_CATEGORY_ID = "10"
 SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
+OEMBED_URL = "https://www.youtube.com/oembed"
 _ISO_DURATION = re.compile(r"^P(?:\d+D)?(?:T(?:(?P<h>\d+)H)?(?:(?P<m>\d+)M)?(?:(?P<s>\d+)S)?)?$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -153,6 +154,28 @@ def tracks_from_youtube_videos(payload: dict) -> list[Track]:
     return tracks
 
 
+def track_from_ytdlp_entry(entry: dict) -> Track | None:
+    thumbs = entry.get("thumbnails") or []
+    thumb = None
+    if isinstance(thumbs, list):
+        for item in reversed(thumbs):
+            if isinstance(item, dict) and isinstance(item.get("url"), str):
+                thumb = item["url"]
+                break
+    if thumb is None and isinstance(entry.get("thumbnail"), str):
+        thumb = entry["thumbnail"]
+    video_ref = entry.get("id")
+    if extract_video_id(video_ref) is None:
+        video_ref = entry.get("url") or entry.get("webpage_url")
+    return _track(
+        video_ref,
+        entry.get("title"),
+        entry.get("channel") or entry.get("uploader") or entry.get("channel_id"),
+        entry.get("duration"),
+        thumb,
+    )
+
+
 def tracks_from_ytdlp_info(info: dict | None) -> list[Track]:
     if not isinstance(info, dict):
         return []
@@ -161,25 +184,7 @@ def tracks_from_ytdlp_info(info: dict | None) -> list[Track]:
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        thumbs = entry.get("thumbnails") or []
-        thumb = None
-        if isinstance(thumbs, list):
-            for item in reversed(thumbs):
-                if isinstance(item, dict) and isinstance(item.get("url"), str):
-                    thumb = item["url"]
-                    break
-        if thumb is None and isinstance(entry.get("thumbnail"), str):
-            thumb = entry["thumbnail"]
-        video_ref = entry.get("id")
-        if extract_video_id(video_ref) is None:
-            video_ref = entry.get("url") or entry.get("webpage_url")
-        track = _track(
-            video_ref,
-            entry.get("title"),
-            entry.get("channel") or entry.get("uploader") or entry.get("channel_id"),
-            entry.get("duration"),
-            thumb,
-        )
+        track = track_from_ytdlp_entry(entry)
         if track is not None:
             tracks.append(track)
     return tracks
@@ -280,10 +285,109 @@ def search_ytdlp(query: str, *, music: bool = False) -> list[Track]:
     return tracks_from_ytdlp_info(info)[:RESULT_TARGET]
 
 
+def lookup_youtube_api(video_id: str, key: str, client: httpx.Client | None = None) -> Track | None:
+    owns = client is None
+    http = client or httpx.Client(timeout=15)
+    try:
+        tracks = _hydrate_videos(http, [video_id], key)
+        return tracks[0] if tracks else None
+    except SearchError:
+        raise
+    except httpx.HTTPError as exc:
+        raise SearchError("検索できませんでした") from exc
+    finally:
+        if owns:
+            http.close()
+
+
+def _track_for_video(info: object, video_id: str) -> Track | None:
+    if not isinstance(info, dict):
+        return None
+    if isinstance(info.get("entries"), list):
+        for track in tracks_from_ytdlp_info(info):
+            if track.id == video_id:
+                return track
+        return None
+    track = track_from_ytdlp_entry(info)
+    if track is None or track.id != video_id:
+        return None
+    return track
+
+
+def lookup_oembed(video_id: str, client: httpx.Client | None = None) -> Track | None:
+    owns = client is None
+    http = client or httpx.Client(timeout=15)
+    try:
+        try:
+            response = http.get(OEMBED_URL, params={"url": watch_url(video_id), "format": "json"})
+            if response.status_code != 200:
+                return None
+            payload = response.json()
+        except Exception as exc:
+            log.warning("oEmbed lookup failed: %s", type(exc).__name__)
+            return None
+    finally:
+        if owns:
+            http.close()
+    if not isinstance(payload, dict):
+        return None
+    title = payload.get("title")
+    if not isinstance(title, str) or not title.strip():
+        return None
+    track = _track(video_id, title, payload.get("author_name"), None, payload.get("thumbnail_url"))
+    if track is None or track.id != video_id:
+        return None
+    return track
+
+
+def lookup_ytdlp(video_id: str) -> Track:
+    import yt_dlp
+
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "extract_flat": "in_playlist",
+        "socket_timeout": 20,
+    }
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(watch_url(video_id), download=False)
+    except Exception as exc:
+        log.warning("yt-dlp video lookup failed: %s", type(exc).__name__)
+        raise SearchError("その動画は見つかりませんでした") from None
+    track = _track_for_video(info, video_id)
+    if track is None:
+        raise SearchError("その動画は見つかりませんでした")
+    return track
+
+
+def lookup_tracks(video_id: str) -> tuple[list[Track], str]:
+    key = api_key()
+    if key:
+        try:
+            track = lookup_youtube_api(video_id, key)
+        except Exception:
+            log.warning("YouTube Data API video lookup failed; falling back to yt-dlp")
+        else:
+            if track is not None:
+                return [track], "youtube"
+            log.info("YouTube Data API did not return the video; falling back to oEmbed")
+    track = lookup_oembed(video_id)
+    if track is not None:
+        return [track], "oembed"
+    return [lookup_ytdlp(video_id)], "ytdlp"
+
+
 def search_tracks(query: str, *, music: bool = True) -> tuple[list[Track], str]:
     normalized = normalize_query(query)
     if not normalized:
         raise SearchError("検索語を入れてください")
+    video_id = video_id_from_query(normalized)
+    if video_id is not None:
+        return lookup_tracks(video_id)
     key = api_key()
     if key:
         try:
