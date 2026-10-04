@@ -67,7 +67,7 @@ function deckOf(state, deck) {
 }
 
 function emptySpin() {
-  return { active: false, lastAt: 0, token: 0, timer: 0, wasPlaying: false, borrowed: false };
+  return { active: false, lastAt: 0, token: 0, timer: 0, wasPlaying: false, borrowed: false, at: null };
 }
 
 export function createActions(deps) {
@@ -513,6 +513,7 @@ export function createActions(deps) {
     if (Number.isFinite(duration) && duration > 0 && next > duration) next = duration;
     deckState.jogCommand = { at: next, from: origin };
     audio.currentTime = next;
+    jogSpin[deck].at = next;
     hearJog(deck, step);
     scheduleRender();
   }
@@ -525,6 +526,18 @@ export function createActions(deps) {
   function applySpinRate(audio, rate) {
     if (typeof audio.setSpinRate === "function") audio.setSpinRate(rate);
     else audio.playbackRate = rate;
+  }
+
+  function parkJogPlayhead(deck) {
+    const spin = jogSpin[deck];
+    const deckState = deckOf(state, deck);
+    const audio = audios[deck];
+    if (!spin || !deckState || !audio || !Number.isFinite(spin.at)) return;
+    const at = spin.at;
+    spin.at = null;
+    deckState.jogCommand = null;
+    audio.cancelPendingSeek?.();
+    audio.currentTime = at;
   }
 
   function finishJogHear(deck, mode) {
@@ -542,7 +555,8 @@ export function createActions(deps) {
     audio.stopScratch?.();
     applySpinRate(audio, null);
     if (typeof audio.setSpinRate !== "function") audio.playbackRate = release.trackRate;
-    if (mode === "restore") {
+    parkJogPlayhead(deck);
+    if (mode === "restore" && !deckState.discHeld) {
       if (spin.wasPlaying) {
         if (audio.paused) {
           const pending = audio.play?.();
@@ -593,11 +607,12 @@ export function createActions(deps) {
       if (typeof audio.setSpinRate !== "function") audio.playbackRate = deckState.rate;
       audio.scratch = plan.scratch;
       audio.playScratch?.(plan.scratch);
+      audio.pause?.();
     } else {
       setTrackHeld(audio, false);
       audio.scratch = null;
       audio.stopScratch?.();
-      if (audio.paused || !deckState.playing) {
+      if (!deckState.discHeld && (audio.paused || !deckState.playing)) {
         const pending = audio.play?.();
         if (pending && typeof pending.catch === "function") pending.catch(() => {});
         deckState.playing = true;

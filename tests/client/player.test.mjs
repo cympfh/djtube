@@ -2936,3 +2936,183 @@ test("keyboard jog uses the same scratch and spin-speed split", async () => {
   assert.equal(state.decks.A.cue, 3);
   assert.equal(state.crossfader, fader);
 });
+
+// currentTime moves with the element rate while the element is playing, and a pause
+// keeps the time it had already reached. A seek replaces that time.
+function coastingRig() {
+  let now = 0;
+  const pending = new Map();
+  let seq = 0;
+  const { state, audios, actions } = harness({
+    deps: {
+      now: () => now,
+      later(fn, ms) {
+        seq += 1;
+        pending.set(seq, { fn, ms });
+        return seq;
+      },
+      cancelLater(id) {
+        pending.delete(id);
+      },
+    },
+  });
+  const player = createDeckPlayer("A", "player-A");
+  let stored = 0;
+  let rate = 1;
+  let paused = true;
+  let anchor = 0;
+  function elapsed() {
+    return paused ? 0 : ((now - anchor) / 1000) * rate;
+  }
+  function pull() {
+    stored += elapsed();
+    anchor = now;
+  }
+  const element = {
+    duration: 200,
+    volume: 1,
+    muted: false,
+    src: "",
+    load() {},
+    addEventListener() {},
+    get paused() {
+      return paused;
+    },
+    set paused(value) {
+      paused = !!value;
+    },
+    play() {
+      if (paused) anchor = now;
+      paused = false;
+      player.paused = false;
+      return Promise.resolve();
+    },
+    pause() {
+      if (!paused) pull();
+      paused = true;
+      player.paused = true;
+    },
+  };
+  Object.defineProperty(element, "currentTime", {
+    configurable: true,
+    get() {
+      return stored + elapsed();
+    },
+    set(value) {
+      stored = Number(value);
+      anchor = now;
+    },
+  });
+  Object.defineProperty(element, "playbackRate", {
+    configurable: true,
+    get() {
+      return rate;
+    },
+    set(value) {
+      if (!paused) pull();
+      rate = Number(value);
+    },
+  });
+  player.audio = element;
+  player._context = fakeScratchContext();
+  audios.A = player;
+  return {
+    state,
+    audios,
+    actions,
+    player,
+    element,
+    set now(value) {
+      now = value;
+    },
+    get now() {
+      return now;
+    },
+    at(seconds) {
+      stored = seconds;
+      anchor = now;
+    },
+    play() {
+      paused = false;
+      anchor = now;
+      player.paused = false;
+      state.decks.A.playing = true;
+    },
+    release() {
+      const left = [...pending.values()];
+      pending.clear();
+      assert.equal(left.length, 1);
+      assert.equal(left[0].ms, JOG_RELEASE_MS);
+      left[0].fn();
+    },
+  };
+}
+
+test("a backward scratch lands on the sum of the seeks while the deck tempo would have walked the playhead", async () => {
+  const rig = coastingRig();
+  const { state, actions, player, element } = rig;
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 200 }];
+  await actions.loadSelected("A");
+  state.decks.A.status = "ready";
+  actions.setRate("A", 1);
+  rig.at(10);
+  rig.play();
+  const step = -0.1;
+  let sum = 10;
+  for (let i = 0; i < 3; i += 1) {
+    if (i) rig.now += 50;
+    actions.jog("A", step);
+    sum += step;
+  }
+  assert.equal(player.jogHear.hear, "scratch");
+  assert.equal(element.muted, true);
+  assert.equal(element.paused, true);
+  assert.equal(player.playbackRate, 1);
+  assert.equal(state.decks.A.rate, 1);
+  assert.ok(Math.abs(player.currentTime - sum) < 1e-9);
+  assert.ok(Math.abs(element.currentTime - sum) < 1e-9);
+  rig.release();
+  assert.ok(Math.abs(player.currentTime - sum) < 1e-9);
+  assert.ok(Math.abs(element.currentTime - sum) < 1e-9);
+  assert.equal(element.paused, false);
+  assert.equal(player.paused, false);
+  assert.equal(state.decks.A.playing, true);
+  assert.equal(element.muted, false);
+  assert.equal(player.playbackRate, 1);
+  assert.equal(state.decks.A.rate, 1);
+});
+
+test("keyboard jog release lands on the seek and drops the 16x coast", async () => {
+  const rig = coastingRig();
+  const { state, actions, player, element } = rig;
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 200 }];
+  await actions.loadSelected("A");
+  state.decks.A.status = "ready";
+  actions.setRate("A", 1.25);
+  rig.at(10);
+  assert.equal(player.paused, true);
+  assert.equal(element.paused, true);
+
+  assert.equal(handleKeydown(keyEvent("]", bodyTarget()), actions), true);
+  assert.equal(player.jogHear.hear, "track");
+  assert.equal(element.playbackRate, SPIN_RATE_MAX);
+  assert.equal(player.playbackRate, 1.25);
+  assert.equal(state.decks.A.rate, 1.25);
+  assert.ok(SPIN_RATE_MAX < JOG_STEP / JOG_FIRST_TICK_SECONDS);
+
+  rig.now = JOG_RELEASE_MS;
+  const coast = 11 + SPIN_RATE_MAX * (JOG_RELEASE_MS / 1000);
+  assert.ok(Math.abs(player.currentTime - coast) < 1e-9);
+  assert.ok(Math.abs(element.currentTime - coast) < 1e-9);
+  assert.ok(coast > 11);
+
+  rig.release();
+  assert.ok(Math.abs(player.currentTime - 11) < 1e-9);
+  assert.ok(Math.abs(element.currentTime - 11) < 1e-9);
+  assert.equal(player.paused, true);
+  assert.equal(element.paused, true);
+  assert.equal(state.decks.A.playing, false);
+  assert.equal(player.playbackRate, 1.25);
+  assert.equal(state.decks.A.rate, 1.25);
+  assert.equal(element.playbackRate, 1.25);
+});
