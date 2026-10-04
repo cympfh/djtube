@@ -213,6 +213,8 @@ export function createActions(deps) {
     deckState.cookies = false;
     deckState.cue = 0;
     deckState.playing = false;
+    deckState.discHeld = false;
+    deckState.discWasPlaying = false;
     deckState.jogCommand = null;
     deckState.rate = 1;
     audio.cancelPendingSeek?.();
@@ -259,6 +261,31 @@ export function createActions(deps) {
       });
     }
     scheduleRender();
+  }
+
+  function pressDisc(deck, down) {
+    const deckState = deckOf(state, deck);
+    const audio = audios[deck];
+    if (!deckState || !audio) return;
+    if (down) {
+      if (deckState.discHeld) return;
+      if (!deckState.id || (deckState.status !== "ready" && deckState.status !== "error")) return;
+      const wasPlaying = !audio.paused;
+      if (!wasPlaying && sourcePlaybackBlocked(deckState)) return;
+      deckState.discHeld = true;
+      deckState.discWasPlaying = wasPlaying && !sourcePlaybackBlocked(deckState);
+      if (wasPlaying) {
+        audio.pause();
+        deckState.playing = false;
+        scheduleRender();
+      }
+      return;
+    }
+    if (!deckState.discHeld) return;
+    const resume = !!deckState.discWasPlaying;
+    deckState.discHeld = false;
+    deckState.discWasPlaying = false;
+    if (resume) play(deck);
   }
 
   function togglePlay(deck) {
@@ -483,6 +510,7 @@ export function createActions(deps) {
     loadOpenSelection,
     loadTrack,
     togglePlay,
+    pressDisc,
     cue,
     setCue,
     seek,

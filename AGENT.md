@@ -12,7 +12,7 @@ YouTube の曲を 2 デッキで再生する。検索はサーバ側で行い、
 - 検索語を入れると結果からデッキへ載せる
 - 検索はこれまでどおり。再生は YouTube IFrame ではなく、サーバが yt-dlp で音声 URL を解決して中継する
 - デッキに曲が載っているあいだ、検索結果の `thumbnail` を静止画で出す。無いときはその枠を空にする。動画 ID から絵は作らない
-- 再生中のデッキは、その絵の上に薄い白い輪を出す。輪の印は長短があり、その向きが再生位置とともに変わる。`playbackRate` で速さが変わる。停止中と空のデッキは回さない。A と B は別々
+- 再生中のデッキは、その絵の上に薄い白い輪を出す。輪の印は長短があり、その向きが再生位置とともに変わる。`playbackRate` で速さが変わる。停止中と空のデッキは回さない。輪を上から押しているあいだは止まり、離すと、押す前に再生していたデッキだけまた回る。A と B は別々
 - テンポは audio 要素の `playbackRate`。範囲は 0.5 から 2.0。スライダーと FLX4 のテンポは、その範囲の速度をそのまま渡す。キーボードの上げ下げは 0.01。画面の数値を `playbackRate` に渡す。曲を載せると、載せたデッキのテンポだけ 1.0 に戻し、そのデッキの HIGH / MID / LOW も 0 dB に戻す。音量とフィルターは戻さない
 - キーボードだけで一通り操作できる
 - Pioneer DDJ-FLX4 の再生、キュー、ロード、クロスフェーダー、ジョグ、ブラウズ、テンポ、イコライザー、チャンネルフェーダー、CFX のフィルターは MIDI。未実装の操作は下の一覧
@@ -123,7 +123,7 @@ YouTube がボット確認で音源取得を止めるときは、画面から Ne
 
 Web MIDI は安全なページで、「MIDI を開く」を押したときだけ接続する。公開サイトは https://s.cympfh.cc/djtube/ 。画面上部に未接続か、接続したデバイス名が出る。
 
-ジョグは `actions.jog(deck, seconds)`。準備完了のデッキだけ、再生位置を秒数ぶん動かす。テンポはキーボードの `setRate`、`nudgeRate`、`resetRate` と、MIDI 値を受ける `setRateFromController`（0–127、64 が 1.0、0 が 0.5、127 が 2.0）。イコライザーは `setEq`、`nudgeEq`、`resetEq`、`setEqFromController`。`setEqFromController` はバンド名と MIDI 0–127 を受け、64 が 0 dB、0 がカット、127 がブーストです。音量は `setVolume`、`nudgeVolume`、`resetVolume` と、MIDI 値を受ける `setVolumeFromController`（0–127 が 0–1）。フィルターは `setFilter`、`nudgeFilter`、`resetFilter` と、MIDI 値を受ける `setFilterFromController`（0–127、64 がバイパス、0 がローパスの左端、127 がハイパスの右端）。FLX4 のテンポはチャンネル 0 がデッキ A、チャンネル 1 がデッキ B の CC 0（MSB）。その CC 値は 0.5 から 2.0 の直線上の `playbackRate` になり、0.25 には丸めない。EQ は HI が CC 7、MID が CC 11、LOW が CC 15。チャンネルフェーダーはチャンネル 0 がデッキ A、チャンネル 1 がデッキ B の CC 19（MSB、0x13）。公式の MIDI Message List（E1）と Mixxx の Pioneer-DDJ-FLX4 では、この MSB がチャンネルの音量で、LSB は CC 51（0x33）です。LSB はマップしていません。フェーダーを底から動かしたときの再生・キュー（ノート 102 / 82）は音量ではないのでマップしていません。EQ とテンポとクロスフェーダーの LSB もマップしていません。CFX はミキサーのチャンネル 6。公式の MIDI Message List（E1）の図 3-5 では、デッキ 1 が CC 23（0x17、MSB）、デッキ 2 が CC 24（0x18、MSB）で、ステータスは 0xB6。Mixxx の Pioneer-DDJ-FLX4 は同じバイトを FILTER CH1 / FILTER CH2 にしている。LSB は CC 55（0x37）と CC 56（0x38）で、マップしていません。曲を載せると、載せたデッキのテンポだけ 1.0 に戻り、そのデッキの HIGH / MID / LOW は 0 dB に戻る。音量とフィルターは、画面のスライダーでもノブでも、載せたあともそのまま。
+ジョグは `actions.jog(deck, seconds)`。準備完了のデッキだけ、再生位置を秒数ぶん動かす。プラッター上面のタッチは `actions.pressDisc(deck, down)`。押しているあいだだけ止まり、離すと、押す前に再生していたときだけ続く。止まっていたデッキは離しても始まらない。回転のシークはそのまま。テンポはキーボードの `setRate`、`nudgeRate`、`resetRate` と、MIDI 値を受ける `setRateFromController`（0–127、64 が 1.0、0 が 0.5、127 が 2.0）。イコライザーは `setEq`、`nudgeEq`、`resetEq`、`setEqFromController`。`setEqFromController` はバンド名と MIDI 0–127 を受け、64 が 0 dB、0 がカット、127 がブーストです。音量は `setVolume`、`nudgeVolume`、`resetVolume` と、MIDI 値を受ける `setVolumeFromController`（0–127 が 0–1）。フィルターは `setFilter`、`nudgeFilter`、`resetFilter` と、MIDI 値を受ける `setFilterFromController`（0–127、64 がバイパス、0 がローパスの左端、127 がハイパスの右端）。FLX4 のテンポはチャンネル 0 がデッキ A、チャンネル 1 がデッキ B の CC 0（MSB）。その CC 値は 0.5 から 2.0 の直線上の `playbackRate` になり、0.25 には丸めない。EQ は HI が CC 7、MID が CC 11、LOW が CC 15。チャンネルフェーダーはチャンネル 0 がデッキ A、チャンネル 1 がデッキ B の CC 19（MSB、0x13）。公式の MIDI Message List（E1）と Mixxx の Pioneer-DDJ-FLX4 では、この MSB がチャンネルの音量で、LSB は CC 51（0x33）です。LSB はマップしていません。フェーダーを底から動かしたときの再生・キュー（ノート 102 / 82）は音量ではないのでマップしていません。EQ とテンポとクロスフェーダーの LSB もマップしていません。CFX はミキサーのチャンネル 6。公式の MIDI Message List（E1）の図 3-5 では、デッキ 1 が CC 23（0x17、MSB）、デッキ 2 が CC 24（0x18、MSB）で、ステータスは 0xB6。Mixxx の Pioneer-DDJ-FLX4 は同じバイトを FILTER CH1 / FILTER CH2 にしている。LSB は CC 55（0x37）と CC 56（0x38）で、マップしていません。曲を載せると、載せたデッキのテンポだけ 1.0 に戻り、そのデッキの HIGH / MID / LOW は 0 dB に戻る。音量とフィルターは、画面のスライダーでもノブでも、載せたあともそのまま。
 
 割り当てている操作:
 
@@ -132,6 +132,7 @@ Web MIDI は安全なページで、「MIDI を開く」を押したときだけ
 - LOAD（ch 6、ノート 70 / 71）: 開いているタブで選んでいる曲をデッキ A / B へ。検索なら検索結果、プレイリストならその曲。`loadOpenSelection` がタブを見て、プレイリストのときは `loadPlaylistTrack` と同じ載せ方
 - クロスフェーダー MSB（ch 6、CC 31）: クロスフェーダー。値は 0–127
 - ジョグ側面・プラッター（ch 0/1、CC 33 / 34 / 35）: 1 目盛り約 0.05 秒
+- ジョグのタッチ（ch 0/1、ノート 54）: 上面を押しているあいだだけ再生を止める。離すと、押す前に再生していたときだけ再開する。止まっていたデッキは再開しない。Shift+タッチ（ノート 103）ではない
 - Shift+プラッター（ch 0/1、CC 41）: 1 目盛り約 0.5 秒
 - BROWSE 回転（ch 6、CC 64）: 開いているタブの曲を上下。右回りが下（J）、左回りが上（K）。検索もプレイリストも同じ。`moveSelection` がタブを見て、プレイリストのときは `movePlaylistSelection` と同じ移動をする
 - テンポスライダー MSB（ch 0/1、CC 0）: そのデッキの再生速度
@@ -142,7 +143,7 @@ Web MIDI は安全なページで、「MIDI を開く」を押したときだけ
 未実装の操作:
 
 - Shift+PLAY/PAUSE、Shift+CUE
-- ジョグのタッチ
+- Shift+ジョグのタッチ（ノート 103）
 - テンポと EQ の LSB、TRIM
 - CFX の LSB（CC 55 / 56）
 - チャンネルフェーダーの LSB（CC 51）、クロスフェーダーの LSB

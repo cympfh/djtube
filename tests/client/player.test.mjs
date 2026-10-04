@@ -163,6 +163,8 @@ test("FLX4 map sends notes and CCs to deck actions", async () => {
     "note:6:70": ["loadOpenSelection", ["A"]],
     "note:6:71": ["loadOpenSelection", ["B"]],
     "cc:6:31": ["setCrossfaderFromController", undefined],
+    "note:0:54": ["pressDisc", ["A"]],
+    "note:1:54": ["pressDisc", ["B"]],
     "cc:0:33": ["jog", ["A"]],
     "cc:0:34": ["jog", ["A"]],
     "cc:0:35": ["jog", ["A"]],
@@ -204,7 +206,7 @@ test("FLX4 map sends notes and CCs to deck actions", async () => {
   for (const key of [
     "note:0:14",
     "note:0:72",
-    "note:0:54",
+    "note:0:103",
     "note:0:102",
     "note:0:82",
     "note:1:102",
@@ -825,6 +827,114 @@ test("jog seeks the deck and does not move cue or the crossfader", () => {
     assert.equal(state.crossfader, fader);
     assert.deepEqual(FLX4_MAP, mapBefore);
   });
+});
+
+async function readyDecks() {
+  const harnessed = harness();
+  const { state, actions } = harnessed;
+  state.results = [{ id: "abcdefghijk", title: "夜", channel: "A店", duration: 90 }];
+  await actions.loadSelected("A");
+  await actions.loadTrack("B", { id: "zzzzzzzzzzz", title: "昼", channel: "B店", duration: 80 });
+  return harnessed;
+}
+
+test("holding the disc pauses playback", async () => {
+  const { state, audios, actions } = await readyDecks();
+  audios.A.currentTime = 12;
+  state.decks.A.cue = 2;
+  actions.togglePlay("A");
+  actions.togglePlay("B");
+  assert.equal(FLX4_MAP["note:0:11"].action, "togglePlay");
+  assert.equal(FLX4_MAP["note:0:11"].hold, undefined);
+  assert.equal(FLX4_MAP["note:0:54"].action, "pressDisc");
+  assert.deepEqual(FLX4_MAP["note:0:54"].args, ["A"]);
+  assert.equal(FLX4_MAP["note:0:54"].hold, true);
+  assert.equal(FLX4_MAP["cc:0:34"].action, "jog");
+
+  actions.pressDisc("A", true);
+  assert.equal(audios.A.paused, true);
+  assert.equal(state.decks.A.playing, false);
+  assert.equal(audios.B.paused, false);
+  assert.equal(audios.A.currentTime, 12);
+  assert.equal(state.decks.A.cue, 2);
+
+  actions.pressDisc("A", false);
+  assert.equal(audios.A.paused, false);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0x90, 0x36, 0x7f])), actions), true);
+  assert.equal(audios.A.paused, true);
+  assert.equal(state.decks.A.playing, false);
+  assert.equal(audios.B.paused, false);
+  assert.equal(state.decks.B.playing, true);
+  assert.equal(audios.A.currentTime, 12);
+  assert.equal(state.crossfader, 0.5);
+});
+
+test("releasing the disc resumes a deck that was playing", async () => {
+  const { state, audios, actions } = await readyDecks();
+  audios.A.currentTime = 12;
+  actions.togglePlay("A");
+  actions.togglePlay("B");
+
+  actions.pressDisc("A", true);
+  assert.equal(audios.A.paused, true);
+  actions.pressDisc("A", false);
+  assert.equal(audios.A.paused, false);
+  assert.equal(state.decks.A.playing, true);
+  assert.equal(audios.A.currentTime, 12);
+  assert.equal(audios.B.paused, false);
+
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0x90, 0x36, 0x7f])), actions), true);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb0, 0x22, 0x41])), actions), true);
+  assert.ok(Math.abs(audios.A.currentTime - (12 + JOG_STEP_SECONDS)) < 0.0001);
+  assert.equal(audios.A.paused, true);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0x90, 0x36, 0x00])), actions), true);
+  assert.equal(audios.A.paused, false);
+  assert.equal(state.decks.A.playing, true);
+  assert.equal(audios.B.paused, false);
+  assert.ok(Math.abs(audios.A.currentTime - (12 + JOG_STEP_SECONDS)) < 0.0001);
+
+  const touchOff = messageFromMidi(new Uint8Array([0x80, 0x36, 0x00]));
+  assert.deepEqual(touchOff, { type: "note", channel: 0, number: 0x36, value: 0 });
+  actions.pressDisc("A", true);
+  assert.equal(dispatchControllerEvent(touchOff, actions), true);
+  assert.equal(audios.A.paused, false);
+  assert.equal(state.decks.A.playing, true);
+
+  actions.togglePlay("A");
+  assert.equal(audios.A.paused, true);
+  actions.togglePlay("A");
+  assert.equal(audios.A.paused, false);
+  assert.equal(messageFromMidi(new Uint8Array([0x90, 0x0b, 0x00])), null);
+  assert.equal(messageFromMidi(new Uint8Array([0x80, 0x0b, 0x00])), null);
+});
+
+test("releasing the disc does not start a deck that was already paused", async () => {
+  const { state, audios, actions } = await readyDecks();
+  audios.A.currentTime = 12;
+  audios.B.currentTime = 4;
+  assert.equal(audios.A.paused, true);
+  assert.equal(state.decks.A.playing, false);
+
+  actions.pressDisc("A", true);
+  actions.pressDisc("A", false);
+  assert.equal(audios.A.paused, true);
+  assert.equal(state.decks.A.playing, false);
+  assert.equal(audios.A.currentTime, 12);
+
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0x91, 0x36, 0x7f])), actions), true);
+  assert.equal(audios.B.paused, true);
+  assert.equal(state.decks.B.playing, false);
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0x91, 0x36, 0x00])), actions), true);
+  assert.equal(audios.B.paused, true);
+  assert.equal(state.decks.B.playing, false);
+  assert.equal(audios.B.currentTime, 4);
+  assert.equal(FLX4_MAP["note:1:54"].action, "pressDisc");
+  assert.equal(FLX4_MAP["note:1:54"].hold, true);
+
+  actions.togglePlay("A");
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0x90, 0x36, 0x00])), actions), true);
+  assert.equal(audios.A.paused, false);
+  assert.equal(state.decks.A.playing, true);
 });
 
 test("+ seeks deck B backward about 10 seconds from the commanded position", () => {

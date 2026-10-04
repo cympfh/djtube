@@ -382,10 +382,11 @@ function paintDisc(deck) {
   const disc = document.getElementById(`disc-${deck}`);
   const deckState = state.decks[deck];
   const playing = !!deckState.playing && !!deckState.id;
-  disc.toggleAttribute("hidden", !playing);
+  const heldPlaying = !!deckState.discHeld && !!deckState.discWasPlaying && !!deckState.id;
+  disc.toggleAttribute("hidden", !playing && !heldPlaying);
   const spin = disc.querySelector(".deck-disc-spin");
   if (!playing) {
-    spin.removeAttribute("transform");
+    if (!heldPlaying) spin.removeAttribute("transform");
     return;
   }
   // Media time already advances with this deck's playbackRate.
@@ -833,6 +834,23 @@ document.getElementById("music-only").addEventListener("change", (event) => {
 });
 document.getElementById("play-A").addEventListener("click", () => actions.togglePlay("A"));
 document.getElementById("play-B").addEventListener("click", () => actions.togglePlay("B"));
+for (const deck of ["A", "B"]) {
+  const disc = document.getElementById(`disc-${deck}`);
+  disc.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const pointerId = event.pointerId;
+    actions.pressDisc(deck, true);
+    const end = (ev) => {
+      if (ev.pointerId !== pointerId) return;
+      window.removeEventListener("pointerup", end, true);
+      window.removeEventListener("pointercancel", end, true);
+      actions.pressDisc(deck, false);
+    };
+    window.addEventListener("pointerup", end, true);
+    window.addEventListener("pointercancel", end, true);
+  });
+}
 document.getElementById("cue-btn-A").addEventListener("click", () => actions.cue("A"));
 document.getElementById("cue-btn-B").addEventListener("click", () => actions.cue("B"));
 for (const deck of ["A", "B"]) {

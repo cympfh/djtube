@@ -7,7 +7,8 @@
 //   "note:<channel>:<note>"
 //   "cc:<channel>:<controller>"
 // Buttons are note-on with velocity > 0. Note-on velocity 0 is a release and
-// is ignored. Jog wheels report a relative CC centered on 64 (65 is +1).
+// is ignored, except the platter top (note 54): that one pauses while held.
+// Jog wheels report a relative CC centered on 64 (65 is +1).
 // The browse encoder is a 7-bit signed step (1 is +1, 127 is -1).
 // The crossfader MSB is CC 31 and goes to setCrossfaderFromController as 0–127.
 // Tempo MSB is CC 0 on the deck channel and goes to setRateFromController.
@@ -35,6 +36,9 @@ const JOG_SIDE = 0x21;
 const JOG_VINYL = 0x22;
 const JOG_BEND = 0x23;
 const JOG_SEARCH = 0x29;
+// Platter top. DDJ-FLX4 MIDI Message List E1: note 54, ON=0x7F, OFF=0x00.
+// Shift+touch is note 103 and is not this press.
+const JOG_TOUCH = 0x36;
 const CROSSFADER = 0x1f;
 const BROWSE = 0x40;
 const TEMPO = 0x00;
@@ -84,6 +88,7 @@ function deckJog(channel, deck) {
     [`cc:${channel}:${JOG_VINYL}`]: binding("jog", [deck], fine),
     [`cc:${channel}:${JOG_BEND}`]: binding("jog", [deck], fine),
     [`cc:${channel}:${JOG_SEARCH}`]: binding("jog", [deck], search),
+    [`note:${channel}:${JOG_TOUCH}`]: binding("pressDisc", [deck], { hold: true }),
   };
 }
 
@@ -132,8 +137,15 @@ export function messageFromMidi(data) {
   const kind = status & 0xf0;
   const channel = status & 0x0f;
   if (kind === 0x90 && value > 0) return { type: "note", channel, number, value };
+  if ((kind === 0x80 || (kind === 0x90 && value === 0)) && platterTouch(channel, number)) {
+    return { type: "note", channel, number, value: 0 };
+  }
   if (kind === 0xb0) return { type: "cc", channel, number, value };
   return null;
+}
+
+function platterTouch(channel, number) {
+  return (channel === DECK_A || channel === DECK_B) && number === JOG_TOUCH;
 }
 
 export function dispatchControllerEvent(msg, actions, map = FLX4_MAP) {
@@ -143,6 +155,11 @@ export function dispatchControllerEvent(msg, actions, map = FLX4_MAP) {
   const fn = actions[spec.action];
   if (typeof fn !== "function") return false;
   const args = Array.isArray(spec.args) ? spec.args.slice() : [];
+  if (spec.hold) {
+    args.push(Number(msg.value) > 0);
+    fn(...args);
+    return true;
+  }
   if (spec.relative) {
     const ticks = relativeMidiTicks(msg.value, spec.relative);
     if (!ticks) return true;
