@@ -564,6 +564,18 @@ button:disabled { opacity: 0.45; cursor: default; }
   pointer-events: none;
 }
 
+.deck-disc-face {
+  fill: transparent;
+  pointer-events: all;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.deck-disc-ring,
+.deck-disc-mark {
+  cursor: pointer;
+}
+
 .deck-disc[hidden] { display: none; }
 
 .deck-disc-ring { fill: rgba(255, 255, 255, 0.34); }
