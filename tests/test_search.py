@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import httpx
 
+from fastapi.testclient import TestClient
+
+from djtube.app import create_app
+from djtube.ids import video_id_from_query
 from djtube.search import (
     SearchError,
     Track,
@@ -11,6 +15,9 @@ from djtube.search import (
     search_ytdlp,
     tracks_from_ytdlp_info,
 )
+
+PASTED_VIDEO = "l9udjy7vbm8"
+PASTED_URL = "https://www.youtube.com/watch?v=l9udjy7vbm8"
 
 
 def test_parse_iso8601_duration():
@@ -325,3 +332,342 @@ def test_blank_query():
         assert str(exc) == "検索語を入れてください"
     else:
         raise AssertionError("expected SearchError")
+
+
+def _install_search_client(monkeypatch, handler):
+    real_client = httpx.Client
+    transport = httpx.MockTransport(handler)
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "Client", factory)
+
+
+def _forbid_keyword_search(monkeypatch):
+    def keyword(*_args, **_kwargs):
+        raise AssertionError("keyword search")
+
+    monkeypatch.setattr("djtube.search.search_youtube_api", keyword)
+    monkeypatch.setattr("djtube.search.search_ytdlp", keyword)
+
+
+def _forbid_ytdlp(monkeypatch):
+    class YoutubeDL:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("ytdlp")
+
+    monkeypatch.setattr("yt_dlp.YoutubeDL", YoutubeDL)
+
+
+def _pasted_video_item() -> dict:
+    return {
+        "id": PASTED_VIDEO,
+        "snippet": {
+            "title": "夜の街",
+            "channelTitle": "Band",
+            "thumbnails": {"medium": {"url": f"https://i.ytimg.com/vi/{PASTED_VIDEO}/hqdefault.jpg"}},
+        },
+        "contentDetails": {"duration": "PT3M15S"},
+    }
+
+
+def _videos_handler(request: httpx.Request) -> httpx.Response:
+    assert request.url.path.endswith("/videos")
+    assert not request.url.path.endswith("/search")
+    assert request.url.params["id"] == PASTED_VIDEO
+    assert "videoCategoryId" not in request.url.params
+    return httpx.Response(200, json={"items": [_pasted_video_item()]})
+
+
+def test_youtube_url_shapes_are_that_video():
+    queries = [
+        PASTED_URL,
+        f"https://youtu.be/{PASTED_VIDEO}",
+        f"https://www.youtube.com/shorts/{PASTED_VIDEO}",
+        f"https://www.youtube.com/embed/{PASTED_VIDEO}",
+        f"https://www.youtube.com/live/{PASTED_VIDEO}",
+        f"https://www.youtube.com/v/{PASTED_VIDEO}",
+        f"https://music.youtube.com/watch?v={PASTED_VIDEO}",
+        f"https://www.youtube-nocookie.com/embed/{PASTED_VIDEO}",
+        f"http://m.youtube.com/watch?v={PASTED_VIDEO}&t=30s",
+        f"youtu.be/{PASTED_VIDEO}",
+        f"www.youtube.com/watch?v={PASTED_VIDEO}",
+        f"music.youtube.com/watch?v={PASTED_VIDEO}&feature=share",
+    ]
+    for query in queries:
+        assert video_id_from_query(query) == PASTED_VIDEO
+
+
+def test_queries_that_only_mention_a_url_stay_keywords():
+    queries = [
+        "city pop",
+        "スピッツ",
+        "lo-fi beats",
+        f"see youtu.be/{PASTED_VIDEO}",
+        f"https://example.com/watch?v={PASTED_VIDEO}",
+        "https://www.youtube.com/playlist?list=PLabcdefghijk",
+        "https://music.youtube.com/search?q=city+pop",
+        f"v={PASTED_VIDEO}",
+    ]
+    for query in queries:
+        assert video_id_from_query(query) is None
+
+
+def test_watch_url_returns_that_single_video(monkeypatch):
+    monkeypatch.setenv("YOUTUBE_API_KEY", "test-key")
+    _forbid_keyword_search(monkeypatch)
+    _forbid_ytdlp(monkeypatch)
+    _install_search_client(monkeypatch, _videos_handler)
+    tracks, source = search_tracks(PASTED_URL)
+    assert source == "youtube"
+    assert len(tracks) == 1
+    track = tracks[0]
+    assert track.id == PASTED_VIDEO
+    assert track.title == "夜の街"
+    assert track.channel == "Band"
+    assert track.duration == 195
+    assert track.thumbnail == f"https://i.ytimg.com/vi/{PASTED_VIDEO}/hqdefault.jpg"
+    assert PASTED_URL not in track.title
+    assert "test-key" not in repr(tracks)
+
+
+def test_bare_video_id_returns_that_single_video(monkeypatch):
+    monkeypatch.setenv("YOUTUBE_API_KEY", "test-key")
+    _forbid_keyword_search(monkeypatch)
+    _forbid_ytdlp(monkeypatch)
+    _install_search_client(monkeypatch, _videos_handler)
+    tracks, source = search_tracks(PASTED_VIDEO)
+    assert source == "youtube"
+    assert len(tracks) == 1
+    assert tracks[0].id == PASTED_VIDEO
+    assert tracks[0].title == "夜の街"
+    assert tracks[0].thumbnail.startswith("https://")
+
+
+def test_other_youtube_urls_return_that_single_video(monkeypatch):
+    monkeypatch.setenv("YOUTUBE_API_KEY", "test-key")
+    _forbid_keyword_search(monkeypatch)
+    _forbid_ytdlp(monkeypatch)
+    _install_search_client(monkeypatch, _videos_handler)
+    queries = [
+        f"https://youtu.be/{PASTED_VIDEO}",
+        f"https://www.youtube.com/shorts/{PASTED_VIDEO}",
+        f"https://www.youtube.com/embed/{PASTED_VIDEO}?start=10",
+        f"https://music.youtube.com/watch?v={PASTED_VIDEO}",
+        f"https://www.youtube.com/live/{PASTED_VIDEO}",
+        f"https://m.youtube.com/watch?v={PASTED_VIDEO}",
+    ]
+    for query in queries:
+        tracks, source = search_tracks(query, music=False)
+        assert source == "youtube"
+        assert [track.id for track in tracks] == [PASTED_VIDEO]
+        assert tracks[0].title == "夜の街"
+
+
+def test_keyword_query_still_searches(monkeypatch):
+    monkeypatch.setenv("YOUTUBE_API_KEY", "test-key")
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            seen["q"] = request.url.params["q"]
+            seen["category"] = request.url.params.get("videoCategoryId")
+            return httpx.Response(200, json={"items": [{"id": {"videoId": "abcdefghijk"}}]})
+        assert request.url.params["id"] == "abcdefghijk"
+        return httpx.Response(200, json={"items": [_video_item("abcdefghijk")]})
+
+    _install_search_client(monkeypatch, handler)
+    tracks, source = search_tracks("city pop")
+    assert source == "youtube"
+    assert seen == {"q": "city pop", "category": "10"}
+    assert [track.id for track in tracks] == ["abcdefghijk"]
+
+
+def test_text_containing_a_video_url_still_searches(monkeypatch):
+    monkeypatch.setenv("YOUTUBE_API_KEY", "test-key")
+    query = f"see youtu.be/{PASTED_VIDEO}"
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            seen["q"] = request.url.params["q"]
+            return httpx.Response(200, json={"items": [{"id": {"videoId": "abcdefghijk"}}]})
+        return httpx.Response(200, json={"items": [_video_item("abcdefghijk")]})
+
+    _install_search_client(monkeypatch, handler)
+    tracks, source = search_tracks(query)
+    assert source == "youtube"
+    assert seen["q"] == query
+    assert [track.id for track in tracks] == ["abcdefghijk"]
+
+
+def test_unresolved_video_does_not_keyword_search(monkeypatch):
+    monkeypatch.setenv("YOUTUBE_API_KEY", "test-key")
+    _forbid_keyword_search(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oembed":
+            assert PASTED_VIDEO in request.url.params["url"]
+            assert "ytsearch" not in str(request.url)
+            return httpx.Response(404)
+        assert request.url.path.endswith("/videos")
+        assert request.url.params["id"] == PASTED_VIDEO
+        return httpx.Response(200, json={"items": []})
+
+    _install_search_client(monkeypatch, handler)
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            assert options["noplaylist"] is True
+            assert "cookiefile" not in options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, url, download=False):
+            assert download is False
+            assert url == f"https://www.youtube.com/watch?v={PASTED_VIDEO}"
+            assert not url.startswith("ytsearch")
+            raise RuntimeError("missing")
+
+    monkeypatch.setattr("yt_dlp.YoutubeDL", FakeYoutubeDL)
+    for query in (PASTED_URL, PASTED_VIDEO):
+        try:
+            search_tracks(query)
+        except SearchError as exc:
+            assert str(exc) == "その動画は見つかりませんでした"
+        else:
+            raise AssertionError(query)
+
+
+def test_url_without_api_key_uses_oembed_for_that_video(monkeypatch):
+    monkeypatch.delenv("YOUTUBE_API_KEY", raising=False)
+    _forbid_keyword_search(monkeypatch)
+    _forbid_ytdlp(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/oembed"
+        assert request.url.params["url"] == f"https://www.youtube.com/watch?v={PASTED_VIDEO}"
+        assert "ytsearch" not in str(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "title": "夜の街",
+                "author_name": "Band",
+                "type": "video",
+                "thumbnail_url": f"https://i.ytimg.com/vi/{PASTED_VIDEO}/hqdefault.jpg",
+            },
+        )
+
+    _install_search_client(monkeypatch, handler)
+    tracks, source = search_tracks(PASTED_URL, music=True)
+    assert source == "oembed"
+    assert len(tracks) == 1
+    track = tracks[0]
+    assert track.id == PASTED_VIDEO
+    assert track.title == "夜の街"
+    assert track.channel == "Band"
+    assert track.duration is None
+    assert track.thumbnail == f"https://i.ytimg.com/vi/{PASTED_VIDEO}/hqdefault.jpg"
+    bare, bare_source = search_tracks(PASTED_VIDEO)
+    assert bare_source == "oembed"
+    assert [item.id for item in bare] == [PASTED_VIDEO]
+    assert bare[0].title == "夜の街"
+
+
+def test_url_without_api_key_looks_up_that_video(monkeypatch):
+    monkeypatch.delenv("YOUTUBE_API_KEY", raising=False)
+    _forbid_keyword_search(monkeypatch)
+    monkeypatch.setattr("djtube.search.lookup_oembed", lambda _video_id: None)
+    seen = {}
+
+    class FakeYoutubeDL:
+        def __init__(self, _options):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, url, download=False):
+            seen["url"] = url
+            assert download is False
+            return {
+                "id": PASTED_VIDEO,
+                "title": "夜の街",
+                "channel": "Band",
+                "duration": 95.2,
+                "thumbnail": f"https://i.ytimg.com/vi/{PASTED_VIDEO}/hqdefault.jpg",
+            }
+
+    monkeypatch.setattr("yt_dlp.YoutubeDL", FakeYoutubeDL)
+    tracks, source = search_tracks(f"https://youtu.be/{PASTED_VIDEO}")
+    assert source == "ytdlp"
+    assert len(tracks) == 1
+    assert tracks[0].id == PASTED_VIDEO
+    assert tracks[0].title == "夜の街"
+    assert tracks[0].channel == "Band"
+    assert tracks[0].duration == 95
+    assert tracks[0].thumbnail.startswith("https://")
+    assert seen["url"] == f"https://www.youtube.com/watch?v={PASTED_VIDEO}"
+
+
+def test_lookup_does_not_keep_a_different_video(monkeypatch):
+    monkeypatch.delenv("YOUTUBE_API_KEY", raising=False)
+    _forbid_keyword_search(monkeypatch)
+    monkeypatch.setattr("djtube.search.lookup_oembed", lambda _video_id: None)
+
+    class FakeYoutubeDL:
+        def __init__(self, _options):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, url, download=False):
+            assert url == f"https://www.youtube.com/watch?v={PASTED_VIDEO}"
+            assert download is False
+            return {"id": "abcdefghijk", "title": "別の曲", "channel": "人"}
+
+    monkeypatch.setattr("yt_dlp.YoutubeDL", FakeYoutubeDL)
+    try:
+        search_tracks(PASTED_VIDEO)
+    except SearchError as exc:
+        assert str(exc) == "その動画は見つかりませんでした"
+    else:
+        raise AssertionError("expected SearchError")
+
+
+def test_search_route_reports_an_unresolved_video(monkeypatch):
+    monkeypatch.delenv("YOUTUBE_API_KEY", raising=False)
+    monkeypatch.setattr("djtube.search.lookup_oembed", lambda _video_id: None)
+
+    class FakeYoutubeDL:
+        def __init__(self, _options):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, _url, download=False):
+            assert download is False
+            raise RuntimeError("missing")
+
+    monkeypatch.setattr("yt_dlp.YoutubeDL", FakeYoutubeDL)
+    client = TestClient(create_app())
+    response = client.get("/api/search", params={"q": PASTED_URL})
+    assert response.status_code == 502
+    assert response.json()["detail"] == "その動画は見つかりませんでした"
