@@ -1,6 +1,7 @@
 import { EQ_BANDS, clampEqUnit, eqGainDb, eqUnitFromMidi } from "./eq.js";
 import { clampFilterUnit, filterUnitFromMidi } from "./filter.js";
 import { deckGains } from "./gains.js";
+import { JOG_RELEASE_MS, jogReleaseHear, jogSpinPlan } from "./jogspin.js";
 import { createPlaylistActions, freshPlaylistState, trackSnapshot } from "./playlists.js";
 import { clampRate, rateFromMidi } from "./rate.js";
 import { commandedSeekLanded } from "./seekland.js";
@@ -65,11 +66,38 @@ function deckOf(state, deck) {
   return state.decks[deck];
 }
 
+function emptySpin() {
+  return { active: false, lastAt: 0, token: 0, timer: 0, wasPlaying: false, borrowed: false, at: null };
+}
+
 export function createActions(deps) {
   const { state, audios } = deps;
+  const jogSpin = { A: emptySpin(), B: emptySpin() };
 
   function scheduleRender() {
     deps.scheduleRender?.();
+  }
+
+  function now() {
+    if (typeof deps.now === "function") return deps.now();
+    if (typeof performance !== "undefined" && typeof performance.now === "function") return performance.now();
+    return Date.now();
+  }
+
+  function later(fn, ms) {
+    if (typeof deps.later === "function") return deps.later(fn, ms);
+    const id = setTimeout(fn, ms);
+    if (typeof id?.unref === "function") id.unref();
+    return id;
+  }
+
+  function cancelLater(id) {
+    if (id == null || id === 0) return;
+    if (typeof deps.cancelLater === "function") {
+      deps.cancelLater(id);
+      return;
+    }
+    clearTimeout(id);
   }
 
   function applyGains() {
@@ -217,6 +245,7 @@ export function createActions(deps) {
     deckState.discWasPlaying = false;
     deckState.jogCommand = null;
     deckState.rate = 1;
+    finishJogHear(deck, "drop");
     audio.cancelPendingSeek?.();
     audio.pause();
     audio.playbackRate = 1;
@@ -246,6 +275,7 @@ export function createActions(deps) {
     const audio = audios[deck];
     if (!deckState?.id || (deckState.status !== "ready" && deckState.status !== "error")) return;
     if (sourcePlaybackBlocked(deckState)) return;
+    finishJogHear(deck, "keep");
     deckState.playError = "";
     deckState.error = "";
     deckState.status = "ready";
@@ -294,6 +324,7 @@ export function createActions(deps) {
     if (!deckState?.id || (deckState.status !== "ready" && deckState.status !== "error")) return;
     if (audio.paused) play(deck);
     else {
+      finishJogHear(deck, "keep");
       audio.pause();
       deckState.playing = false;
       scheduleRender();
@@ -324,6 +355,7 @@ export function createActions(deps) {
     const deckState = deckOf(state, deck);
     const audio = audios[deck];
     if (!deckState || deckState.status !== "ready") return;
+    finishJogHear(deck, "restore");
     deckState.jogCommand = null;
     audio.cancelPendingSeek?.();
     const atCue = Math.abs((audio.currentTime || 0) - deckState.cue) < 0.08;
@@ -354,6 +386,7 @@ export function createActions(deps) {
     const deckState = deckOf(state, deck);
     const audio = audios[deck];
     if (!deckState || deckState.status !== "ready" || !audio) return;
+    finishJogHear(deck, "restore");
     let next = Number(seconds);
     if (!Number.isFinite(next)) return;
     if (next < 0) next = 0;
@@ -468,19 +501,128 @@ export function createActions(deps) {
     const step = Number(delta);
     if (!Number.isFinite(step) || step === 0) return;
     syncJog(deck);
+    const spin = jogSpin[deck];
     const reported = Number(audio.currentTime);
     const live = Number.isFinite(reported) ? reported : 0;
     const pending = deckState.jogCommand;
     const held = pending && Number.isFinite(pending.at) && Number.isFinite(pending.from);
-    const base = held ? pending.at : live;
-    const origin = held ? pending.from : live;
+    const spinning = !!(spin?.active && Number.isFinite(spin.at));
+    const base = spinning ? spin.at : held ? pending.at : live;
+    const origin = held ? pending.from : spinning ? spin.at : live;
     let next = base + step;
     if (next < 0) next = 0;
     const duration = Number(audio.duration);
     if (Number.isFinite(duration) && duration > 0 && next > duration) next = duration;
     deckState.jogCommand = { at: next, from: origin };
     audio.currentTime = next;
+    jogSpin[deck].at = next;
+    hearJog(deck, step);
     scheduleRender();
+  }
+
+  function setTrackHeld(audio, held) {
+    if (typeof audio.holdTrack === "function") audio.holdTrack(held);
+    else audio.muted = !!held;
+  }
+
+  function applySpinRate(audio, rate) {
+    if (typeof audio.setSpinRate === "function") audio.setSpinRate(rate);
+    else audio.playbackRate = rate;
+  }
+
+  function parkJogPlayhead(deck) {
+    const spin = jogSpin[deck];
+    const deckState = deckOf(state, deck);
+    const audio = audios[deck];
+    if (!spin || !deckState || !audio || !Number.isFinite(spin.at)) return;
+    const at = spin.at;
+    spin.at = null;
+    deckState.jogCommand = null;
+    audio.cancelPendingSeek?.();
+    audio.currentTime = at;
+  }
+
+  function finishJogHear(deck, mode) {
+    const spin = jogSpin[deck];
+    const deckState = deckOf(state, deck);
+    const audio = audios[deck];
+    if (!spin?.active || !deckState || !audio) return;
+    spin.token += 1;
+    spin.active = false;
+    if (spin.timer) cancelLater(spin.timer);
+    spin.timer = 0;
+    const release = jogReleaseHear(deckState.rate);
+    audio.jogHear = release;
+    audio.scratch = null;
+    audio.stopScratch?.();
+    applySpinRate(audio, null);
+    if (typeof audio.setSpinRate !== "function") audio.playbackRate = release.trackRate;
+    parkJogPlayhead(deck);
+    if (mode === "restore" && !deckState.discHeld) {
+      if (spin.wasPlaying) {
+        if (audio.paused) {
+          const pending = audio.play?.();
+          if (pending && typeof pending.catch === "function") pending.catch(() => {});
+        }
+        deckState.playing = true;
+      } else if (spin.borrowed || deckState.playing || !audio.paused) {
+        audio.pause?.();
+        deckState.playing = false;
+      }
+    }
+    setTrackHeld(audio, false);
+    spin.borrowed = false;
+    scheduleRender();
+  }
+
+  function scheduleJogRelease(deck) {
+    const spin = jogSpin[deck];
+    if (spin.timer) cancelLater(spin.timer);
+    spin.token += 1;
+    const token = spin.token;
+    spin.timer = later(() => {
+      spin.timer = 0;
+      if (!spin.active || spin.token !== token) return;
+      finishJogHear(deck, "restore");
+    }, JOG_RELEASE_MS);
+  }
+
+  function hearJog(deck, delta) {
+    const deckState = deckOf(state, deck);
+    const audio = audios[deck];
+    const spin = jogSpin[deck];
+    if (!deckState || !audio || !spin) return;
+    const t = now();
+    const elapsed = spin.active ? (t - spin.lastAt) / 1000 : null;
+    if (!spin.active) {
+      spin.wasPlaying = !!(deckState.playing && !audio.paused);
+      spin.borrowed = false;
+      spin.active = true;
+    }
+    spin.lastAt = t;
+    const plan = jogSpinPlan(delta, elapsed);
+    if (!plan) return;
+    audio.jogHear = plan;
+    if (plan.hear === "scratch") {
+      setTrackHeld(audio, true);
+      applySpinRate(audio, null);
+      if (typeof audio.setSpinRate !== "function") audio.playbackRate = deckState.rate;
+      audio.scratch = plan.scratch;
+      audio.playScratch?.(plan.scratch);
+      audio.pause?.();
+    } else {
+      setTrackHeld(audio, false);
+      audio.scratch = null;
+      audio.stopScratch?.();
+      if (!deckState.discHeld && (audio.paused || !deckState.playing)) {
+        const pending = audio.play?.();
+        if (pending && typeof pending.catch === "function") pending.catch(() => {});
+        deckState.playing = true;
+        if (!spin.wasPlaying) spin.borrowed = true;
+      }
+      applySpinRate(audio, plan.trackRate);
+    }
+    scheduleJogRelease(deck);
   }
 
   const playlistActions = createPlaylistActions({ deps, state, scheduleRender, loadTrack });

@@ -28,7 +28,9 @@ import {
   formatFilter,
 } from "../../djtube/static/filter.js";
 import { deckGains } from "../../djtube/static/gains.js";
-import { BINDINGS, VOLUME_STEP, handleKeydown, legendGroups } from "../../djtube/static/keys.js";
+import { JOG_FIRST_TICK_SECONDS, JOG_RELEASE_MS, SPIN_RATE_MAX, jogReleaseHear, jogSpinPlan, scratchFromSpeed } from "../../djtube/static/jogspin.js";
+import { BINDINGS, JOG_STEP, JOG_STEP_LARGE, VOLUME_STEP, handleKeydown, legendGroups } from "../../djtube/static/keys.js";
+import { createScratchVoice } from "../../djtube/static/scratch.js";
 import { RATE_STEP, clampRate, formatRate, rateFromMidi } from "../../djtube/static/rate.js";
 import { cookiePanelOpen, cookiePanelShown, nextChosenOpen } from "../../djtube/static/cookies.js";
 import { createDeckPlayer } from "../../djtube/static/player.js";
@@ -615,8 +617,8 @@ test("jog lands when playback has left the pre-jog time toward the command", () 
     assert.equal(state.decks.A.jogCommand, null);
     assert.equal(held.audio.currentTime, 10.04);
     actions.jog("A", 1);
-    assert.equal(state.decks.A.jogCommand.at, 11.04);
-    assert.equal(state.decks.A.jogCommand.from, 10.04);
+    assert.equal(state.decks.A.jogCommand.at, 13);
+    assert.equal(state.decks.A.jogCommand.from, 12);
   });
 });
 
@@ -642,12 +644,12 @@ test("one FLX4 jog tick lands when the report reaches it", () => {
     held.at(10.2);
     assert.ok(Math.abs(held.audio.currentTime - 10.2) < 0.0001);
     assert.equal(tick(0x41), true);
-    assert.ok(Math.abs(state.decks.A.jogCommand.at - 10.25) < 0.0001);
-    assert.equal(state.decks.A.jogCommand.from, 10.2);
+    assert.ok(Math.abs(state.decks.A.jogCommand.at - 10.1) < 0.0001);
+    assert.equal(state.decks.A.jogCommand.from, 10.05);
   });
 });
 
-test("a backward FLX4 tick lands on arrival and does not stick when playback moves forward", () => {
+test("a backward FLX4 tick lands on arrival and the next tick adds to that seek", () => {
   const { state, audios, actions } = harness();
   const held = holdingDeck(state, "A");
   audios.A = held.audio;
@@ -669,8 +671,8 @@ test("a backward FLX4 tick lands on arrival and does not stick when playback mov
     held.at(10.2);
     assert.ok(Math.abs(held.audio.currentTime - 10.2) < 0.0001);
     assert.equal(tick(0x41), true);
-    assert.ok(Math.abs(state.decks.A.jogCommand.at - 10.25) < 0.0001);
-    assert.equal(state.decks.A.jogCommand.from, 10.2);
+    assert.ok(Math.abs(state.decks.A.jogCommand.at - 10) < 0.0001);
+    assert.equal(state.decks.A.jogCommand.from, 9.95);
   });
 });
 
@@ -796,13 +798,13 @@ test("jog seeks the deck and does not move cue or the crossfader", () => {
     assert.equal(handleKeydown(keyEvent('"', bodyTarget(), { shiftKey: true }), actions), true);
     assert.equal(audios.B.currentTime, 18);
 
-    audios.A.currentTime = 115;
+    actions.seek("A", 115);
     actions.jog("A", 10);
     assert.equal(audios.A.currentTime, 120);
     actions.jog("A", -1000);
     assert.equal(audios.A.currentTime, 0);
     audios.A.duration = Number.NaN;
-    audios.A.currentTime = 50;
+    actions.seek("A", 50);
     actions.jog("A", 10);
     assert.equal(audios.A.currentTime, 60);
 
@@ -2466,4 +2468,673 @@ test("the filter node is the only path from the EQ tail to the speakers", () => 
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;
   }
+});
+
+test("jog direction decides scratch or a track rate that follows the spin", () => {
+  const slow = jogSpinPlan(0.1, 0.05);
+  const fast = jogSpinPlan(0.2, 0.05);
+  assert.equal(slow.hear, "track");
+  assert.equal(fast.hear, "track");
+  assert.equal(slow.scratch, null);
+  assert.equal(fast.scratch, null);
+  assert.equal(slow.trackRate, 2);
+  assert.equal(fast.trackRate, 4);
+  assert.equal(fast.trackRate / slow.trackRate, 2);
+  assert.notEqual(slow.trackRate, fast.trackRate);
+  const sameStepSlower = jogSpinPlan(0.1, 0.1);
+  assert.equal(sameStepSlower.trackRate, 1);
+  assert.equal(slow.trackRate / sameStepSlower.trackRate, 2);
+
+  const backSlow = jogSpinPlan(-0.1, 0.05);
+  const backFast = jogSpinPlan(-0.2, 0.05);
+  assert.equal(backSlow.hear, "scratch");
+  assert.equal(backFast.hear, "scratch");
+  assert.equal(backSlow.trackRate, null);
+  assert.equal(backFast.trackRate, null);
+  assert.notEqual(backSlow.scratch, null);
+  assert.equal(backSlow.scratch.rate, 2);
+  assert.equal(backFast.scratch.rate, 4);
+  assert.equal(backFast.scratch.rate / backSlow.scratch.rate, 2);
+  assert.ok(backFast.scratch.chirpHz > backSlow.scratch.chirpHz);
+  assert.equal(backFast.scratch.chirpHz - backSlow.scratch.chirpHz, (backFast.scratch.rate - backSlow.scratch.rate) * 80);
+
+  assert.equal(jogSpinPlan(0.1, null).trackRate, 0.1 / JOG_FIRST_TICK_SECONDS);
+  assert.equal(jogSpinPlan(-0.1, null).scratch.rate, 0.1 / JOG_FIRST_TICK_SECONDS);
+  const released = jogReleaseHear(1.25);
+  assert.equal(released.hear, "deck");
+  assert.equal(released.trackRate, 1.25);
+  assert.equal(released.scratch, null);
+});
+
+function fakeScratchContext() {
+  const sources = [];
+  const filters = [];
+  const gains = [];
+  const buffers = [];
+  return {
+    sampleRate: 44100,
+    destination: {},
+    sources,
+    filters,
+    gains,
+    buffers,
+    createBuffer(_channels, length) {
+      const data = new Float32Array(length);
+      const buffer = {
+        length,
+        getChannelData() {
+          return data;
+        },
+      };
+      buffers.push(buffer);
+      return buffer;
+    },
+    createBufferSource() {
+      const node = {
+        buffer: null,
+        loop: false,
+        playbackRate: { value: 1 },
+        started: false,
+        stopped: false,
+        connect() {},
+        disconnect() {},
+        start() {
+          this.started = true;
+        },
+        stop() {
+          this.stopped = true;
+        },
+      };
+      sources.push(node);
+      return node;
+    },
+    createBiquadFilter() {
+      const node = {
+        type: "",
+        frequency: { value: 0 },
+        Q: { value: 0 },
+        connect() {},
+        disconnect() {},
+      };
+      filters.push(node);
+      return node;
+    },
+    createGain() {
+      const node = {
+        gain: { value: 0 },
+        connect() {},
+        disconnect() {},
+      };
+      gains.push(node);
+      return node;
+    },
+  };
+}
+
+test("a faster backward spin plays the scratch chirp faster", () => {
+  const context = fakeScratchContext();
+  const voice = createScratchVoice(context);
+  const slow = scratchFromSpeed(2);
+  const fast = scratchFromSpeed(4);
+  voice.update(slow, 0.5);
+  const gain = context.gains[0].gain.value;
+  voice.update(fast, 0.5);
+  assert.equal(context.sources.length, 1);
+  assert.equal(context.sources[0].loop, true);
+  assert.equal(context.sources[0].started, true);
+  assert.equal(context.sources[0].stopped, false);
+  assert.equal(context.sources[0].playbackRate.value, fast.rate);
+  assert.equal(context.filters[0].frequency.value, fast.chirpHz);
+  assert.equal(context.gains[0].gain.value, gain);
+  assert.ok(gain > 0);
+  assert.ok(gain <= 0.5);
+  const data = context.buffers[0].getChannelData(0);
+  let peak = 0;
+  let changes = 0;
+  let previous = data[0];
+  for (let i = 0; i < data.length; i += 1) {
+    peak = Math.max(peak, Math.abs(data[i]));
+    if (data[i] !== previous) changes += 1;
+    previous = data[i];
+  }
+  assert.ok(peak > 0.2);
+  assert.ok(changes > 8);
+  voice.update(slow, 0.5);
+  assert.equal(context.sources.length, 1);
+  assert.equal(context.sources[0].playbackRate.value, slow.rate);
+  assert.equal(context.filters[0].frequency.value, slow.chirpHz);
+  assert.ok(fast.rate > slow.rate);
+  voice.stop();
+  assert.equal(context.sources[0].stopped, true);
+});
+
+test("spin playback is faster than the tempo fader and still follows the spin", () => {
+  const deck = createDeckPlayer("A", "player-A");
+  const seen = [];
+  deck.audio = {
+    set playbackRate(value) {
+      seen.push(value);
+    },
+  };
+  deck.playbackRate = 1.25;
+  deck.playbackRate = 3;
+  assert.equal(deck.playbackRate, 2);
+  assert.equal(seen.at(-1), 2);
+  deck.setSpinRate(3);
+  assert.equal(deck.playbackRate, 2);
+  assert.equal(seen.at(-1), 3);
+  deck.setSpinRate(6);
+  assert.equal(seen.at(-1), 6);
+  assert.equal(seen.at(-1) / 3, 2);
+  deck.setSpinRate(50);
+  assert.equal(seen.at(-1), SPIN_RATE_MAX);
+  assert.ok(SPIN_RATE_MAX > 2);
+  deck.setSpinRate(null);
+  assert.equal(seen.at(-1), 2);
+  assert.equal(deck.playbackRate, 2);
+});
+
+function platterHarness() {
+  let now = 1000;
+  const pending = new Map();
+  let seq = 0;
+  const { state, audios, actions } = harness({
+    deps: {
+      now: () => now,
+      later(fn, ms) {
+        seq += 1;
+        pending.set(seq, { fn, ms });
+        return seq;
+      },
+      cancelLater(id) {
+        pending.delete(id);
+      },
+    },
+  });
+  const elementRates = [];
+  let elementRate = 1;
+  let elementTime = 10;
+  const player = createDeckPlayer("A", "player-A");
+  const element = {
+    duration: 200,
+    paused: true,
+    volume: 1,
+    muted: false,
+    src: "",
+    load() {},
+    play() {
+      this.paused = false;
+      player.paused = false;
+      return Promise.resolve();
+    },
+    pause() {
+      this.paused = true;
+      player.paused = true;
+    },
+    addEventListener() {},
+  };
+  Object.defineProperty(element, "currentTime", {
+    configurable: true,
+    get() {
+      return elementTime;
+    },
+    set(value) {
+      elementTime = Number(value);
+    },
+  });
+  Object.defineProperty(element, "playbackRate", {
+    configurable: true,
+    get() {
+      return elementRate;
+    },
+    set(value) {
+      elementRate = value;
+      elementRates.push(value);
+    },
+  });
+  player.audio = element;
+  player._context = fakeScratchContext();
+  audios.A = player;
+  return {
+    state,
+    audios,
+    actions,
+    player,
+    element,
+    elementRates,
+    context: player._context,
+    set now(value) {
+      now = value;
+    },
+    get now() {
+      return now;
+    },
+    get rate() {
+      return elementRate;
+    },
+    get time() {
+      return elementTime;
+    },
+    at(seconds) {
+      elementTime = seconds;
+    },
+    release() {
+      const left = [...pending.values()];
+      pending.clear();
+      assert.equal(left.length, 1);
+      assert.equal(left[0].ms, JOG_RELEASE_MS);
+      left[0].fn();
+    },
+  };
+}
+
+function vinylTick(actions, value) {
+  return dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb0, 0x22, value])), actions);
+}
+
+test("FLX4 jog scratches backward and hears the track faster as the forward spin speeds up", async () => {
+  const rig = platterHarness();
+  const { state, audios, actions, player, element, elementRates, context } = rig;
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 200 }];
+  await actions.loadSelected("A");
+  state.decks.A.status = "ready";
+  rig.at(10);
+  actions.setRate("A", 1.25);
+  actions.setRate("B", 0.5);
+  state.decks.A.volume = 0.5;
+  player.volume = 0.5;
+  state.decks.A.cue = 4;
+  state.crossfader = 0.25;
+  elementRates.length = 0;
+
+  assert.equal(vinylTick(actions, 66), true);
+  assert.equal(player.jogHear.hear, "track");
+  assert.equal(player.jogHear.trackRate, 5);
+  assert.equal(player.jogHear.scratch, null);
+  assert.equal(rig.rate, 5);
+  rig.now = 1050;
+  assert.equal(vinylTick(actions, 66), true);
+  assert.equal(player.jogHear.trackRate, 2);
+  assert.equal(rig.rate, 2);
+  rig.now = 1100;
+  assert.equal(vinylTick(actions, 68), true);
+  assert.equal(player.jogHear.hear, "track");
+  assert.equal(player.jogHear.trackRate, 4);
+  assert.equal(player.jogHear.scratch, null);
+  assert.equal(rig.rate, 4);
+  assert.equal(rig.rate / 2, 2);
+  assert.deepEqual(
+    elementRates.filter((rate) => rate !== 1.25),
+    [5, 2, 4],
+  );
+  assert.equal(player.playbackRate, 1.25);
+  assert.equal(state.decks.A.rate, 1.25);
+  assert.equal(player.paused, false);
+  assert.equal(element.muted, false);
+  assert.equal(context.sources.length, 0);
+  assert.ok(Math.abs(rig.time - 10.4) < 1e-9);
+
+  rig.now = 1150;
+  assert.equal(vinylTick(actions, 62), true);
+  assert.equal(player.jogHear.hear, "scratch");
+  assert.equal(player.jogHear.trackRate, null);
+  assert.equal(player.jogHear.scratch.rate, 2);
+  const scratchGain = context.gains[0].gain.value;
+  rig.now = 1200;
+  assert.equal(vinylTick(actions, 60), true);
+  assert.equal(player.jogHear.hear, "scratch");
+  assert.equal(player.jogHear.trackRate, null);
+  assert.equal(player.jogHear.scratch.rate, 4);
+  assert.equal(player.jogHear.scratch.rate / 2, 2);
+  assert.equal(context.sources.length, 1);
+  assert.equal(context.sources[0].loop, true);
+  assert.equal(context.sources[0].started, true);
+  assert.equal(context.sources[0].playbackRate.value, 4);
+  assert.equal(context.filters[0].frequency.value, player.jogHear.scratch.chirpHz);
+  assert.ok(context.filters[0].frequency.value > scratchFromSpeed(2).chirpHz);
+  assert.equal(context.gains[0].gain.value, scratchGain);
+  assert.ok(scratchGain > 0);
+  assert.equal(element.muted, true);
+  assert.equal(rig.rate, 1.25);
+  assert.ok(rig.rate > 0);
+  assert.notEqual(rig.rate, player.jogHear.scratch.rate);
+  assert.ok(elementRates.every((rate) => rate > 0));
+  assert.equal(player.playbackRate, 1.25);
+  assert.equal(state.decks.A.rate, 1.25);
+  assert.ok(Math.abs(rig.time - 10.1) < 1e-9);
+
+  rig.release();
+  assert.equal(player.jogHear.hear, "deck");
+  assert.equal(player.jogHear.trackRate, 1.25);
+  assert.equal(player.jogHear.scratch, null);
+  assert.equal(rig.rate, 1.25);
+  assert.equal(element.muted, false);
+  assert.equal(context.sources[0].stopped, true);
+  assert.equal(player.paused, true);
+  assert.equal(state.decks.A.playing, false);
+  assert.ok(Math.abs(rig.time - 10.1) < 1e-9);
+  assert.equal(state.decks.A.rate, 1.25);
+  assert.equal(state.decks.A.volume, 0.5);
+  assert.equal(player.volume, 0.5);
+  assert.equal(element.volume, 0.5);
+  assert.equal(state.decks.A.cue, 4);
+  assert.equal(state.crossfader, 0.25);
+  assert.equal(state.decks.B.rate, 0.5);
+  assert.equal(audios.B.playbackRate, 0.5);
+  assert.ok(!audios.B.scratch);
+  assert.ok(!audios.B.muted);
+});
+
+test("letting go of a playing deck returns to that deck's tempo and keeps playing", async () => {
+  const rig = platterHarness();
+  const { state, actions, player, element } = rig;
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 200 }];
+  await actions.loadSelected("A");
+  state.decks.A.status = "ready";
+  rig.at(30);
+  actions.setRate("A", 1.25);
+  state.decks.A.playing = true;
+  player.paused = false;
+  element.paused = false;
+
+  rig.now = 2000;
+  assert.equal(vinylTick(actions, 68), true);
+  assert.equal(player.jogHear.hear, "track");
+  assert.equal(player.jogHear.trackRate, 0.2 / JOG_FIRST_TICK_SECONDS);
+  assert.equal(rig.rate, 0.2 / JOG_FIRST_TICK_SECONDS);
+  assert.notEqual(rig.rate, 1.25);
+  assert.equal(player.paused, false);
+  rig.release();
+  assert.equal(rig.rate, 1.25);
+  assert.equal(player.playbackRate, 1.25);
+  assert.equal(state.decks.A.rate, 1.25);
+  assert.equal(player.paused, false);
+  assert.equal(state.decks.A.playing, true);
+  assert.equal(element.muted, false);
+  assert.equal(rig.time, 30.2);
+
+  rig.now = 3000;
+  assert.equal(vinylTick(actions, 60), true);
+  assert.equal(player.jogHear.hear, "scratch");
+  assert.equal(player.jogHear.trackRate, null);
+  assert.equal(player.jogHear.scratch.rate, 0.2 / JOG_FIRST_TICK_SECONDS);
+  assert.equal(rig.player._context.sources.at(-1).playbackRate.value, player.jogHear.scratch.rate);
+  assert.equal(element.muted, true);
+  assert.equal(rig.rate, 1.25);
+  assert.ok(rig.rate > 0);
+  rig.release();
+  assert.equal(element.muted, false);
+  assert.equal(rig.rate, 1.25);
+  assert.equal(player.paused, false);
+  assert.equal(state.decks.A.playing, true);
+  assert.equal(state.decks.A.rate, 1.25);
+  assert.equal(rig.time, 30);
+});
+
+test("keyboard jog uses the same scratch and spin-speed split", async () => {
+  let now = 0;
+  let release = null;
+  const { state, audios, actions } = harness({
+    deps: {
+      now: () => now,
+      later(fn, ms) {
+        release = { fn, ms };
+        return 1;
+      },
+      cancelLater() {
+        release = null;
+      },
+    },
+  });
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 200 }];
+  await actions.loadSelected("A");
+  actions.setRate("A", 1.25);
+  audios.A.currentTime = 10;
+  audios.A.duration = 200;
+  state.decks.A.cue = 3;
+  const fader = state.crossfader;
+
+  assert.equal(handleKeydown(keyEvent("]", bodyTarget()), actions), true);
+  assert.equal(audios.A.jogHear.hear, "track");
+  assert.equal(audios.A.jogHear.scratch, null);
+  assert.equal(audios.A.playbackRate, JOG_STEP / JOG_FIRST_TICK_SECONDS);
+  assert.equal(audios.A.currentTime, 11);
+  const slow = audios.A.playbackRate;
+  assert.equal(release.ms, JOG_RELEASE_MS);
+  release.fn();
+  assert.equal(audios.A.playbackRate, 1.25);
+  assert.equal(audios.A.paused, true);
+
+  assert.equal(handleKeydown(keyEvent("]", bodyTarget(), { shiftKey: true }), actions), true);
+  assert.equal(audios.A.jogHear.hear, "track");
+  assert.equal(audios.A.playbackRate, JOG_STEP_LARGE / JOG_FIRST_TICK_SECONDS);
+  assert.equal(audios.A.playbackRate / slow, JOG_STEP_LARGE / JOG_STEP);
+  assert.notEqual(audios.A.playbackRate, slow);
+  release.fn();
+
+  assert.equal(handleKeydown(keyEvent("[", bodyTarget()), actions), true);
+  assert.equal(audios.A.jogHear.hear, "scratch");
+  assert.equal(audios.A.jogHear.trackRate, null);
+  assert.equal(audios.A.scratch.rate, JOG_STEP / JOG_FIRST_TICK_SECONDS);
+  assert.equal(audios.A.muted, true);
+  assert.equal(audios.A.playbackRate, 1.25);
+  assert.ok(audios.A.playbackRate > 0);
+  const backSlow = audios.A.scratch.rate;
+  release.fn();
+  assert.equal(audios.A.muted, false);
+  assert.equal(audios.A.scratch, null);
+  assert.equal(audios.A.playbackRate, 1.25);
+
+  assert.equal(handleKeydown(keyEvent("[", bodyTarget(), { shiftKey: true }), actions), true);
+  assert.equal(audios.A.jogHear.hear, "scratch");
+  assert.equal(audios.A.scratch.rate, JOG_STEP_LARGE / JOG_FIRST_TICK_SECONDS);
+  assert.equal(audios.A.scratch.rate / backSlow, JOG_STEP_LARGE / JOG_STEP);
+  assert.ok(audios.A.scratch.chirpHz > scratchFromSpeed(backSlow).chirpHz);
+  assert.equal(audios.A.playbackRate, 1.25);
+  assert.equal(audios.A.muted, true);
+  assert.equal(state.decks.A.rate, 1.25);
+  assert.equal(state.decks.A.cue, 3);
+  assert.equal(state.crossfader, fader);
+});
+
+// currentTime moves with the element rate while the element is playing, and a pause
+// keeps the time it had already reached. A seek replaces that time.
+function coastingRig() {
+  let now = 0;
+  const pending = new Map();
+  let seq = 0;
+  const { state, audios, actions } = harness({
+    deps: {
+      now: () => now,
+      later(fn, ms) {
+        seq += 1;
+        pending.set(seq, { fn, ms });
+        return seq;
+      },
+      cancelLater(id) {
+        pending.delete(id);
+      },
+    },
+  });
+  const player = createDeckPlayer("A", "player-A");
+  let stored = 0;
+  let rate = 1;
+  let paused = true;
+  let anchor = 0;
+  function elapsed() {
+    return paused ? 0 : ((now - anchor) / 1000) * rate;
+  }
+  function pull() {
+    stored += elapsed();
+    anchor = now;
+  }
+  const element = {
+    duration: 200,
+    volume: 1,
+    muted: false,
+    src: "",
+    load() {},
+    addEventListener() {},
+    get paused() {
+      return paused;
+    },
+    set paused(value) {
+      paused = !!value;
+    },
+    play() {
+      if (paused) anchor = now;
+      paused = false;
+      player.paused = false;
+      return Promise.resolve();
+    },
+    pause() {
+      if (!paused) pull();
+      paused = true;
+      player.paused = true;
+    },
+  };
+  Object.defineProperty(element, "currentTime", {
+    configurable: true,
+    get() {
+      return stored + elapsed();
+    },
+    set(value) {
+      stored = Number(value);
+      anchor = now;
+    },
+  });
+  Object.defineProperty(element, "playbackRate", {
+    configurable: true,
+    get() {
+      return rate;
+    },
+    set(value) {
+      if (!paused) pull();
+      rate = Number(value);
+    },
+  });
+  player.audio = element;
+  player._context = fakeScratchContext();
+  audios.A = player;
+  return {
+    state,
+    audios,
+    actions,
+    player,
+    element,
+    set now(value) {
+      now = value;
+    },
+    get now() {
+      return now;
+    },
+    at(seconds) {
+      stored = seconds;
+      anchor = now;
+    },
+    play() {
+      paused = false;
+      anchor = now;
+      player.paused = false;
+      state.decks.A.playing = true;
+    },
+    release() {
+      const left = [...pending.values()];
+      pending.clear();
+      assert.equal(left.length, 1);
+      assert.equal(left[0].ms, JOG_RELEASE_MS);
+      left[0].fn();
+    },
+  };
+}
+
+test("a backward scratch lands on the sum of the seeks while the deck tempo would have walked the playhead", async () => {
+  const rig = coastingRig();
+  const { state, actions, player, element } = rig;
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 200 }];
+  await actions.loadSelected("A");
+  state.decks.A.status = "ready";
+  actions.setRate("A", 1);
+  rig.at(10);
+  rig.play();
+  const step = -0.1;
+  let sum = 10;
+  for (let i = 0; i < 3; i += 1) {
+    if (i) rig.now += 50;
+    actions.jog("A", step);
+    sum += step;
+  }
+  assert.equal(player.jogHear.hear, "scratch");
+  assert.equal(element.muted, true);
+  assert.equal(element.paused, true);
+  assert.equal(player.playbackRate, 1);
+  assert.equal(state.decks.A.rate, 1);
+  assert.ok(Math.abs(player.currentTime - sum) < 1e-9);
+  assert.ok(Math.abs(element.currentTime - sum) < 1e-9);
+  rig.release();
+  assert.ok(Math.abs(player.currentTime - sum) < 1e-9);
+  assert.ok(Math.abs(element.currentTime - sum) < 1e-9);
+  assert.equal(element.paused, false);
+  assert.equal(player.paused, false);
+  assert.equal(state.decks.A.playing, true);
+  assert.equal(element.muted, false);
+  assert.equal(player.playbackRate, 1);
+  assert.equal(state.decks.A.rate, 1);
+});
+
+test("keyboard jog release lands on the seek and drops the 16x coast", async () => {
+  const rig = coastingRig();
+  const { state, actions, player, element } = rig;
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 200 }];
+  await actions.loadSelected("A");
+  state.decks.A.status = "ready";
+  actions.setRate("A", 1.25);
+  rig.at(10);
+  assert.equal(player.paused, true);
+  assert.equal(element.paused, true);
+
+  assert.equal(handleKeydown(keyEvent("]", bodyTarget()), actions), true);
+  assert.equal(player.jogHear.hear, "track");
+  assert.equal(element.playbackRate, SPIN_RATE_MAX);
+  assert.equal(player.playbackRate, 1.25);
+  assert.equal(state.decks.A.rate, 1.25);
+  assert.ok(SPIN_RATE_MAX < JOG_STEP / JOG_FIRST_TICK_SECONDS);
+
+  rig.now = JOG_RELEASE_MS;
+  const coast = 11 + SPIN_RATE_MAX * (JOG_RELEASE_MS / 1000);
+  assert.ok(Math.abs(player.currentTime - coast) < 1e-9);
+  assert.ok(Math.abs(element.currentTime - coast) < 1e-9);
+  assert.ok(coast > 11);
+
+  rig.release();
+  assert.ok(Math.abs(player.currentTime - 11) < 1e-9);
+  assert.ok(Math.abs(element.currentTime - 11) < 1e-9);
+  assert.equal(player.paused, true);
+  assert.equal(element.paused, true);
+  assert.equal(state.decks.A.playing, false);
+  assert.equal(player.playbackRate, 1.25);
+  assert.equal(state.decks.A.rate, 1.25);
+  assert.equal(element.playbackRate, 1.25);
+});
+
+test("a second forward jog adds to the last seek, not the coast between ticks", async () => {
+  const rig = coastingRig();
+  const { state, actions, player, element } = rig;
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 200 }];
+  await actions.loadSelected("A");
+  state.decks.A.status = "ready";
+  const start = 10;
+  const step = 0.05;
+  rig.at(start);
+  actions.jog("A", step);
+  rig.now += 20;
+  assert.ok(player.currentTime > start + step);
+  actions.jog("A", step);
+  rig.release();
+  const landing = start + step + step;
+  assert.ok(Math.abs(player.currentTime - landing) < 1e-9);
+  assert.ok(Math.abs(element.currentTime - landing) < 1e-9);
+  assert.equal(player.paused, true);
+  assert.equal(element.paused, true);
+  assert.equal(state.decks.A.playing, false);
 });
