@@ -260,6 +260,10 @@ def test_readme_and_docker_contract():
     assert "djtube-data:/app/data" in compose
     assert "DJTUBE_COOKIES=/app/data/cookies.txt" in dockerfile
     assert "DJTUBE_COOKIES: /app/data/cookies.txt" in compose
+    assert "DJTUBE_AUDIO_CACHE=/app/data/audio-cache.json" in dockerfile
+    assert "DJTUBE_AUDIO_CACHE: /app/data/audio-cache.json" in compose
+    assert "DJTUBE_AUDIO_CACHE" in agent
+    assert "audio-cache.json" not in readme
     assert "/opt/djtube/deno" in dockerfile
     assert "/opt/djtube" not in dockerfile.split("ENV PATH=", 1)[1].split("\n", 1)[0]
 
