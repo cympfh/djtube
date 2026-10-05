@@ -34,7 +34,8 @@ RUN mkdir -p /app/data && chown appuser:appuser /app/data \
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONPATH="/app" \
     DJTUBE_PLAYLISTS=/app/data/playlists.json \
-    DJTUBE_COOKIES=/app/data/cookies.txt
+    DJTUBE_COOKIES=/app/data/cookies.txt \
+    DJTUBE_AUDIO_CACHE=/app/data/audio-cache.json
 USER appuser
 EXPOSE 8098
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8098"]

@@ -11,3 +11,4 @@ node_modules/
 .uv-cache/
 data/
 cookies.txt
+audio-cache.json
