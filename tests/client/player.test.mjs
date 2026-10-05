@@ -1256,6 +1256,8 @@ test("BPM readout scales with deck tempo and stays blank without a base", async 
   assert.equal(formatBpm(100, 0.5), "50.0");
   assert.equal(formatBpm(120, 2), "240.0");
   assert.equal(bpmText({ bpm: null, rate: 1.05 }), "– BPM");
+  assert.equal(bpmText({ bpmMeasuring: true, bpm: 128, rate: 1.05 }), "計測中");
+  assert.equal(tempoValueText({ bpmMeasuring: true, rate: 1.05 }), "1.05×");
   assert.equal(bpmText({ bpm: 128, rate: 1 }), "128.0 BPM");
   assert.equal(bpmText({ bpm: 128, rate: 1.05, playbackRate: SPIN_RATE_MAX }), "134.4 BPM");
   assert.equal(tempoValueText({ bpm: null, rate: 1.05 }), "1.05×");
@@ -1264,6 +1266,7 @@ test("BPM readout scales with deck tempo and stays blank without a base", async 
   const { state, actions } = harness();
   assert.equal(bpmText(state.decks.A), "– BPM");
   assert.equal(tempoValueText(state.decks.A), "1.00×");
+  assert.equal(state.decks.A.bpmMeasuring, false);
   assert.equal(state.decks.A.beatOffset, null);
   assert.equal(state.decks.B.bpm, null);
   assert.equal(state.decks.B.beatOffset, null);
@@ -1278,9 +1281,11 @@ test("BPM readout scales with deck tempo and stays blank without a base", async 
   assert.equal(tempoValueText(state.decks.A), "1.05×、134.4 BPM");
   assert.equal(state.decks.A.beatOffset, 0.4);
 
+  state.decks.A.bpmMeasuring = true;
   await actions.loadTrack("A", { id: "zzzzzzzzzzz", title: "次" });
   assert.equal(state.decks.A.bpm, null);
   assert.equal(state.decks.A.beatOffset, null);
+  assert.equal(state.decks.A.bpmMeasuring, false);
   assert.equal(state.decks.A.rate, 1);
   assert.equal(bpmText(state.decks.A), "– BPM");
   assert.equal(tempoValueText(state.decks.A), "1.00×");
