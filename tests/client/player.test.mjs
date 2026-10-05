@@ -13,7 +13,7 @@ import {
   messageFromMidi,
   relativeMidiTicks,
 } from "../../djtube/static/controller.js";
-import { formatBpm, heardBpm } from "../../djtube/static/bpm.js";
+import { bpmText, formatBpm, heardBpm, tempoValueText } from "../../djtube/static/bpm.js";
 import { formatTime } from "../../djtube/static/format.js";
 import { EQ_BOOST_DB, EQ_CUT_DB, EQ_STEP, connectEqGraph, eqGainDb, eqUnitFromMidi, formatEqDb } from "../../djtube/static/eq.js";
 import {
@@ -1255,9 +1255,15 @@ test("BPM readout scales with deck tempo and stays blank without a base", async 
   assert.equal(formatBpm(128, 1.01), "129.3");
   assert.equal(formatBpm(100, 0.5), "50.0");
   assert.equal(formatBpm(120, 2), "240.0");
+  assert.equal(bpmText({ bpm: null, rate: 1.05 }), "– BPM");
+  assert.equal(bpmText({ bpm: 128, rate: 1 }), "128.0 BPM");
+  assert.equal(bpmText({ bpm: 128, rate: 1.05, playbackRate: SPIN_RATE_MAX }), "134.4 BPM");
+  assert.equal(tempoValueText({ bpm: null, rate: 1.05 }), "1.05×");
+  assert.equal(tempoValueText({ bpm: 128, rate: 1.05, playbackRate: SPIN_RATE_MAX }), "1.05×、134.4 BPM");
 
-  const { state, audios, actions } = harness();
-  assert.equal(state.decks.A.bpm, null);
+  const { state, actions } = harness();
+  assert.equal(bpmText(state.decks.A), "– BPM");
+  assert.equal(tempoValueText(state.decks.A), "1.00×");
   assert.equal(state.decks.A.beatOffset, null);
   assert.equal(state.decks.B.bpm, null);
   assert.equal(state.decks.B.beatOffset, null);
@@ -1268,27 +1274,37 @@ test("BPM readout scales with deck tempo and stays blank without a base", async 
   state.decks.B.bpm = 100;
   state.decks.B.beatOffset = 0.5;
   actions.setRate("A", 1.05);
-  assert.equal(state.decks.A.rate, 1.05);
-  assert.equal(state.decks.A.bpm, 128);
+  assert.equal(bpmText(state.decks.A), "134.4 BPM");
+  assert.equal(tempoValueText(state.decks.A), "1.05×、134.4 BPM");
   assert.equal(state.decks.A.beatOffset, 0.4);
-  audios.A.playbackRate = 4;
-  assert.equal(formatBpm(state.decks.A.bpm, state.decks.A.rate), "134.4");
-  assert.equal(formatBpm(state.decks.A.bpm, audios.A.playbackRate), "512.0");
-
-  const app = readFileSync(new URL("../../djtube/static/app.js", import.meta.url), "utf8");
-  const render = app.slice(app.indexOf("function renderTempo"), app.indexOf("function renderFilter"));
-  assert.match(render, /formatBpm\(deckState\.bpm, deckState\.rate\)/);
-  assert.match(render, /`bpm-readout-\$\{deck\}`/);
-  assert.equal(render.includes("playbackRate"), false);
-  assert.equal(render.includes("setSpinRate"), false);
 
   await actions.loadTrack("A", { id: "zzzzzzzzzzz", title: "次" });
   assert.equal(state.decks.A.bpm, null);
   assert.equal(state.decks.A.beatOffset, null);
   assert.equal(state.decks.A.rate, 1);
+  assert.equal(bpmText(state.decks.A), "– BPM");
+  assert.equal(tempoValueText(state.decks.A), "1.00×");
   assert.equal(state.decks.B.bpm, 100);
   assert.equal(state.decks.B.beatOffset, 0.5);
-  assert.equal(formatBpm(state.decks.A.bpm, state.decks.A.rate), "–");
+  assert.equal(bpmText(state.decks.B), "100.0 BPM");
+
+  const rig = coastingRig();
+  rig.state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 200 }];
+  await rig.actions.loadSelected("A");
+  rig.state.decks.A.status = "ready";
+  rig.state.decks.A.bpm = 128;
+  rig.actions.setRate("A", 1.05);
+  rig.at(10);
+  rig.actions.jog("A", 1);
+  assert.equal(rig.state.decks.A.rate, 1.05);
+  assert.equal(rig.player.playbackRate, 1.05);
+  assert.equal(rig.element.playbackRate, SPIN_RATE_MAX);
+  assert.notEqual(rig.element.playbackRate, rig.state.decks.A.rate);
+  assert.equal(bpmText(rig.state.decks.A), "134.4 BPM");
+  assert.equal(tempoValueText(rig.state.decks.A), "1.05×、134.4 BPM");
+  rig.release();
+  assert.equal(rig.element.playbackRate, 1.05);
+  assert.equal(bpmText(rig.state.decks.A), "134.4 BPM");
 });
 
 test("loading a track resets only that deck tempo to 1.0 and centers its EQ", async () => {

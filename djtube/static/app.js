@@ -4,7 +4,7 @@ import { deckGains } from "./gains.js";
 import { eqGainDb, formatEqDb } from "./eq.js";
 import { formatFilter } from "./filter.js";
 import { formatTime } from "./format.js";
-import { formatBpm } from "./bpm.js";
+import { bpmText, tempoValueText } from "./bpm.js";
 import { formatRate } from "./rate.js";
 import { handleKeydown, isSearchTarget, isTypingTarget, legendGroups } from "./keys.js";
 import { createDeckPlayer, startDeckAudio } from "./player.js";
@@ -321,9 +321,9 @@ function renderTempo(deck) {
   const value = String(Math.round(rate * 100));
   if (document.activeElement !== slider) slider.value = value;
   slider.setAttribute("aria-valuenow", value);
-  slider.setAttribute("aria-valuetext", shown);
+  slider.setAttribute("aria-valuetext", tempoValueText(deckState));
   document.getElementById(`rate-readout-${deck}`).textContent = shown;
-  document.getElementById(`bpm-readout-${deck}`).textContent = formatBpm(deckState.bpm, deckState.rate);
+  document.getElementById(`bpm-readout-${deck}`).textContent = bpmText(deckState);
 }
 
 function renderFilter(deck) {
