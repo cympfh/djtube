@@ -79,6 +79,14 @@ function deckOf(state, deck) {
   return state.decks[deck];
 }
 
+// The media element is the transport. The wrapper flag can lag a queued
+// pause/play event, and test doubles have no element of their own.
+function mediaPaused(audio) {
+  const element = audio?.audio;
+  if (element && typeof element.paused === "boolean") return !!element.paused;
+  return audio?.paused !== false;
+}
+
 function emptySpin() {
   return { active: false, lastAt: 0, token: 0, timer: 0, wasPlaying: false, borrowed: false, at: null };
 }
@@ -516,7 +524,7 @@ export function createActions(deps) {
     const audio = audios[deck];
     if (!deckState?.id || (deckState.status !== "ready" && deckState.status !== "error")) return;
     if (sourcePlaybackBlocked(deckState)) return;
-    const wasPaused = audio.paused !== false;
+    const wasPaused = mediaPaused(audio);
     finishJogHear(deck, "keep");
     deckState.playError = "";
     deckState.error = "";
@@ -526,7 +534,7 @@ export function createActions(deps) {
     if (wasPaused) alignSyncOnPlay(deck);
     if (pending && typeof pending.catch === "function") {
       pending.catch(() => {
-        if (audio.paused) {
+        if (mediaPaused(audio)) {
           deckState.playing = false;
           deckState.playError = "再生がブロックされました";
           scheduleRender();
@@ -543,7 +551,7 @@ export function createActions(deps) {
     if (down) {
       if (deckState.discHeld) return;
       if (!deckState.id || (deckState.status !== "ready" && deckState.status !== "error")) return;
-      const wasPlaying = !audio.paused;
+      const wasPlaying = !mediaPaused(audio);
       if (!wasPlaying && sourcePlaybackBlocked(deckState)) return;
       deckState.discHeld = true;
       deckState.discWasPlaying = wasPlaying && !sourcePlaybackBlocked(deckState);
@@ -565,7 +573,7 @@ export function createActions(deps) {
     const deckState = deckOf(state, deck);
     const audio = audios[deck];
     if (!deckState?.id || (deckState.status !== "ready" && deckState.status !== "error")) return;
-    if (audio.paused) play(deck);
+    if (mediaPaused(audio)) play(deck);
     else {
       finishJogHear(deck, "keep");
       audio.pause();
@@ -602,7 +610,7 @@ export function createActions(deps) {
     deckState.jogCommand = null;
     audio.cancelPendingSeek?.();
     const atCue = Math.abs((audio.currentTime || 0) - deckState.cue) < 0.08;
-    if (!audio.paused) {
+    if (!mediaPaused(audio)) {
       audio.pause();
       audio.currentTime = deckState.cue;
       deckState.playing = false;
@@ -721,7 +729,7 @@ export function createActions(deps) {
     setTrackHeld(audio, false);
   }
 
-  function followerBusy(deck) {
+  function deckTransportBusy(deck) {
     const deckState = deckOf(state, deck);
     return !!(deckState?.discHeld || jogSpin[deck]?.active);
   }
@@ -785,8 +793,8 @@ export function createActions(deps) {
       leaderTime: Number(leaderAudio.currentTime) || 0,
       followerTime: Number(followerAudio.currentTime) || 0,
       at: now(),
-      leaderPaused: leaderAudio.paused !== false,
-      followerPaused: followerAudio.paused !== false,
+      leaderPaused: mediaPaused(leaderAudio),
+      followerPaused: mediaPaused(followerAudio),
       leaderRate: Number(leader.rate) || 0,
       followerRate: Number(follower.rate) || 0,
       slipWall: Number.isFinite(slipWall) ? slipWall : 0,
@@ -827,16 +835,20 @@ export function createActions(deps) {
       releaseDeckSync(deck);
       return false;
     }
-    if (followerBusy(deck)) {
+    if (deckTransportBusy(deck)) {
       const watch = syncWatch[deck];
       if (watch) {
         watch.leaderTime = Number(leaderAudio.currentTime) || 0;
         watch.at = now();
-        watch.leaderPaused = leaderAudio.paused !== false;
+        watch.leaderPaused = mediaPaused(leaderAudio);
         watch.leaderRate = Number(leader.rate) || 0;
       }
       return true;
     }
+    // A platter spin seeks and coasts far ahead of the tempo fader. That is
+    // not the leader's clock. Leave the watch so one later tick can realign
+    // if the landed seek is more than a quarter beat.
+    if (deckTransportBusy(leaderName)) return true;
     const found = syncPlanFor(deck, leaderName);
     if (!found) {
       releaseDeckSync(deck);
@@ -1054,12 +1066,12 @@ export function createActions(deps) {
     parkJogPlayhead(deck);
     if (mode === "restore" && !deckState.discHeld) {
       if (spin.wasPlaying) {
-        if (audio.paused) {
+        if (mediaPaused(audio) || audio.paused !== false) {
           const pending = audio.play?.();
           if (pending && typeof pending.catch === "function") pending.catch(() => {});
         }
         deckState.playing = true;
-      } else if (spin.borrowed || deckState.playing || !audio.paused) {
+      } else if (spin.borrowed || deckState.playing || !mediaPaused(audio)) {
         audio.pause?.();
         deckState.playing = false;
       }
@@ -1089,7 +1101,7 @@ export function createActions(deps) {
     const t = now();
     const elapsed = spin.active ? (t - spin.lastAt) / 1000 : null;
     if (!spin.active) {
-      spin.wasPlaying = !!(deckState.playing && !audio.paused);
+      spin.wasPlaying = !mediaPaused(audio);
       spin.borrowed = false;
       spin.active = true;
     }
@@ -1108,7 +1120,8 @@ export function createActions(deps) {
       setTrackHeld(audio, false);
       audio.scratch = null;
       audio.stopScratch?.();
-      if (!deckState.discHeld && (audio.paused || !deckState.playing)) {
+      // A stale "paused" flag must not borrow a spin of a deck that is already running.
+      if (!deckState.discHeld && mediaPaused(audio)) {
         const pending = audio.play?.();
         if (pending && typeof pending.catch === "function") pending.catch(() => {});
         deckState.playing = true;

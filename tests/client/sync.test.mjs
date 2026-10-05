@@ -768,6 +768,45 @@ test("a locked octave does not flip when the master tempo jumps", () => {
   assert.equal(env.audios.A.playCalls, 0);
 });
 
+test("a leader jog does not pull the synced deck until the platter stops", () => {
+  const env = harness();
+  arm(env, "A", { bpm: 120, time: 30, rate: 1 });
+  arm(env, "B", { bpm: 120, time: 30, rate: 1 });
+  env.actions.syncBeat("A");
+  const locked = env.audios.A.currentTime;
+  assert.equal(env.timers.size, 1);
+  const syncId = env.timers.keys().next().value;
+  env.audios.B.paused = false;
+  env.state.decks.B.playing = true;
+  env.actions.jog("B", 1);
+  assert.equal(env.timers.size, 2);
+  assert.equal(env.audios.A.currentTime, locked);
+  assert.equal(env.audios.A.playbackRate, 1);
+  assert.notEqual(env.audios.B.playbackRate, 1);
+  const jogId = [...env.timers.keys()].find((id) => id !== syncId);
+  const follow = env.timers.get(syncId);
+  env.timers.delete(syncId);
+  follow();
+  assert.equal(env.audios.A.currentTime, locked);
+  assert.equal(env.audios.A.playbackRate, 1);
+  assert.equal(env.audios.A.playCalls, 0);
+  assert.equal(env.audios.B.currentTime, 31);
+  assert.equal(env.timers.has(jogId), true);
+  const release = env.timers.get(jogId);
+  env.timers.delete(jogId);
+  release();
+  assert.equal(env.audios.A.currentTime, locked);
+  assert.equal(env.audios.A.playbackRate, 1);
+  assert.equal(env.audios.B.playbackRate, 1);
+  assert.equal(env.timers.size, 1);
+  step(env);
+  assert.ok(Math.abs(env.audios.A.currentTime - env.audios.B.currentTime) < 1e-6);
+  assert.ok(Math.abs(env.audios.A.currentTime - locked) > 0.2);
+  assert.equal(env.audios.A.playbackRate, 1);
+  assert.equal(env.audios.B.playCalls, 0);
+});
+
+
 test("an unfoldable tempo does not enter sync", () => {
   const env = harness();
   arm(env, "A", { bpm: 1, time: 3, rate: 1 });

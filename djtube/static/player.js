@@ -223,11 +223,15 @@ export function createDeckPlayer(deck, elementId) {
         if (this.videoId) hooks.onReady?.(this.deck);
       });
       this.audio.addEventListener("play", () => {
+        // play() and pause() both queue events. A pause that lands after the
+        // element is already running must not flip the deck back to stopped.
+        if (this.audio.paused) return;
         this.paused = false;
         this._ensureGraph();
         hooks.onPlaying?.(this.deck);
       });
       this.audio.addEventListener("pause", () => {
+        if (!this.audio.paused) return;
         this.paused = true;
         hooks.onPaused?.(this.deck);
       });
