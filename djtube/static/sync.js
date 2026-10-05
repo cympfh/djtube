@@ -3,9 +3,11 @@
  * rate. Phase is applied when sync starts and when the leader jumps, not on
  * every tick. Nothing here starts, stops, or seeks.
  *
- * Rate is (otherBpm * otherRate) / ownBpm, folded by half and double until it
- * is as close to 1 as those octaves allow. 67.9 against 135.8 stays at 1×.
- * If it is still outside 0.5–2 after folding, there is no rate: do not clamp.
+ * The follower rate is the speed whose heard BPM is half, the same, or double
+ * the master heard tempo — whichever is closest to the follower's current
+ * heard BPM (own BPM × current rate, before this call overwrites it). If that
+ * rate is outside 0.5–2, there is no rate: do not clamp, and do not substitute
+ * a farther octave.
  *
  * Phase is wall-clock seconds since the last beat:
  *   mod(currentTime - beatOffset, 60 / bpm) / rate
@@ -59,29 +61,43 @@ function nearestFactor(ratio) {
   return best;
 }
 
+const HEARD_FACTORS = [0.5, 1, 2];
+
 /**
- * Follower playback rate that shares the leader's groove.
- * Returns null when either BPM or the leader rate is unusable.
- * The follower's current rate is not an input. Half and double are folded
- * until the rate is as close to 1× as those octaves get, which lands near 1
- * (about 0.71–1.41). Null is only when it is still outside 0.5–2 after that
- * limit: an extreme ratio, not a normal half or double. Never clamped.
+ * Follower playback rate that shares the leader's groove at half, the same,
+ * or double the master heard tempo.
+ *
+ * `ownRate` is the follower tempo already on the deck, before sync overwrites
+ * it. Heard BPM is file BPM × that rate. The chosen target minimizes
+ * |currentHeard − masterHeard × {0.5, 1, 2}|. An equal distance keeps the
+ * factor closer to 1× (same, then half). If that rate is outside 0.5–2, the
+ * result is null: a farther octave is not substituted, and the rate is not
+ * clamped. Null also when a BPM or rate is unusable.
  */
-export function beatSyncRate(ownBpm, otherBpm, otherRate) {
-  if (!finiteBpm(ownBpm) || !finiteBpm(otherBpm) || !positiveRate(otherRate)) return null;
-  let rate = (otherBpm * otherRate) / ownBpm;
-  if (!Number.isFinite(rate) || !(rate > 0)) return null;
-  for (let fold = 0; fold < MAX_FOLDS; fold += 1) {
-    const half = rate * 0.5;
-    const doubled = rate * 2;
-    const dist = Math.abs(rate - 1);
-    const halfDist = Math.abs(half - 1);
-    const doubleDist = Math.abs(doubled - 1);
-    if (halfDist + 1e-9 < dist && halfDist <= doubleDist + 1e-9) rate = half;
-    else if (doubleDist + 1e-9 < dist) rate = doubled;
-    else break;
+export function beatSyncRate(ownBpm, otherBpm, otherRate, ownRate) {
+  if (!finiteBpm(ownBpm) || !finiteBpm(otherBpm) || !positiveRate(otherRate) || !positiveRate(ownRate)) {
+    return null;
   }
-  if (rate < RATE_MIN - 1e-9 || rate > RATE_MAX + 1e-9) return null;
+  const masterHeard = otherBpm * otherRate;
+  const currentHeard = ownBpm * ownRate;
+  if (!Number.isFinite(masterHeard) || !Number.isFinite(currentHeard) || !(masterHeard > 0)) return null;
+
+  let best = null;
+  for (const factor of HEARD_FACTORS) {
+    const targetHeard = masterHeard * factor;
+    const dist = Math.abs(currentHeard - targetHeard);
+    const bias = Math.abs(factor - 1);
+    if (
+      !best
+      || dist < best.dist - 1e-9
+      || (Math.abs(dist - best.dist) <= 1e-9 && bias < best.bias - 1e-9)
+    ) {
+      best = { factor, dist, bias };
+    }
+  }
+  if (!best) return null;
+  const rate = (masterHeard * best.factor) / ownBpm;
+  if (!Number.isFinite(rate) || rate < RATE_MIN - 1e-9 || rate > RATE_MAX + 1e-9) return null;
   return rate;
 }
 
@@ -153,7 +169,7 @@ function usableDeck(deck) {
  */
 export function beatSyncPlan(own, other) {
   if (!usableDeck(own) || !usableDeck(other)) return null;
-  const rate = beatSyncRate(own.bpm, other.bpm, other.rate);
+  const rate = beatSyncRate(own.bpm, other.bpm, other.rate, own.rate);
   if (rate == null) return null;
   const ownHeard = 60 / (own.bpm * rate);
   const otherHeard = 60 / (other.bpm * other.rate);
