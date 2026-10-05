@@ -642,7 +642,7 @@ button.cue { color: var(--cue); }
   font-weight: 700;
 }
 
-.tempo-readout, .level-readout, .filter-readout {
+.tempo-readout, .bpm-readout, .level-readout, .filter-readout {
   margin: 0;
   font-size: 12px;
   font-variant-numeric: tabular-nums;

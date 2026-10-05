@@ -4,6 +4,7 @@ import { deckGains } from "./gains.js";
 import { eqGainDb, formatEqDb } from "./eq.js";
 import { formatFilter } from "./filter.js";
 import { formatTime } from "./format.js";
+import { formatBpm } from "./bpm.js";
 import { formatRate } from "./rate.js";
 import { handleKeydown, isSearchTarget, isTypingTarget, legendGroups } from "./keys.js";
 import { createDeckPlayer, startDeckAudio } from "./player.js";
@@ -313,7 +314,8 @@ function renderDeck(deck) {
 }
 
 function renderTempo(deck) {
-  const rate = state.decks[deck].rate ?? 1;
+  const deckState = state.decks[deck];
+  const rate = deckState.rate ?? 1;
   const slider = document.getElementById(`rate-${deck}`);
   const shown = formatRate(rate);
   const value = String(Math.round(rate * 100));
@@ -321,6 +323,7 @@ function renderTempo(deck) {
   slider.setAttribute("aria-valuenow", value);
   slider.setAttribute("aria-valuetext", shown);
   document.getElementById(`rate-readout-${deck}`).textContent = shown;
+  document.getElementById(`bpm-readout-${deck}`).textContent = formatBpm(deckState.bpm, deckState.rate);
 }
 
 function renderFilter(deck) {

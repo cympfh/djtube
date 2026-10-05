@@ -13,6 +13,7 @@ import {
   messageFromMidi,
   relativeMidiTicks,
 } from "../../djtube/static/controller.js";
+import { formatBpm, heardBpm } from "../../djtube/static/bpm.js";
 import { formatTime } from "../../djtube/static/format.js";
 import { EQ_BOOST_DB, EQ_CUT_DB, EQ_STEP, connectEqGraph, eqGainDb, eqUnitFromMidi, formatEqDb } from "../../djtube/static/eq.js";
 import {
@@ -1240,6 +1241,54 @@ test("tempo clamps, nudges, resets, and stays callable from the action table", a
   );
   assert.equal(state.decks.B.rate, 1);
   assert.deepEqual(FLX4_MAP, mapBefore);
+});
+
+test("BPM readout scales with deck tempo and stays blank without a base", async () => {
+  assert.equal(heardBpm(null, 1), null);
+  assert.equal(heardBpm(undefined, 1.05), null);
+  assert.equal(heardBpm(128, null), null);
+  assert.equal(formatBpm(null, 1.05), "–");
+  assert.equal(formatBpm(undefined, 1), "–");
+  assert.equal(heardBpm(128, 1.05), 134.4);
+  assert.equal(formatBpm(128, 1.05), "134.4");
+  assert.equal(formatBpm(128, 1), "128.0");
+  assert.equal(formatBpm(128, 1.01), "129.3");
+  assert.equal(formatBpm(100, 0.5), "50.0");
+  assert.equal(formatBpm(120, 2), "240.0");
+
+  const { state, audios, actions } = harness();
+  assert.equal(state.decks.A.bpm, null);
+  assert.equal(state.decks.A.beatOffset, null);
+  assert.equal(state.decks.B.bpm, null);
+  assert.equal(state.decks.B.beatOffset, null);
+
+  await actions.loadTrack("A", { id: "abcdefghijk", title: "曲" });
+  state.decks.A.bpm = 128;
+  state.decks.A.beatOffset = 0.4;
+  state.decks.B.bpm = 100;
+  state.decks.B.beatOffset = 0.5;
+  actions.setRate("A", 1.05);
+  assert.equal(state.decks.A.rate, 1.05);
+  assert.equal(state.decks.A.bpm, 128);
+  assert.equal(state.decks.A.beatOffset, 0.4);
+  audios.A.playbackRate = 4;
+  assert.equal(formatBpm(state.decks.A.bpm, state.decks.A.rate), "134.4");
+  assert.equal(formatBpm(state.decks.A.bpm, audios.A.playbackRate), "512.0");
+
+  const app = readFileSync(new URL("../../djtube/static/app.js", import.meta.url), "utf8");
+  const render = app.slice(app.indexOf("function renderTempo"), app.indexOf("function renderFilter"));
+  assert.match(render, /formatBpm\(deckState\.bpm, deckState\.rate\)/);
+  assert.match(render, /`bpm-readout-\$\{deck\}`/);
+  assert.equal(render.includes("playbackRate"), false);
+  assert.equal(render.includes("setSpinRate"), false);
+
+  await actions.loadTrack("A", { id: "zzzzzzzzzzz", title: "次" });
+  assert.equal(state.decks.A.bpm, null);
+  assert.equal(state.decks.A.beatOffset, null);
+  assert.equal(state.decks.A.rate, 1);
+  assert.equal(state.decks.B.bpm, 100);
+  assert.equal(state.decks.B.beatOffset, 0.5);
+  assert.equal(formatBpm(state.decks.A.bpm, state.decks.A.rate), "–");
 });
 
 test("loading a track resets only that deck tempo to 1.0 and centers its EQ", async () => {
