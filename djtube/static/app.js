@@ -324,6 +324,11 @@ function renderTempo(deck) {
   slider.setAttribute("aria-valuetext", tempoValueText(deckState));
   document.getElementById(`rate-readout-${deck}`).textContent = shown;
   document.getElementById(`bpm-readout-${deck}`).textContent = bpmText(deckState);
+  const sync = document.getElementById(`sync-${deck}`);
+  const locked = !!deckState.syncing;
+  sync.classList.toggle("is-on", locked);
+  sync.setAttribute("aria-pressed", locked ? "true" : "false");
+  if (locked) slider.value = value;
 }
 
 function renderFilter(deck) {
@@ -863,6 +868,9 @@ for (const deck of ["A", "B"]) {
   });
   document.getElementById(`rate-reset-${deck}`).addEventListener("click", () => {
     actions.resetRate(deck);
+  });
+  document.getElementById(`sync-${deck}`).addEventListener("click", () => {
+    actions.syncBeat(deck);
   });
   const volume = document.getElementById(`volume-${deck}`);
   volume.addEventListener("input", () => {

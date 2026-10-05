@@ -635,6 +635,8 @@ button.cue { color: var(--cue); }
 
 .tempo-head, .level-head, .filter-head { display: flex; align-items: baseline; gap: 8px; }
 
+.tempo-head { flex-wrap: wrap; }
+
 .tempo-head label, .level-head label, .filter-head label {
   margin: 0;
   font-size: 12px;
@@ -650,6 +652,11 @@ button.cue { color: var(--cue); }
 }
 
 .tempo-head button, .level-head button, .filter-head button { margin-left: auto; padding: 2px 8px; font-size: 12px; }
+
+.tempo-head button + button { margin-left: 0; }
+
+.deck-a .tempo-head button.is-on { background: var(--a); color: #1a1408; border-color: var(--a); }
+.deck-b .tempo-head button.is-on { background: var(--b); color: #1a0d0a; border-color: var(--b); }
 
 .tempo input[type="range"]::-webkit-slider-runnable-track,
 .level input[type="range"]::-webkit-slider-runnable-track,

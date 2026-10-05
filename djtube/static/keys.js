@@ -37,6 +37,8 @@ export const BINDINGS = [
   { keys: ["8"], action: "nudgeRate", args: ["B", -RATE_STEP], label: "デッキ B のテンポを下げる", group: "テンポ" },
   { keys: ["9"], action: "nudgeRate", args: ["B", RATE_STEP], label: "デッキ B のテンポを上げる", group: "テンポ" },
   { keys: ["0"], action: "resetRate", args: ["B"], label: "デッキ B のテンポを 1.0 に戻す", group: "テンポ" },
+  { keys: ["3"], codes: ["Digit3"], action: "syncBeat", args: ["A"], shift: true, label: "デッキ A の同期を入／切", group: "テンポ" },
+  { keys: ["8"], codes: ["Digit8"], action: "syncBeat", args: ["B"], shift: true, label: "デッキ B の同期を入／切", group: "テンポ" },
   { keys: ["-"], action: "nudgeVolume", args: ["A", -VOLUME_STEP], label: "デッキ A の音量を下げる", group: "音量" },
   { keys: ["="], action: "nudgeVolume", args: ["A", VOLUME_STEP], label: "デッキ A の音量を上げる", group: "音量" },
   {
@@ -225,12 +227,17 @@ function sameKey(bindingKey, event) {
   );
 }
 
+function matchesBinding(binding, event) {
+  if (Array.isArray(binding.codes) && binding.codes.length > 0) return binding.codes.includes(event.code);
+  return binding.keys.some((key) => sameKey(key, event));
+}
+
 export function bindingFor(event, library = "search") {
   if (event.metaKey || event.ctrlKey || event.altKey) return null;
   let fallback = null;
   for (const binding of BINDINGS) {
     if (!!binding.shift !== !!event.shiftKey) continue;
-    if (!binding.keys.some((key) => sameKey(key, event))) continue;
+    if (!matchesBinding(binding, event)) continue;
     if (binding.library && binding.library !== library) continue;
     if (binding.library === library) return binding;
     if (!fallback) fallback = binding;
