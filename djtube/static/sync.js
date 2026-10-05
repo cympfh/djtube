@@ -9,7 +9,8 @@
  *
  * Phase is wall-clock seconds since the last beat:
  *   mod(currentTime - beatOffset, 60 / bpm) / rate
- * The shorter beat grid is the pulse. The follower seeks by at most half of that.
+ * The shorter beat grid is the pulse. A target before 0 or past the file
+ * moves by that period instead of being clamped to the end.
  */
 
 const RATE_MIN = 0.5;
@@ -117,6 +118,30 @@ function nearestWallDelta(ownWall, otherWall, ownHeard, otherHeard, factor) {
   return 0;
 }
 
+/**
+ * Slide a file time onto the same beat inside the track.
+ * Negative targets step forward by `period`. Targets past `duration` step back.
+ * `period` is the shorter beat in follower file seconds when tempos are half or double.
+ */
+export function placeSyncTime(time, period, duration = Number.POSITIVE_INFINITY) {
+  if (!Number.isFinite(time) || !(period > 0)) return time;
+  let next = time;
+  let steps = 0;
+  while (next < -1e-9 && steps < 10000) {
+    next += period;
+    steps += 1;
+  }
+  const end = Number(duration);
+  if (Number.isFinite(end) && end > 0) {
+    steps = 0;
+    while (next > end + 1e-9 && next - period >= -1e-9 && steps < 10000) {
+      next -= period;
+      steps += 1;
+    }
+  }
+  return next;
+}
+
 function usableDeck(deck) {
   if (!deck || deck.measuring) return false;
   return finiteBpm(deck.bpm) && finiteTime(deck.beatOffset) && finiteTime(deck.time) && positiveRate(deck.rate);
@@ -140,7 +165,8 @@ export function beatSyncPlan(own, other) {
   const otherWall = wallSinceBeat(other.time, other.beatOffset, other.bpm, other.rate);
   const deltaWall = nearestWallDelta(ownWall, otherWall, ownHeard, otherHeard, factor);
   if (!Number.isFinite(deltaWall)) return null;
-  const time = own.time + deltaWall * rate;
-  if (!Number.isFinite(time)) return null;
-  return { rate, time };
+  const period = Math.min(ownHeard, otherHeard) * rate;
+  const time = placeSyncTime(own.time + deltaWall * rate, period);
+  if (!Number.isFinite(time) || !(period > 0)) return null;
+  return { rate, time, period };
 }

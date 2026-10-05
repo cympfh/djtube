@@ -4,7 +4,7 @@ import test from "node:test";
 import { createActions, freshState } from "../../djtube/static/actions.js";
 import { FLX4_MAP, dispatchControllerEvent, messageFromMidi } from "../../djtube/static/controller.js";
 import { BINDINGS, handleKeydown, legendGroups } from "../../djtube/static/keys.js";
-import { beatSyncPlan, beatSyncRate } from "../../djtube/static/sync.js";
+import { beatSyncPlan, beatSyncRate, placeSyncTime } from "../../djtube/static/sync.js";
 
 function mod(value, period) {
   const wrapped = value % period;
@@ -311,23 +311,39 @@ test("syncBeat is a no-op without a BPM, while measuring, or before the deck is 
   assert.equal(env.audios.A.playCalls, 0);
 });
 
-test("syncBeat clamps the seek to the file and does not play", () => {
+test("a seek before 0 or past the file steps by a beat instead of clamping", () => {
+  const head = beatSyncPlan(deck(120, 0, 0), deck(120, 0, 0.4));
+  assert.ok(head.time >= 0);
+  assert.ok(Math.abs(head.time - 0.4) < 1e-9);
+  assert.ok(alignError(head.time, deck(120, 0, 0), deck(120, 0, 0.4), head.rate) < 1e-6);
+
+  // Follower is the half-tempo record. Step by the leader's shorter beat, not a full second.
+  const half = beatSyncPlan(deck(60, 0, 0.05), deck(120, 0, 0.4));
+  assert.ok(half.time >= 0);
+  assert.ok(Math.abs(half.time - 0.4) < 1e-9);
+  assert.ok(half.time < 0.9);
+  assert.ok(alignError(half.time, deck(60, 0, 0.05), deck(120, 0, 0.4), half.rate) < 1e-6);
+
+  assert.ok(Math.abs(placeSyncTime(10.2, 0.5, 10.05) - 9.7) < 1e-9);
+  assert.ok(Math.abs(placeSyncTime(-0.1, 0.5) - 0.4) < 1e-9);
+});
+
+test("sync at the start of the file stays on the beat when playback starts", () => {
   const env = harness();
-  arm(env, "A", { bpm: 120, time: 0.05 });
-  arm(env, "B", { bpm: 120, time: 0.4 });
+  arm(env, "A", { bpm: 120, beatOffset: 0, time: 0 });
+  arm(env, "B", { bpm: 120, beatOffset: 0, time: 0.4 });
   env.actions.syncBeat("A");
-  assert.equal(env.audios.A.currentTime, 0);
   assert.equal(env.audios.A.playCalls, 0);
   assert.equal(env.audios.A.paused, true);
+  assert.ok(env.audios.A.currentTime > 0.05);
+  assert.ok(alignError(env.audios.A.currentTime, deck(120, 0, 0), deck(120, 0, 0.4), 1) < 1e-6);
 
-  env.actions.syncBeat("A");
-  arm(env, "A", { bpm: 120, time: 10 });
-  arm(env, "B", { bpm: 120, time: 10.2 });
-  env.audios.A.duration = 10.05;
-  env.actions.syncBeat("A");
-  assert.equal(env.audios.A.currentTime, 10.05);
-  assert.equal(env.audios.B.currentTime, 10.2);
-  assert.equal(env.audios.A.playCalls, 0);
+  env.actions.togglePlay("A");
+  assert.equal(env.audios.A.playCalls, 1);
+  assert.equal(env.audios.A.paused, false);
+  assert.equal(env.audios.B.playCalls, 0);
+  assert.ok(env.audios.A.currentTime > 0.05);
+  assert.ok(alignError(env.audios.A.currentTime, deck(120, 0, 0), deck(120, 0, env.audios.B.currentTime), 1) < 1e-6);
 });
 
 test("sync during a backspin does not resume playback", () => {

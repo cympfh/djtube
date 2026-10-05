@@ -13,7 +13,7 @@ import { createPlaylistActions, freshPlaylistState, trackSnapshot } from "./play
 import { publicPrefix } from "./prefix.js";
 import { clampRate, rateFromMidi } from "./rate.js";
 import { commandedSeekLanded } from "./seekland.js";
-import { beatSyncPlan } from "./sync.js";
+import { beatSyncPlan, placeSyncTime } from "./sync.js";
 
 export function freshDeck() {
   return {
@@ -755,15 +755,12 @@ export function createActions(deps) {
     return { plan, ownTime };
   }
 
-  function writeSyncSeek(deck, time) {
+  function writeSyncSeek(deck, time, period) {
     const follower = deckOf(state, deck);
     const audio = audios[deck];
     if (!follower || !audio) return false;
-    let next = Number(time);
-    if (!Number.isFinite(next)) return false;
-    if (next < 0) next = 0;
-    const duration = Number(audio.duration);
-    if (Number.isFinite(duration) && duration > 0 && next > duration) next = duration;
+    const next = placeSyncTime(Number(time), period, audio.duration);
+    if (!Number.isFinite(next) || next < 0) return false;
     if (Math.abs(next - (Number(audio.currentTime) || 0)) < 0.0005) return false;
     follower.jogCommand = null;
     audio.cancelPendingSeek?.();
@@ -810,7 +807,7 @@ export function createActions(deps) {
     if (rateChanged) applyRate(deck, found.plan.rate);
     const aligned = syncPlanFor(deck, leaderName);
     if (!aligned) return false;
-    const sought = writeSyncSeek(deck, aligned.plan.time + slipWall * aligned.plan.rate);
+    const sought = writeSyncSeek(deck, aligned.plan.time + slipWall * aligned.plan.rate, aligned.plan.period);
     const after = syncPlanFor(deck, leaderName);
     rememberSync(deck, leaderName, slipWallOf(after));
     if (rateChanged || sought) scheduleRender();
