@@ -104,7 +104,37 @@ test("drum patterns read within 0.2 BPM", () => {
     assert.ok(Math.abs(high.bpm - options.bpm) <= 0.2, `${name} ${high.bpm}`);
     assert.ok(low, `${name} at 22050`);
     assert.ok(Math.abs(high.bpm - low.bpm) <= 0.1, `${name} ${high.bpm} vs ${low.bpm}`);
+    assert.ok(beatError(high.beatOffset, low.beatOffset, options.bpm) <= 0.05, `${name} beat`);
   }
+});
+
+test("the same clicks agree within 0.1 BPM at 22050 and 44100", () => {
+  for (const bpm of [70, 120, 174]) {
+    const lead = 0.2;
+    const high = analyzeBpm(clickTrack({ bpm, sampleRate: 44100, lead, seconds: 10 }), 44100);
+    const low = analyzeBpm(clickTrack({ bpm, sampleRate: 22050, lead, seconds: 10 }), 22050);
+    assert.ok(high && low, String(bpm));
+    assert.ok(Math.abs(high.bpm - bpm) <= 0.5, `${bpm} ${high.bpm}`);
+    assert.ok(Math.abs(high.bpm - low.bpm) <= 0.1, `${high.bpm} vs ${low.bpm}`);
+    assert.ok(beatError(high.beatOffset, low.beatOffset, bpm) <= 0.05);
+    // Percival & Tzanetakis: BPM = onsetRate * 60 / lag, onsetRate = 44100/128.
+    const onsetRate = 44100 / 128;
+    const lag = (onsetRate * 60) / high.bpm;
+    assert.ok(Math.abs(lag - (onsetRate * 60) / bpm) < 0.5, `${bpm} lag ${lag}`);
+  }
+});
+
+test("irregular onsets are not reported as a tempo", () => {
+  const sampleRate = 44100;
+  const samples = new Float32Array(sampleRate * 12);
+  let state = 3;
+  const next = () => ((state = (state * 1664525 + 1013904223) >>> 0) / 4294967296);
+  let at = sampleRate * 0.3;
+  while (at < samples.length - 10) {
+    samples[Math.floor(at)] = 1;
+    at += sampleRate * (0.15 + next() * 0.7);
+  }
+  assert.equal(analyzeBpm(samples, sampleRate), null);
 });
 
 test("energy autocorrelation reads a click track and ignores the tail and silence", () => {
