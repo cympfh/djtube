@@ -20,7 +20,7 @@ from djtube.ids import is_video_id, watch_url
 
 log = logging.getLogger(__name__)
 
-CACHE_SECONDS = 15 * 60
+CACHE_SECONDS = 3600
 _ALLOWED_HOSTS = ("googlevideo.com", "youtube.com")
 _PREFERRED_EXTS = ("m4a", "mp4", "aac", "mp3", "webm", "opus", "ogg")
 _CONTENT_TYPES = {

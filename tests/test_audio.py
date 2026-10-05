@@ -95,6 +95,27 @@ def test_resolve_audio_caches_and_rejects_other_hosts():
     assert missing.value.status == 404
 
 
+def test_resolved_audio_is_reused_at_exactly_one_hour():
+    clear_audio_cache()
+    calls = []
+
+    def extract(video_id):
+        calls.append(video_id)
+        return {"formats": [_fmt(url=f"{MEDIA}&n={len(calls)}")]}
+
+    now = 10_000.0
+    first = resolve_audio(VIDEO_ID, extract=extract, now=now)
+    assert first.url == f"{MEDIA}&n=1"
+
+    held = resolve_audio(VIDEO_ID, extract=extract, now=now + 3600)
+    assert held.url == first.url
+    assert calls == [VIDEO_ID]
+
+    fresh = resolve_audio(VIDEO_ID, extract=extract, now=now + 3600 + 1)
+    assert fresh.url == f"{MEDIA}&n=2"
+    assert calls == [VIDEO_ID, VIDEO_ID]
+
+
 def test_open_audio_retries_when_the_media_url_expires(monkeypatch):
     clear_audio_cache()
     calls = {"n": 0}
