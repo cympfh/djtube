@@ -448,7 +448,7 @@ def test_bad_audio_cache_file_does_not_break_resolve(tmp_path, audio_logs):
     assert source == _source()
     assert calls == [VIDEO_ID]
     assert SIGNED not in _text(audio_logs)
-    assert f"video={VIDEO_ID} path=ytdlp success" in _text(audio_logs)
+    assert f"video={VIDEO_ID} path=other success" in _text(audio_logs)
 
     audio_logs.clear()
     calls.clear()
