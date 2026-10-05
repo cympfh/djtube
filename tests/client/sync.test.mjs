@@ -778,7 +778,7 @@ test("a leader jog does not pull the synced deck until the platter stops", () =>
   const syncId = env.timers.keys().next().value;
   env.audios.B.paused = false;
   env.state.decks.B.playing = true;
-  env.actions.jog("B", 1);
+  env.actions.jog("B", 0.2);
   assert.equal(env.timers.size, 2);
   assert.equal(env.audios.A.currentTime, locked);
   assert.equal(env.audios.A.playbackRate, 1);
@@ -790,7 +790,7 @@ test("a leader jog does not pull the synced deck until the platter stops", () =>
   assert.equal(env.audios.A.currentTime, locked);
   assert.equal(env.audios.A.playbackRate, 1);
   assert.equal(env.audios.A.playCalls, 0);
-  assert.equal(env.audios.B.currentTime, 31);
+  assert.ok(Math.abs(env.audios.B.currentTime - 30.2) < 1e-9);
   assert.equal(env.timers.has(jogId), true);
   const release = env.timers.get(jogId);
   env.timers.delete(jogId);
@@ -801,7 +801,7 @@ test("a leader jog does not pull the synced deck until the platter stops", () =>
   assert.equal(env.timers.size, 1);
   step(env);
   assert.ok(Math.abs(env.audios.A.currentTime - env.audios.B.currentTime) < 1e-6);
-  assert.ok(Math.abs(env.audios.A.currentTime - locked) > 0.2);
+  assert.ok(Math.abs(env.audios.A.currentTime - locked) > 0.05);
   assert.equal(env.audios.A.playbackRate, 1);
   assert.equal(env.audios.B.playCalls, 0);
 });
