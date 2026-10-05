@@ -1,20 +1,20 @@
-import { clampRate } from "./rate.js";
-
 /**
- * One beat-sync adjustment. While a deck is locked, the caller repeats this
- * so the follower keeps the leader's tempo and phase. Nothing here starts,
- * stops, or seeks.
+ * One beat-sync adjustment. While a deck is locked, the caller repeats the
+ * rate. Phase is applied when sync starts and when the leader jumps, not on
+ * every tick. Nothing here starts, stops, or seeks.
  *
- * Rate is (otherBpm * otherRate) / ownBpm, times 0.5, 1, or 2 — whichever lands
- * closest to 1. Half and double tempos are the same groove: 67.9 against 135.8
- * stays near 1× instead of jumping to 2×. The heard numbers do not have to match.
+ * Rate is (otherBpm * otherRate) / ownBpm, folded by half and double until it
+ * is as close to 1 as those octaves allow. 67.9 against 135.8 stays at 1×.
+ * If it is still outside 0.5–2 after folding, there is no rate: do not clamp.
  *
  * Phase is wall-clock seconds since the last beat:
  *   mod(currentTime - beatOffset, 60 / bpm) / rate
  * The shorter beat grid is the pulse. The follower seeks by at most half of that.
  */
 
-const RATE_FACTORS = [1, 0.5, 2];
+const RATE_MIN = 0.5;
+const RATE_MAX = 2;
+const MAX_FOLDS = 8;
 
 function finiteBpm(value) {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
@@ -46,8 +46,9 @@ function circularDelta(current, target, period) {
 
 function nearestFactor(ratio) {
   let best = 1;
-  let bestDist = Infinity;
-  for (const factor of RATE_FACTORS) {
+  let bestDist = Math.abs(ratio - 1);
+  for (let octave = -MAX_FOLDS; octave <= MAX_FOLDS; octave += 1) {
+    const factor = 2 ** octave;
     const dist = Math.abs(ratio - factor);
     if (dist < bestDist - 1e-9) {
       best = factor;
@@ -59,24 +60,26 @@ function nearestFactor(ratio) {
 
 /**
  * Follower playback rate that shares the leader's groove.
- * Returns null when either BPM or the leader rate is unusable.
- * The follower's current rate is not an input: the octave closest to 1× wins.
+ * Returns null when either BPM or the leader rate is unusable, or when half
+ * and double still leave the rate outside 0.5–2. The follower's current rate
+ * is not an input: the octave closest to 1× wins. Never clamped.
  */
 export function beatSyncRate(ownBpm, otherBpm, otherRate) {
   if (!finiteBpm(ownBpm) || !finiteBpm(otherBpm) || !positiveRate(otherRate)) return null;
-  const raw = (otherBpm * otherRate) / ownBpm;
-  if (!Number.isFinite(raw) || !(raw > 0)) return null;
-  let best = raw;
-  let bestDist = Math.abs(raw - 1);
-  for (const factor of [0.5, 2]) {
-    const candidate = raw * factor;
-    const dist = Math.abs(candidate - 1);
-    if (dist < bestDist - 1e-9) {
-      best = candidate;
-      bestDist = dist;
-    }
+  let rate = (otherBpm * otherRate) / ownBpm;
+  if (!Number.isFinite(rate) || !(rate > 0)) return null;
+  for (let fold = 0; fold < MAX_FOLDS; fold += 1) {
+    const half = rate * 0.5;
+    const doubled = rate * 2;
+    const dist = Math.abs(rate - 1);
+    const halfDist = Math.abs(half - 1);
+    const doubleDist = Math.abs(doubled - 1);
+    if (halfDist + 1e-9 < dist && halfDist <= doubleDist + 1e-9) rate = half;
+    else if (doubleDist + 1e-9 < dist) rate = doubled;
+    else break;
   }
-  return clampRate(best);
+  if (rate < RATE_MIN - 1e-9 || rate > RATE_MAX + 1e-9) return null;
+  return rate;
 }
 
 /** Wall-clock seconds since the last beat at this file position and tempo. */
@@ -89,15 +92,19 @@ function gridTargets(origin, pulse, period) {
   const base = mod(origin, pulse);
   const steps = Math.max(1, Math.round(period / pulse));
   const targets = [];
-  for (let step = 0; step < steps + 1 && step < 8; step += 1) {
+  for (let step = 0; step < steps + 1 && step < 64; step += 1) {
     targets.push(mod(base + step * pulse, period));
   }
   return targets;
 }
 
 function nearestWallDelta(ownWall, otherWall, ownHeard, otherHeard, factor) {
-  if (factor === 2) return circularDelta(ownWall, mod(otherWall, ownHeard), ownHeard);
-  if (factor === 0.5) {
+  if (Math.abs(factor - 1) < 1e-6) {
+    const scaled = otherHeard > 0 ? otherWall * (ownHeard / otherHeard) : otherWall;
+    return circularDelta(ownWall, mod(scaled, ownHeard), ownHeard);
+  }
+  if (factor > 1) return circularDelta(ownWall, mod(otherWall, ownHeard), ownHeard);
+  if (factor < 1) {
     let best = null;
     for (const target of gridTargets(otherWall, otherHeard, ownHeard)) {
       const delta = circularDelta(ownWall, target, ownHeard);
@@ -105,8 +112,7 @@ function nearestWallDelta(ownWall, otherWall, ownHeard, otherHeard, factor) {
     }
     return best ?? 0;
   }
-  const scaled = otherHeard > 0 ? otherWall * (ownHeard / otherHeard) : otherWall;
-  return circularDelta(ownWall, mod(scaled, ownHeard), ownHeard);
+  return 0;
 }
 
 function usableDeck(deck) {

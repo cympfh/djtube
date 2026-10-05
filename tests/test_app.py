@@ -244,6 +244,8 @@ def test_readme_and_docker_contract():
     assert "BPM が半分や倍のときも、同じ拍として合わせる" in readme
     assert "合わせ続ける" in readme
     assert "もう一度 `Shift+3` で同期を切る" in readme
+    assert "同期中にそのデッキのテンポを動かすと、同期は切れて、動かしたテンポが残る" in readme
+    assert "再生位置は動かさない" in readme
     assert "FLX4 の BEAT SYNC" in readme
     assert "一度合わせる" not in readme
     assert "canplay" not in readme

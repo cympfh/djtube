@@ -26,18 +26,19 @@ function alignError(time, own, other, rate) {
 }
 
 function expectedRate(ownBpm, otherBpm, otherRate) {
-  const raw = (otherBpm * otherRate) / ownBpm;
-  let best = raw;
-  let bestDist = Math.abs(raw - 1);
-  for (const factor of [0.5, 2]) {
-    const candidate = raw * factor;
-    const dist = Math.abs(candidate - 1);
-    if (dist < bestDist - 1e-9) {
-      best = candidate;
-      bestDist = dist;
-    }
+  let rate = (otherBpm * otherRate) / ownBpm;
+  for (let fold = 0; fold < 8; fold += 1) {
+    const half = rate * 0.5;
+    const doubled = rate * 2;
+    const dist = Math.abs(rate - 1);
+    const halfDist = Math.abs(half - 1);
+    const doubleDist = Math.abs(doubled - 1);
+    if (halfDist + 1e-9 < dist && halfDist <= doubleDist + 1e-9) rate = half;
+    else if (doubleDist + 1e-9 < dist) rate = doubled;
+    else break;
   }
-  return Math.min(2, Math.max(0.5, best));
+  if (rate < 0.5 - 1e-9 || rate > 2 + 1e-9) return null;
+  return rate;
 }
 
 function deck(bpm, beatOffset, time, rate = 1) {
@@ -63,9 +64,11 @@ test("sync rate follows the other tempo and folds half and double toward 1×", (
   assert.ok(Math.abs(beatSyncRate(67.9, 135.8, 1.05) - 1.05) < 1e-9);
   assert.ok(beatSyncRate(67.9, 135.8, 1) < 1.2);
 
-  // Outside 0.5–2 the closest octave is clamped. It does not invent a third tempo.
-  assert.equal(beatSyncRate(50, 210, 2), 2);
-  assert.equal(beatSyncRate(210, 50, 0.5), 0.5);
+  // 8.4× folds to 1.05. It is not clamped to 2× and locked there.
+  assert.ok(Math.abs(beatSyncRate(50, 210, 2) - 1.05) < 1e-9);
+  assert.ok(Math.abs(beatSyncRate(210, 50, 0.5) - 25 / 210 * 8) < 1e-9);
+  assert.equal(beatSyncRate(1, 1e6, 1), null);
+  assert.equal(beatSyncRate(1e6, 1, 0.5), null);
 });
 
 test("sync phase uses beatOffset, currentTime, and rate, including half and double", () => {
@@ -138,6 +141,7 @@ function searchTarget() {
 function keyEvent(key, target, extra = {}) {
   return {
     key,
+    code: /^[0-9]$/.test(key) ? `Digit${key}` : "",
     shiftKey: false,
     metaKey: false,
     ctrlKey: false,
@@ -356,15 +360,17 @@ test("a sync with no BPM leaves the jog release alone", () => {
   assert.equal(env.audios.A.currentTime, 9);
 });
 
-test("Shift+3 and Shift+8 sync the pressed deck, including JIS shifted characters", () => {
+test("Shift+Digit3 and Shift+Digit8 toggle sync, without character aliases", () => {
   const labels = legendGroups().find((group) => group.name === "テンポ").items.map((item) => item.label);
   assert.ok(labels.includes("デッキ A の同期を入／切"));
   assert.ok(labels.includes("デッキ B の同期を入／切"));
   const syncA = BINDINGS.find((binding) => binding.action === "syncBeat" && binding.args[0] === "A");
   const syncB = BINDINGS.find((binding) => binding.action === "syncBeat" && binding.args[0] === "B");
   assert.deepEqual(syncA.keys, ["3"]);
+  assert.deepEqual(syncA.codes, ["Digit3"]);
   assert.equal(syncA.shift, true);
   assert.deepEqual(syncB.keys, ["8"]);
+  assert.deepEqual(syncB.codes, ["Digit8"]);
   assert.equal(syncB.shift, true);
 
   const env = harness();
@@ -373,46 +379,39 @@ test("Shift+3 and Shift+8 sync the pressed deck, including JIS shifted character
 
   assert.equal(handleKeydown(keyEvent("3", searchTarget(), { shiftKey: true }), env.actions), false);
   assert.equal(env.state.decks.A.rate, 1.2);
-  assert.equal(handleKeydown(keyEvent("#", searchTarget(), { shiftKey: true }), env.actions), false);
+  assert.equal(handleKeydown(keyEvent("#", searchTarget(), { shiftKey: true, code: "Digit3" }), env.actions), false);
 
   assert.equal(handleKeydown(keyEvent("3", bodyTarget()), env.actions), true);
   assert.equal(env.state.decks.A.rate, 1);
 
   env.actions.setRate("A", 1.2);
-  assert.equal(handleKeydown(keyEvent("3", bodyTarget(), { shiftKey: true }), env.actions), true);
+  assert.equal(handleKeydown(keyEvent("#", bodyTarget(), { shiftKey: true, code: "Digit3" }), env.actions), true);
   assert.equal(env.state.decks.A.syncing, true);
   assert.equal(env.state.decks.A.rate, 1.05);
   assert.equal(env.state.decks.B.rate, 1.05);
   assert.equal(env.audios.A.playCalls, 0);
-  assert.equal(handleKeydown(keyEvent("3", bodyTarget(), { shiftKey: true }), env.actions), true);
+  assert.equal(handleKeydown(keyEvent("#", bodyTarget(), { shiftKey: true, code: "Digit3" }), env.actions), true);
   assert.equal(env.state.decks.A.syncing, false);
   assert.equal(env.state.decks.A.rate, 1.05);
 
+  // US Shift+9 is "(". JIS Shift+: is "*". Neither is deck sync.
   env.actions.setRate("A", 1.2);
-  assert.equal(handleKeydown(keyEvent("#", bodyTarget(), { shiftKey: true }), env.actions), true);
-  assert.equal(env.state.decks.A.syncing, true);
-  assert.equal(env.state.decks.A.rate, 1.05);
-  env.actions.syncBeat("A");
+  assert.equal(handleKeydown(keyEvent("(", bodyTarget(), { shiftKey: true, code: "Digit9" }), env.actions), false);
+  assert.equal(handleKeydown(keyEvent("*", bodyTarget(), { shiftKey: true, code: "Quote" }), env.actions), false);
+  assert.equal(env.state.decks.A.syncing, false);
+  assert.equal(env.state.decks.A.rate, 1.2);
 
   env.actions.setRate("B", 1.4);
   assert.equal(handleKeydown(keyEvent("8", bodyTarget()), env.actions), true);
   assert.equal(env.state.decks.B.rate, 1.39);
 
-  assert.equal(handleKeydown(keyEvent("8", bodyTarget(), { shiftKey: true }), env.actions), true);
+  assert.equal(handleKeydown(keyEvent("*", bodyTarget(), { shiftKey: true, code: "Digit8" }), env.actions), true);
   assert.equal(env.state.decks.B.syncing, true);
-  assert.equal(env.state.decks.B.rate, 1.05);
+  assert.equal(env.state.decks.B.rate, 1.2);
   assert.equal(env.audios.B.playCalls, 0);
-  assert.equal(handleKeydown(keyEvent("8", bodyTarget(), { shiftKey: true }), env.actions), true);
+  assert.equal(handleKeydown(keyEvent("(", bodyTarget(), { shiftKey: true, code: "Digit8" }), env.actions), true);
   assert.equal(env.state.decks.B.syncing, false);
-
-  env.actions.setRate("B", 1.4);
-  assert.equal(handleKeydown(keyEvent("(", bodyTarget(), { shiftKey: true }), env.actions), true);
-  assert.equal(env.state.decks.B.rate, 1.05);
-  env.actions.syncBeat("B");
-
-  env.actions.setRate("B", 1.4);
-  assert.equal(handleKeydown(keyEvent("*", bodyTarget(), { shiftKey: true }), env.actions), true);
-  assert.equal(env.state.decks.B.rate, 1.05);
+  assert.equal(env.state.decks.B.rate, 1.2);
 });
 
 test("FLX4 BEAT SYNC note 0x58 syncs the pressed deck to the other", () => {
@@ -489,31 +488,99 @@ test("a locked deck keeps the other deck's tempo, including half and double", ()
   assert.equal(env.audios.A.playCalls, 0);
 });
 
-test("while locked, phase is corrected only when both decks are playing", () => {
+test("while locked, phase seeks on a large master jump and holds a follower nudge", () => {
   const env = harness();
   arm(env, "A", { bpm: 120, beatOffset: 0.2, time: 5, rate: 1 });
   arm(env, "B", { bpm: 120, beatOffset: 0, time: 5, rate: 1 });
   env.actions.syncBeat("A");
   assert.ok(Math.abs(env.audios.A.currentTime - 5.2) < 1e-9);
 
-  env.audios.B.currentTime = 8;
   const parked = env.audios.A.currentTime;
+  env.audios.B.currentTime = 5.02;
   step(env);
   assert.equal(env.audios.A.currentTime, parked);
   assert.equal(env.audios.A.playCalls, 0);
 
-  env.audios.A.paused = false;
-  env.audios.B.paused = false;
-  env.audios.A.currentTime = parked + 0.004;
-  step(env);
-  assert.ok(Math.abs(env.audios.A.currentTime - (parked + 0.004)) < 1e-9);
-
   env.audios.A.currentTime = parked + 0.2;
   step(env);
+  assert.ok(Math.abs(env.audios.A.currentTime - (parked + 0.2)) < 1e-9);
+  const heldError = alignError(
+    env.audios.A.currentTime,
+    deck(120, 0.2, 0),
+    deck(120, 0, env.audios.B.currentTime),
+    1,
+  );
+  assert.ok(heldError > 0.05);
+
+  env.audios.B.currentTime = 8.3;
+  step(env);
   assert.ok(Math.abs(env.audios.A.currentTime - (parked + 0.2)) > 0.05);
-  assert.ok(alignError(env.audios.A.currentTime, deck(120, 0.2, 0), deck(120, 0, env.audios.B.currentTime), 1) < 1e-6);
+  const afterJump = alignError(
+    env.audios.A.currentTime,
+    deck(120, 0.2, 0),
+    deck(120, 0, env.audios.B.currentTime),
+    1,
+  );
+  assert.ok(Math.abs(afterJump - heldError) < 1e-6);
   assert.equal(env.audios.A.playCalls, 0);
   assert.equal(env.audios.B.playCalls, 0);
+  assert.equal(env.audios.B.currentTime, 8.3);
+});
+
+test("a master tempo change updates the follower rate and does not seek", () => {
+  const env = harness();
+  arm(env, "A", { bpm: 128, time: 4, rate: 1 });
+  arm(env, "B", { bpm: 128, time: 4.2, rate: 1 });
+  env.actions.syncBeat("A");
+  const parked = env.audios.A.currentTime;
+  for (const rate of [1.04, 1.11, 1.2, 0.9]) {
+    env.actions.setRate("B", rate);
+    step(env);
+    assert.ok(Math.abs(env.state.decks.A.rate - rate) < 1e-9);
+    assert.equal(env.audios.A.currentTime, parked);
+    assert.equal(env.audios.A.playCalls, 0);
+  }
+});
+
+test("changing the follower tempo leaves sync", () => {
+  const env = harness();
+  arm(env, "A", { bpm: 120, time: 2, rate: 1 });
+  arm(env, "B", { bpm: 120, time: 2, rate: 1.05 });
+  env.actions.syncBeat("A");
+  assert.equal(env.state.decks.A.syncing, true);
+  env.actions.setRate("A", 1.25);
+  assert.equal(env.state.decks.A.syncing, false);
+  assert.equal(env.state.decks.A.rate, 1.25);
+  env.actions.setRate("B", 1.4);
+  assert.equal(env.queued(), null);
+  assert.equal(env.state.decks.A.rate, 1.25);
+  assert.equal(env.audios.A.playCalls, 0);
+
+  env.actions.syncBeat("A");
+  assert.equal(env.state.decks.A.syncing, true);
+  env.actions.resetRate("A");
+  assert.equal(env.state.decks.A.syncing, false);
+  assert.equal(env.state.decks.A.rate, 1);
+
+  env.actions.syncBeat("A");
+  assert.equal(env.state.decks.A.syncing, true);
+  env.actions.setRateFromController("A", 127);
+  assert.equal(env.state.decks.A.syncing, false);
+  assert.ok(env.state.decks.A.rate > 1.9);
+  assert.equal(env.audios.A.playCalls, 0);
+});
+
+test("an unfoldable tempo does not enter sync", () => {
+  const env = harness();
+  arm(env, "A", { bpm: 1, time: 3, rate: 1 });
+  arm(env, "B", { bpm: 1e6, time: 3, rate: 1 });
+  const time = env.audios.A.currentTime;
+  env.actions.syncBeat("A");
+  assert.equal(env.state.decks.A.syncing, false);
+  assert.equal(env.state.decks.A.rate, 1);
+  assert.equal(env.audios.A.currentTime, time);
+  assert.equal(env.audios.A.playCalls, 0);
+  assert.equal(env.queued(), null);
 });
 
 test("loading a deck or clearing its BPM leaves sync", async () => {

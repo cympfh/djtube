@@ -88,9 +88,10 @@ export function createActions(deps) {
   const jogSpin = { A: emptySpin(), B: emptySpin() };
   let syncTimer = null;
   let syncLoopOn = false;
+  const syncWatch = { A: null, B: null };
   const SYNC_FOLLOW_MS = 50;
-  const SYNC_PHASE_SNAP = 0.0005;
-  const SYNC_PHASE_FOLLOW = 0.012;
+  const SYNC_JUMP_BEATS = 0.25;
+  const SYNC_NUDGE_SECONDS = 0.02;
   const bpmWatch = {
     A: { token: 0, forGen: null, controller: null },
     B: { token: 0, forGen: null, controller: null },
@@ -261,6 +262,7 @@ export function createActions(deps) {
 
   function releaseDeckSync(deck) {
     const deckState = deckOf(state, deck);
+    syncWatch[deck] = null;
     if (!deckState?.syncing) return;
     deckState.syncing = false;
     const other = otherDeck(deck);
@@ -647,6 +649,7 @@ export function createActions(deps) {
   }
 
   function setRate(deck, value) {
+    releaseDeckSync(deck);
     const clamped = clampRate(value);
     applyRate(deck, Math.round(clamped * 100) / 100);
   }
@@ -666,6 +669,7 @@ export function createActions(deps) {
   function setRateFromController(deck, value) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return;
+    releaseDeckSync(deck);
     applyRate(deck, rateFromMidi(numeric));
   }
 
@@ -723,28 +727,64 @@ export function createActions(deps) {
     return { plan, ownTime };
   }
 
-  function applySync(deck, leaderName, snap) {
+  function writeSyncSeek(deck, time) {
     const follower = deckOf(state, deck);
+    const audio = audios[deck];
+    if (!follower || !audio) return false;
+    let next = Number(time);
+    if (!Number.isFinite(next)) return false;
+    if (next < 0) next = 0;
+    const duration = Number(audio.duration);
+    if (Number.isFinite(duration) && duration > 0 && next > duration) next = duration;
+    if (Math.abs(next - (Number(audio.currentTime) || 0)) < 0.0005) return false;
+    follower.jogCommand = null;
+    audio.cancelPendingSeek?.();
+    audio.currentTime = next;
+    return true;
+  }
+
+  function slipWallOf(found) {
+    if (!found || !(found.plan.rate > 0)) return 0;
+    const slip = (found.ownTime - found.plan.time) / found.plan.rate;
+    return Number.isFinite(slip) ? slip : 0;
+  }
+
+  function rememberSync(deck, leaderName, slipWall) {
     const followerAudio = audios[deck];
     const leaderAudio = audios[leaderName];
+    const follower = deckOf(state, deck);
+    const leader = deckOf(state, leaderName);
+    if (!followerAudio || !leaderAudio || !follower || !leader) return;
+    syncWatch[deck] = {
+      leaderTime: Number(leaderAudio.currentTime) || 0,
+      followerTime: Number(followerAudio.currentTime) || 0,
+      at: now(),
+      leaderPaused: leaderAudio.paused !== false,
+      followerPaused: followerAudio.paused !== false,
+      leaderRate: Number(leader.rate) || 0,
+      followerRate: Number(follower.rate) || 0,
+      slipWall: Number.isFinite(slipWall) ? slipWall : 0,
+    };
+  }
+
+  function playheadResidual(previous, current, rate, paused, dt) {
+    if (!Number.isFinite(previous) || !Number.isFinite(current)) return 0;
+    const expected = paused ? 0 : (Number(rate) || 0) * dt;
+    return current - previous - expected;
+  }
+
+  // Snap phase, then keep that slip. Used when sync starts and when the leader jumps.
+  function alignSync(deck, leaderName, slipWall) {
     const found = syncPlanFor(deck, leaderName);
-    if (!found || !follower || !followerAudio || !leaderAudio) return false;
-    const { plan, ownTime } = found;
-    const rateChanged = Math.abs((Number(follower.rate) || 0) - plan.rate) > 0.0001;
-    if (rateChanged) applyRate(deck, plan.rate);
-    let next = plan.time;
-    if (next < 0) next = 0;
-    const duration = Number(followerAudio.duration);
-    if (Number.isFinite(duration) && duration > 0 && next > duration) next = duration;
-    const playingPair = followerAudio.paused === false && leaderAudio.paused === false;
-    const threshold = snap || rateChanged ? SYNC_PHASE_SNAP : SYNC_PHASE_FOLLOW;
-    const shouldSeek = (snap || (playingPair && !followerBusy(deck))) && Math.abs(next - ownTime) >= threshold;
-    if (shouldSeek) {
-      follower.jogCommand = null;
-      followerAudio.cancelPendingSeek?.();
-      followerAudio.currentTime = next;
-    }
-    if (rateChanged || shouldSeek) scheduleRender();
+    if (!found) return false;
+    const rateChanged = Math.abs((Number(deckOf(state, deck)?.rate) || 0) - found.plan.rate) > 0.0001;
+    if (rateChanged) applyRate(deck, found.plan.rate);
+    const aligned = syncPlanFor(deck, leaderName);
+    if (!aligned) return false;
+    const sought = writeSyncSeek(deck, aligned.plan.time + slipWall * aligned.plan.rate);
+    const after = syncPlanFor(deck, leaderName);
+    rememberSync(deck, leaderName, slipWallOf(after));
+    if (rateChanged || sought) scheduleRender();
     return true;
   }
 
@@ -752,15 +792,57 @@ export function createActions(deps) {
     const follower = deckOf(state, deck);
     if (!follower?.syncing) return false;
     const leaderName = otherDeck(deck);
-    if (!leaderName) {
+    const leader = leaderName ? deckOf(state, leaderName) : null;
+    const followerAudio = audios[deck];
+    const leaderAudio = leaderName ? audios[leaderName] : null;
+    if (!leaderName || !leader || !followerAudio || !leaderAudio) {
       releaseDeckSync(deck);
       return false;
     }
-    if (followerBusy(deck)) return true;
-    if (!applySync(deck, leaderName, false)) {
+    if (followerBusy(deck)) {
+      const watch = syncWatch[deck];
+      if (watch) {
+        watch.leaderTime = Number(leaderAudio.currentTime) || 0;
+        watch.at = now();
+        watch.leaderPaused = leaderAudio.paused !== false;
+        watch.leaderRate = Number(leader.rate) || 0;
+      }
+      return true;
+    }
+    const found = syncPlanFor(deck, leaderName);
+    if (!found) {
       releaseDeckSync(deck);
       return false;
     }
+    const watch = syncWatch[deck];
+    const dt = watch ? Math.max(0, (now() - watch.at) / 1000) : 0;
+    const leaderJump = watch
+      ? playheadResidual(watch.leaderTime, Number(leaderAudio.currentTime) || 0, watch.leaderRate, watch.leaderPaused, dt)
+      : 0;
+    const followerJump = watch
+      ? playheadResidual(
+          watch.followerTime,
+          Number(followerAudio.currentTime) || 0,
+          watch.followerRate,
+          watch.followerPaused,
+          dt,
+        )
+      : 0;
+    const quarter = leader.bpm > 0 ? (60 / leader.bpm) * SYNC_JUMP_BEATS : Infinity;
+    const masterJumped = Math.abs(leaderJump) > quarter;
+    const followerNudged = Math.abs(followerJump) > SYNC_NUDGE_SECONDS;
+    if (masterJumped) {
+      if (!alignSync(deck, leaderName, watch?.slipWall || 0)) {
+        releaseDeckSync(deck);
+        return false;
+      }
+      return true;
+    }
+    const rateChanged = Math.abs((Number(follower.rate) || 0) - found.plan.rate) > 0.0001;
+    if (rateChanged) applyRate(deck, found.plan.rate);
+    const slipped = syncPlanFor(deck, leaderName) || found;
+    const slip = followerNudged || rateChanged || !watch ? slipWallOf(slipped) : watch.slipWall;
+    rememberSync(deck, leaderName, slip);
     return true;
   }
 
@@ -791,8 +873,9 @@ export function createActions(deps) {
     follower.syncing = true;
     releaseJogHear(deck);
     follower.jogCommand = null;
-    if (!applySync(deck, leaderName, true)) {
+    if (!alignSync(deck, leaderName, 0)) {
       follower.syncing = false;
+      syncWatch[deck] = null;
       cancelSyncLoop();
       scheduleRender();
       return;
