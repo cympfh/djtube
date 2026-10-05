@@ -234,6 +234,7 @@ def test_readme_and_docker_contract():
     assert "画面上部の「Cookie」" not in readme
     assert "再生が失敗する前でも" in readme
     assert "計測中" in readme
+    assert "15 分より長い曲も「– BPM」のまま" in readme
     assert "測っているあいだも、そのデッキは再生できる" in readme
     assert "canplay" not in readme
     assert "AudioContext" not in readme
@@ -260,6 +261,7 @@ def test_readme_and_docker_contract():
     assert "ボリュームを付けません" in agent
     assert "未実装" in agent
     assert "計測中" in agent
+    assert "15 分を超える曲" in agent
     assert "canplay" in agent
     assert "BEAT SYNC" in agent
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")

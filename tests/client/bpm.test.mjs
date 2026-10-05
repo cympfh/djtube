@@ -2,7 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createActions, freshState } from "../../djtube/static/actions.js";
-import { analyzeBpm, bpmAudioRequest, bpmText, heardBpm, mixToMono } from "../../djtube/static/bpm.js";
+import {
+  BPM_MAX_BYTES,
+  BPM_MAX_TRACK_SECONDS,
+  analysisWindow,
+  analyzeBpm,
+  bpmAudioRequest,
+  bpmText,
+  heardBpm,
+  mixToMono,
+} from "../../djtube/static/bpm.js";
 
 function clickTrack({ bpm = 120, sampleRate = 44100, lead = 0, seconds = 8, amplitude = 1 } = {}) {
   const total = Math.floor(sampleRate * (lead + seconds));
@@ -32,6 +41,59 @@ function assertClick(result, bpm, lead) {
   const error = beatError(result.beatOffset, lead, bpm);
   assert.ok(error <= 0.02, `beat ${result.beatOffset} vs ${lead} (err ${error})`);
 }
+
+function drumTrack({ bpm, seconds = 40, kick = [1, 0, 0, 0], hat = 0, hatAmp = 0.3, snare = false, swing = 0, seed = 7 } = {}) {
+  const sampleRate = 44100;
+  const total = sampleRate * seconds;
+  const samples = new Float32Array(total);
+  const beat = 60 / bpm;
+  let state = seed;
+  const noise = () => ((state = (state * 1664525 + 1013904223) >>> 0) / 4294967296) * 2 - 1;
+  const add = (time, frequency, amplitude, decay, noisy) => {
+    const origin = Math.round(time * sampleRate);
+    const limit = Math.min(total - origin, Math.floor(sampleRate * 0.25));
+    for (let index = 0; index < limit; index += 1) {
+      const secondsAt = index / sampleRate;
+      const wave = noisy ? noise() : Math.sin(2 * Math.PI * frequency * secondsAt);
+      samples[origin + index] += amplitude * Math.exp(-secondsAt / decay) * wave;
+    }
+  };
+  for (let step = 0; step * beat < seconds - 1; step += 1) {
+    const time = 0.5 + step * beat;
+    if (kick[step % kick.length]) add(time, 55, 0.8, 0.06, false);
+    if (snare && step % 2 === 1) add(time, 0, 0.5, 0.05, true);
+    if (hat) {
+      for (let hit = 0; hit < hat; hit += 1) {
+        const swingAt = hit ? beat * (hit / hat + (hit % 2 ? swing : 0)) : 0;
+        add(time + swingAt, 0, hatAmp, 0.01, true);
+      }
+    }
+  }
+  return samples;
+}
+
+test("drum patterns read within 0.2 BPM", () => {
+  const cases = [
+    ["decaying kicks", { bpm: 120, kick: [1] }],
+    ["kick every bar", { bpm: 120 }],
+    ["kick and snare", { bpm: 120, snare: true }],
+    ["eighth hats", { bpm: 90, hat: 2 }],
+    ["backbeat and eighth hats", { bpm: 90, kick: [1, 0, 1, 0], snare: true, hat: 2 }],
+    ["sixteenth hats", { bpm: 85, kick: [1, 0, 1, 0], snare: true, hat: 4, hatAmp: 0.2 }],
+    ["offbeat hats", { bpm: 128, hat: 2, hatAmp: 0.4 }],
+    ["quiet hats", { bpm: 128, hat: 2, hatAmp: 0.05 }],
+    ["fast kick and snare", { bpm: 174, kick: [1, 0, 0, 0], snare: true, hat: 2 }],
+    ["swung hats", { bpm: 100, kick: [1, 0, 1, 0], snare: true, hat: 2, swing: 0.08 }],
+    ["slow backbeat", { bpm: 75, kick: [1, 0, 0, 0], snare: true }],
+    ["half-time hats", { bpm: 140, kick: [1, 0, 0, 0], hat: 2 }],
+    ["slow kick and snare", { bpm: 70, snare: true }],
+  ];
+  for (const [name, options] of cases) {
+    const result = analyzeBpm(drumTrack(options), 44100);
+    assert.ok(result, name);
+    assert.ok(Math.abs(result.bpm - options.bpm) <= 0.2, `${name} ${result.bpm}`);
+  }
+});
 
 test("energy autocorrelation reads a click track and ignores the tail and silence", () => {
   assert.deepEqual(Object.keys(bpmAudioRequest("/djtube/", "abcdefghijk")), ["url"]);
@@ -69,6 +131,19 @@ test("energy autocorrelation reads a click track and ignores the tail and silenc
     noise[index] = (seed / 4294967296) * 2 - 1;
   }
   assert.equal(analyzeBpm(noise, sampleRate), null);
+
+  const rate = 44100;
+  const long = new Float32Array(rate * 90);
+  long.set(clickTrack({ bpm: 120, sampleRate: rate, lead: 2, seconds: 36 }), 0);
+  for (let index = rate * 40; index < long.length; index += rate) long[index] = 1;
+  const windowed = analysisWindow([long, new Float32Array(long.length)], rate);
+  assert.ok(windowed.samples.length < rate * 31);
+  assert.ok(windowed.samples.length > rate * 29);
+  assert.ok(windowed.origin > 1.9 && windowed.origin <= 2);
+  const windowedBpm = analyzeBpm(windowed.samples, rate);
+  assert.ok(Math.abs(windowedBpm.bpm - 120) <= 0.5);
+  assert.ok(beatError(windowedBpm.beatOffset + windowed.origin, 2, 120) <= 0.02);
+  assert.ok(Math.abs(windowed.samples[Math.round((2 - windowed.origin) * rate)] - 0.5) < 1e-6);
 });
 
 function harness(overrides = {}) {
@@ -394,4 +469,104 @@ test("BPM failure still closes the temporary AudioContext and leaves playback re
   await quiet.actions.onDeckReady("A");
   assert.equal(log.opened, 1);
   assert.equal(bpmText(quiet.state.decks.A), "– BPM");
+});
+
+test("a long track is not fetched and a huge body is not decoded", async () => {
+  let fetches = 0;
+  const { state, audios, actions } = harness({
+    async fetch() {
+      fetches += 1;
+      throw new Error("fetched");
+    },
+  });
+  await actions.loadTrack("A", { id: "abcdefghijk", title: "長い" });
+  state.decks.A.status = "preparing";
+  audios.A.duration = BPM_MAX_TRACK_SECONDS + 1;
+  await actions.onDeckReady("A");
+  assert.equal(fetches, 0);
+  assert.equal(state.decks.A.status, "ready");
+  assert.equal(state.decks.A.bpm, null);
+  assert.equal(state.decks.A.bpmMeasuring, false);
+  assert.equal(bpmText(state.decks.A), "– BPM");
+  await actions.onDeckReady("A");
+  assert.equal(fetches, 0);
+
+  audios.A.duration = Infinity;
+  state.decks.A.status = "preparing";
+  state.decks.A.gen += 1;
+  await actions.onDeckReady("A");
+  assert.equal(fetches, 0);
+  assert.equal(bpmText(state.decks.A), "– BPM");
+
+  let buffered = 0;
+  let cancelled = 0;
+  const huge = harness({
+    async fetch() {
+      return {
+        ok: true,
+        headers: {
+          get(name) {
+            return name.toLowerCase() === "content-length" ? String(BPM_MAX_BYTES + 1) : null;
+          },
+        },
+        body: {
+          cancel() {
+            cancelled += 1;
+            return Promise.resolve();
+          },
+        },
+        arrayBuffer() {
+          buffered += 1;
+          return Promise.resolve(new ArrayBuffer(8));
+        },
+      };
+    },
+  });
+  await huge.actions.loadTrack("A", { id: "abcdefghijk", title: "大きい" });
+  huge.state.decks.A.status = "preparing";
+  await huge.actions.onDeckReady("A");
+  assert.equal(buffered, 0);
+  assert.equal(cancelled, 1);
+  assert.equal(huge.state.decks.A.bpm, null);
+  assert.equal(huge.state.decks.A.bpmMeasuring, false);
+  assert.equal(bpmText(huge.state.decks.A), "– BPM");
+  assert.equal(huge.state.decks.A.status, "ready");
+});
+
+test("decode prefers a one-channel offline context at 22050", async () => {
+  const calls = [];
+  const previousOffline = globalThis.OfflineAudioContext;
+  const previousLive = globalThis.AudioContext;
+  globalThis.OfflineAudioContext = function OfflineAudioContext(channels, length, rate) {
+    calls.push([channels, length, rate]);
+    return {
+      decodeAudioData() {
+        return Promise.resolve({
+          numberOfChannels: 1,
+          sampleRate: 22050,
+          getChannelData() {
+            return clickTrack({ bpm: 100, sampleRate: 22050, lead: 0.2, seconds: 8 });
+          },
+        });
+      },
+    };
+  };
+  delete globalThis.AudioContext;
+  try {
+    const { state, actions } = harness({
+      async fetch() {
+        return { ok: true, arrayBuffer: async () => new ArrayBuffer(4) };
+      },
+    });
+    await actions.loadTrack("A", { id: "abcdefghijk", title: "曲" });
+    await actions.onDeckReady("A");
+    assert.deepEqual(calls, [[1, 1, 22050]]);
+    assert.ok(Math.abs(state.decks.A.bpm - 100) <= 0.5);
+    assert.ok(beatError(state.decks.A.beatOffset, 0.2, 100) <= 0.02);
+  } finally {
+    if (previousOffline === undefined) delete globalThis.OfflineAudioContext;
+    else globalThis.OfflineAudioContext = previousOffline;
+    if (previousLive === undefined) delete globalThis.AudioContext;
+    else globalThis.AudioContext = previousLive;
+  }
 });

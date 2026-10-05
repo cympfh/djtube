@@ -1,4 +1,10 @@
-import { analyzeBpm, bpmAudioRequest, mixToMono } from "./bpm.js";
+import {
+  BPM_MAX_BYTES,
+  BPM_MAX_TRACK_SECONDS,
+  analysisWindow,
+  analyzeBpm,
+  bpmAudioRequest,
+} from "./bpm.js";
 import { EQ_BANDS, clampEqUnit, eqGainDb, eqUnitFromMidi } from "./eq.js";
 import { clampFilterUnit, filterUnitFromMidi } from "./filter.js";
 import { deckGains } from "./gains.js";
@@ -280,13 +286,42 @@ export function createActions(deps) {
     for (let index = 0; index < count; index += 1) channels.push(buffer.getChannelData(index));
     const sampleRate = Number(buffer.sampleRate);
     if (!(sampleRate > 0)) return null;
-    return { samples: mixToMono(channels), sampleRate };
+    return analysisWindow(channels, sampleRate);
   }
 
   function defaultOpenAudioContext() {
+    const Offline = globalThis.OfflineAudioContext || globalThis.webkitOfflineAudioContext;
+    if (typeof Offline === "function") {
+      try {
+        return new Offline(1, 1, 22050);
+      } catch {
+        /* a live context can still decode */
+      }
+    }
     const Ctx = globalThis.AudioContext || globalThis.webkitAudioContext;
     if (typeof Ctx !== "function") return null;
     return new Ctx();
+  }
+
+  function trackTooLong(deck) {
+    const duration = audios[deck]?.duration;
+    if (duration === Infinity) return true;
+    return typeof duration === "number" && Number.isFinite(duration) && duration > BPM_MAX_TRACK_SECONDS;
+  }
+
+  function responseTooLarge(response) {
+    const raw = response?.headers?.get?.("content-length");
+    if (raw == null || raw === "") return false;
+    const value = Number(raw);
+    return Number.isFinite(value) && value > BPM_MAX_BYTES;
+  }
+
+  async function releaseBody(response) {
+    try {
+      if (typeof response?.body?.cancel === "function") await response.body.cancel();
+    } catch {
+      /* the unread body is dropped */
+    }
   }
 
   async function fetchAudioBytes(id, signal) {
@@ -296,6 +331,10 @@ export function createActions(deps) {
     const doFetch = typeof deps.fetch === "function" ? deps.fetch : fetch;
     const response = await doFetch(url, { signal });
     if (!response?.ok) throw new Error("audio");
+    if (responseTooLarge(response)) {
+      await releaseBody(response);
+      return null;
+    }
     return response.arrayBuffer();
   }
 
@@ -326,10 +365,15 @@ export function createActions(deps) {
 
   async function readTrackBpm(id, signal) {
     const bytes = await fetchAudioBytes(id, signal);
-    if (signal?.aborted) return null;
+    if (signal?.aborted || !bytes) return null;
     const decoded = await decodeAudioBytes(bytes, signal);
     if (!decoded || signal?.aborted) return null;
-    return analyzeBpm(decoded.samples, decoded.sampleRate);
+    const result = analyzeBpm(decoded.samples, decoded.sampleRate);
+    const origin = Number(decoded.origin);
+    if (result && Number.isFinite(origin) && origin > 0) {
+      result.beatOffset = Math.round((result.beatOffset + origin) * 1e5) / 1e5;
+    }
+    return result;
   }
 
   function beginBpm(deck) {
@@ -344,6 +388,13 @@ export function createActions(deps) {
     watch.forGen = gen;
     const token = ++watch.token;
     const id = deckState.id;
+    if (trackTooLong(deck)) {
+      deckState.bpm = null;
+      deckState.beatOffset = null;
+      deckState.bpmMeasuring = false;
+      scheduleRender();
+      return Promise.resolve();
+    }
     deckState.bpm = null;
     deckState.beatOffset = null;
     deckState.bpmMeasuring = true;
