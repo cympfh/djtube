@@ -969,11 +969,7 @@ fetch(`${prefix}/api/health`)
 actions.setCrossfader(state.crossfader);
 startDeckAudio(audios, {
   onReady(deck) {
-    const deckState = state.decks[deck];
-    if (deckState.id && deckState.status === "preparing") {
-      deckState.status = "ready";
-      scheduleRender();
-    }
+    actions.onDeckReady(deck);
   },
   onPlaying(deck) {
     const deckState = state.decks[deck];
@@ -1003,6 +999,7 @@ startDeckAudio(audios, {
   onError(deck) {
     const deckState = state.decks[deck];
     if (!deckState.id) return;
+    actions.onDeckError(deck);
     const videoId = deckState.id;
     deckState.status = "error";
     deckState.playing = false;

@@ -1,8 +1,16 @@
+import {
+  BPM_MAX_BYTES,
+  BPM_MAX_TRACK_SECONDS,
+  analysisWindow,
+  analyzeBpm,
+  bpmAudioRequest,
+} from "./bpm.js";
 import { EQ_BANDS, clampEqUnit, eqGainDb, eqUnitFromMidi } from "./eq.js";
 import { clampFilterUnit, filterUnitFromMidi } from "./filter.js";
 import { deckGains } from "./gains.js";
 import { JOG_RELEASE_MS, jogReleaseHear, jogSpinPlan } from "./jogspin.js";
 import { createPlaylistActions, freshPlaylistState, trackSnapshot } from "./playlists.js";
+import { publicPrefix } from "./prefix.js";
 import { clampRate, rateFromMidi } from "./rate.js";
 import { commandedSeekLanded } from "./seekland.js";
 
@@ -22,6 +30,7 @@ export function freshDeck() {
     rate: 1,
     bpm: null,
     beatOffset: null,
+    bpmMeasuring: false,
     volume: 1,
     eq: { high: 0.5, mid: 0.5, low: 0.5 },
     eqError: "",
@@ -75,6 +84,10 @@ function emptySpin() {
 export function createActions(deps) {
   const { state, audios } = deps;
   const jogSpin = { A: emptySpin(), B: emptySpin() };
+  const bpmWatch = {
+    A: { token: 0, forGen: null, controller: null },
+    B: { token: 0, forGen: null, controller: null },
+  };
 
   function scheduleRender() {
     deps.scheduleRender?.();
@@ -227,11 +240,198 @@ export function createActions(deps) {
     }
   }
 
+  function stopBpm(deck) {
+    const watch = bpmWatch[deck];
+    if (!watch) return;
+    watch.token += 1;
+    watch.forGen = null;
+    const controller = watch.controller;
+    watch.controller = null;
+    controller?.abort();
+    const deckState = deckOf(state, deck);
+    if (!deckState) return;
+    deckState.bpm = null;
+    deckState.beatOffset = null;
+    deckState.bpmMeasuring = false;
+  }
+
+  function applyBpmResult(deck, token, gen, result) {
+    const watch = bpmWatch[deck];
+    const deckState = deckOf(state, deck);
+    if (!watch || !deckState || watch.token !== token || deckState.gen !== gen) return;
+    watch.controller = null;
+    deckState.bpmMeasuring = false;
+    const bpm = Number(result?.bpm);
+    const beatOffset = Number(result?.beatOffset);
+    if (Number.isFinite(bpm) && bpm > 0 && Number.isFinite(beatOffset) && beatOffset >= 0) {
+      deckState.bpm = bpm;
+      deckState.beatOffset = beatOffset;
+    } else {
+      deckState.bpm = null;
+      deckState.beatOffset = null;
+    }
+    scheduleRender();
+  }
+
+  function copyAudioBytes(bytes) {
+    if (bytes instanceof ArrayBuffer) return bytes.slice(0);
+    if (ArrayBuffer.isView(bytes)) return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    return bytes;
+  }
+
+  function pcmFromDecoded(buffer) {
+    const count = Number(buffer?.numberOfChannels) || 0;
+    if (!count || typeof buffer.getChannelData !== "function") return null;
+    const channels = [];
+    for (let index = 0; index < count; index += 1) channels.push(buffer.getChannelData(index));
+    const sampleRate = Number(buffer.sampleRate);
+    if (!(sampleRate > 0)) return null;
+    return analysisWindow(channels, sampleRate);
+  }
+
+  function defaultOpenAudioContext() {
+    const Offline = globalThis.OfflineAudioContext || globalThis.webkitOfflineAudioContext;
+    if (typeof Offline === "function") {
+      try {
+        return new Offline(1, 1, 22050);
+      } catch {
+        /* a live context can still decode */
+      }
+    }
+    const Ctx = globalThis.AudioContext || globalThis.webkitAudioContext;
+    if (typeof Ctx !== "function") return null;
+    return new Ctx();
+  }
+
+  function trackTooLong(deck) {
+    const duration = audios[deck]?.duration;
+    if (duration === Infinity) return true;
+    return typeof duration === "number" && Number.isFinite(duration) && duration > BPM_MAX_TRACK_SECONDS;
+  }
+
+  function responseTooLarge(response) {
+    const raw = response?.headers?.get?.("content-length");
+    if (raw == null || raw === "") return false;
+    const value = Number(raw);
+    return Number.isFinite(value) && value > BPM_MAX_BYTES;
+  }
+
+  async function releaseBody(response) {
+    try {
+      if (typeof response?.body?.cancel === "function") await response.body.cancel();
+    } catch {
+      /* the unread body is dropped */
+    }
+  }
+
+  async function fetchAudioBytes(id, signal) {
+    if (typeof deps.fetchAudio === "function") return deps.fetchAudio(id, { signal });
+    const prefix = typeof deps.prefix === "string" && deps.prefix ? deps.prefix : publicPrefix();
+    const { url } = bpmAudioRequest(prefix, id);
+    const doFetch = typeof deps.fetch === "function" ? deps.fetch : fetch;
+    const response = await doFetch(url, { signal });
+    if (!response?.ok) throw new Error("audio");
+    if (responseTooLarge(response)) {
+      await releaseBody(response);
+      return null;
+    }
+    return response.arrayBuffer();
+  }
+
+  async function decodeAudioBytes(bytes, signal) {
+    if (typeof deps.decodeAudio === "function") {
+      const decoded = await deps.decodeAudio(bytes);
+      if (signal?.aborted || !decoded) return null;
+      return decoded;
+    }
+    let context = null;
+    try {
+      const open = typeof deps.openAudioContext === "function" ? deps.openAudioContext : defaultOpenAudioContext;
+      context = open();
+      if (!context || typeof context.decodeAudioData !== "function") return null;
+      const decoded = await context.decodeAudioData(copyAudioBytes(bytes));
+      if (signal?.aborted) return null;
+      return pcmFromDecoded(decoded);
+    } finally {
+      if (context && typeof context.close === "function") {
+        try {
+          await context.close();
+        } catch {
+          /* the temporary context is finished */
+        }
+      }
+    }
+  }
+
+  async function readTrackBpm(id, signal) {
+    const bytes = await fetchAudioBytes(id, signal);
+    if (signal?.aborted || !bytes) return null;
+    const decoded = await decodeAudioBytes(bytes, signal);
+    if (!decoded || signal?.aborted) return null;
+    const result = analyzeBpm(decoded.samples, decoded.sampleRate);
+    const origin = Number(decoded.origin);
+    if (result && Number.isFinite(origin) && origin > 0) {
+      result.beatOffset = Math.round((result.beatOffset + origin) * 1e5) / 1e5;
+    }
+    return result;
+  }
+
+  function beginBpm(deck) {
+    const deckState = deckOf(state, deck);
+    const watch = bpmWatch[deck];
+    if (!deckState?.id || !watch || deckState.status !== "ready") return Promise.resolve();
+    const gen = deckState.gen;
+    if (watch.forGen === gen) return Promise.resolve();
+    watch.controller?.abort();
+    const controller = typeof AbortController === "function" ? new AbortController() : { abort() {}, signal: undefined };
+    watch.controller = controller;
+    watch.forGen = gen;
+    const token = ++watch.token;
+    const id = deckState.id;
+    if (trackTooLong(deck)) {
+      deckState.bpm = null;
+      deckState.beatOffset = null;
+      deckState.bpmMeasuring = false;
+      scheduleRender();
+      return Promise.resolve();
+    }
+    deckState.bpm = null;
+    deckState.beatOffset = null;
+    deckState.bpmMeasuring = true;
+    scheduleRender();
+    return Promise.resolve()
+      .then(() => readTrackBpm(id, controller.signal))
+      .then((result) => {
+        applyBpmResult(deck, token, gen, result);
+      })
+      .catch(() => {
+        applyBpmResult(deck, token, gen, null);
+      });
+  }
+
+  function onDeckReady(deck) {
+    const deckState = deckOf(state, deck);
+    if (!deckState?.id) return Promise.resolve();
+    if (deckState.status === "preparing") deckState.status = "ready";
+    const pending = deckState.status === "ready" ? beginBpm(deck) : Promise.resolve();
+    scheduleRender();
+    return pending;
+  }
+
+  function onDeckError(deck) {
+    const deckState = deckOf(state, deck);
+    if (!deckState) return;
+    stopBpm(deck);
+    if (bpmWatch[deck]) bpmWatch[deck].forGen = deckState.gen;
+    scheduleRender();
+  }
+
   async function loadTrack(deck, track) {
     const deckState = deckOf(state, deck);
     const audio = audios[deck];
     if (!deckState || !track?.id || typeof audio.loadVideo !== "function") return;
     deckState.gen += 1;
+    stopBpm(deck);
     const gen = deckState.gen;
     deckState.track = trackSnapshot(track);
     deckState.id = track.id;
@@ -247,8 +447,6 @@ export function createActions(deps) {
     deckState.discWasPlaying = false;
     deckState.jogCommand = null;
     deckState.rate = 1;
-    deckState.bpm = null;
-    deckState.beatOffset = null;
     finishJogHear(deck, "drop");
     audio.cancelPendingSeek?.();
     audio.pause();
@@ -655,6 +853,8 @@ export function createActions(deps) {
     loadSelected,
     loadOpenSelection,
     loadTrack,
+    onDeckReady,
+    onDeckError,
     togglePlay,
     pressDisc,
     cue,
