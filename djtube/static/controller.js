@@ -18,6 +18,11 @@
 // Deck 2 (channel 1, right) is deck B. The LSB is CC 51 (0x33) and is not
 // mapped. Notes 102 and 82 are fader-start play/cue, not the level.
 // The other LSB companions (CC 32, 39, 43, 47, and crossfader CC 63) are not mapped.
+// Button LEDs are MIDI-OUT note-on. PLAY/PAUSE (E1 fig 1-1) is 90/91 0B.
+// BEAT SYNC press (E1, note 0x58) is 90/91 58. Data 2 OFF=0x00, ON=0x7F.
+// Mixxx also lights play_indicator on note 0x47 (shift layer). Note 0x0E is
+// the Shift+PLAY reverseroll input, not that lamp. Long-press sync (0x5C)
+// has no MIDI-OUT.
 // CFX (Sound Color FX) MSB is on the mixer channel, not the deck channel.
 // Deck 1 (left, A) is CC 23 (0x17). Deck 2 (right, B) is CC 24 (0x18).
 // Official DDJ-FLX4 MIDI Message List E1, figure 3-5, status 0xB6.
@@ -29,6 +34,9 @@ const DECK_B = 1;
 const MIXER = 6;
 
 const PLAY = 0x0b;
+// Shift-layer PLAY lamp. Mixxx Pioneer-DDJ-FLX4.midi.xml play_indicator
+// midino 0x47 on 0x90/0x91. Not note 0x0E (E1 +SHIFT PLAY, Mixxx reverseroll).
+const PLAY_SHIFT = 0x47;
 const CUE = 0x0c;
 const LOAD_A = 0x46;
 const LOAD_B = 0x47;
@@ -179,6 +187,127 @@ export function dispatchControllerEvent(msg, actions, map = FLX4_MAP) {
   return true;
 }
 
+const LED_ON = 0x7f;
+const LED_OFF = 0x00;
+
+/**
+ * MIDI-OUT for one FLX4 button lamp.
+ * DDJ-FLX4 MIDI Message List E1: deck 1 status 0x90, deck 2 status 0x91.
+ * PLAY/PAUSE note 0x0B. BEAT SYNC press note 0x58.
+ * OFF=0x00, ON=0x7F. Mixxx Pioneer-DDJ-FLX4.midi.xml uses the same bytes
+ * for play_indicator and sync_enabled, and also play_indicator on note 0x47.
+ * @returns {number[] | null}
+ */
+export function flx4LedMessage(kind, deck, lit) {
+  if ((kind !== "play" && kind !== "sync") || (deck !== "A" && deck !== "B")) return null;
+  const status = deck === "A" ? 0x90 : 0x91;
+  const note = kind === "play" ? PLAY : BEAT_SYNC;
+  return [status, note, lit ? LED_ON : LED_OFF];
+}
+
+/** Every MIDI-OUT byte string for one lamp, including the shift-layer PLAY note. */
+export function flx4LedMessages(kind, deck, lit) {
+  const primary = flx4LedMessage(kind, deck, lit);
+  if (!primary) return [];
+  if (kind !== "play") return [primary];
+  return [primary, [primary[0], PLAY_SHIFT, primary[2]]];
+}
+
+export function isFlx4Port(port) {
+  return typeof port?.name === "string" && /flx4/i.test(port.name);
+}
+
+export function createFlx4LedPort() {
+  return { outputs: [], cache: Object.create(null), suspended: false };
+}
+
+/** Live port used by the page. Tests should use createFlx4LedPort. */
+export const flx4LedPort = createFlx4LedPort();
+
+function sendMidiMessages(outputs, messages) {
+  if (!messages.length || !outputs?.length) return;
+  for (const output of outputs) {
+    if (typeof output?.send !== "function") continue;
+    for (const message of messages) {
+      try {
+        output.send(Uint8Array.from(message));
+      } catch {
+        /* port closed between the state change and send */
+      }
+    }
+  }
+}
+
+function cachedLedMessages(port) {
+  const messages = [];
+  for (const deck of ["A", "B"]) {
+    for (const kind of ["play", "sync"]) {
+      const key = `${kind}:${deck}`;
+      if (!Object.prototype.hasOwnProperty.call(port.cache, key)) continue;
+      messages.push(...flx4LedMessages(kind, deck, port.cache[key]));
+    }
+  }
+  return messages;
+}
+
+/** Send PLAY and BEAT SYNC only when that deck's lamp changes. */
+export function paintFlx4Leds(port, deck, playing, syncing) {
+  if (!port || (deck !== "A" && deck !== "B")) return [];
+  const desired = { play: !!playing, sync: !!syncing };
+  const messages = [];
+  for (const kind of ["play", "sync"]) {
+    const key = `${kind}:${deck}`;
+    if (port.cache[key] === desired[kind]) continue;
+    port.cache[key] = desired[kind];
+    messages.push(...flx4LedMessages(kind, deck, desired[kind]));
+  }
+  if (port.suspended) return [];
+  sendMidiMessages(port.outputs, messages);
+  return messages;
+}
+
+/**
+ * pagehide. Force every driven lamp off. The cache is left as it was, and
+ * further paints do not send, so the same state cannot turn the lamps back
+ * on before the document is discarded. pageshow uses resumeFlx4Leds.
+ */
+export function extinguishFlx4Leds(port) {
+  if (!port) return [];
+  port.suspended = true;
+  const messages = [];
+  for (const deck of ["A", "B"]) {
+    messages.push(...flx4LedMessages("play", deck, false));
+    messages.push(...flx4LedMessages("sync", deck, false));
+  }
+  sendMidiMessages(port.outputs, messages);
+  return messages;
+}
+
+/** pageshow after extinguishFlx4Leds. Send the cached lamps again. */
+export function resumeFlx4Leds(port) {
+  if (!port?.suspended) return [];
+  port.suspended = false;
+  const messages = cachedLedMessages(port);
+  sendMidiMessages(port.outputs, messages);
+  return messages;
+}
+
+/** Replace outputs and repeat the lamps already painted, including off. */
+export function setFlx4Outputs(port, outputs) {
+  if (!port) return [];
+  const next = [];
+  if (outputs) {
+    for (const output of outputs) {
+      if (typeof output?.send === "function") next.push(output);
+    }
+  }
+  port.outputs = next;
+  if (port.suspended) return [];
+  const messages = cachedLedMessages(port);
+  sendMidiMessages(port.outputs, messages);
+  return messages;
+}
+
 export function controllerStatusText(status) {
   if (!status || status.state === "idle") return MIDI_STATUS_IDLE;
   if (status.state === "unsupported") return "Web MIDI 非対応";
@@ -213,6 +342,11 @@ export async function connectController(actions, onStatus) {
     const access = await nav.requestMIDIAccess();
     const bind = () => {
       const names = [];
+      const outputs = [];
+      for (const output of access.outputs.values()) {
+        if (isFlx4Port(output)) outputs.push(output);
+      }
+      setFlx4Outputs(flx4LedPort, outputs);
       for (const input of access.inputs.values()) {
         names.push(input.name || "MIDI");
         input.onmidimessage = (event) => {
@@ -240,6 +374,7 @@ export async function connectController(actions, onStatus) {
     bind();
     access.onstatechange = bind;
   } catch {
+    setFlx4Outputs(flx4LedPort, []);
     onStatus?.({
       state: "denied",
       names: [],
