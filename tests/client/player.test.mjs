@@ -43,7 +43,7 @@ import { createScratchVoice } from "../../djtube/static/scratch.js";
 import { RATE_STEP, clampRate, formatRate, rateFromMidi } from "../../djtube/static/rate.js";
 import { cookiePanelOpen, cookiePanelShown, nextChosenOpen } from "../../djtube/static/cookies.js";
 import { createDeckPlayer } from "../../djtube/static/player.js";
-import { DISC_DEGREES_PER_SECOND, discRotationDegrees } from "../../djtube/static/disc.js";
+import { DISC_DEGREES_PER_SECOND, discRotationDegrees, discSpinning, discVisible } from "../../djtube/static/disc.js";
 
 function fakeAudio() {
   return {
@@ -2371,6 +2371,27 @@ test("the thumbnail ring turns with playback time and rests at zero", () => {
   assert.equal(discRotationDegrees(1), 180);
   assert.equal(discRotationDegrees(2), 0);
   assert.equal(discRotationDegrees(2.5), 90);
+});
+
+test("a ready deck shows the disc and does not spin until playback", () => {
+  const id = "abcdefghijk";
+  assert.equal(discVisible({ id, status: "ready", playing: false }), true);
+  assert.equal(discSpinning({ id, status: "ready", playing: false }), false);
+  assert.equal(discVisible({ id, status: "preparing", playing: false }), false);
+  assert.equal(discSpinning({ id, status: "preparing", playing: false }), false);
+  assert.equal(discVisible({ id: "", status: "ready", playing: false }), false);
+  assert.equal(discVisible({ id, status: "empty", playing: false }), false);
+  assert.equal(discVisible({ id, status: "error", playing: false }), false);
+  assert.equal(discVisible({ id, status: "ready", playing: true }), true);
+  assert.equal(discSpinning({ id, status: "ready", playing: true }), true);
+  assert.equal(discSpinning({ id, status: "ready", playing: false, discHeld: true, discWasPlaying: true }), false);
+  assert.equal(discVisible({ id, status: "error", playing: false, discHeld: true, discWasPlaying: true }), true);
+  assert.equal(discVisible({ id, status: "error", playing: true }), true);
+
+  const app = readFileSync(new URL("../../djtube/static/app.js", import.meta.url), "utf8");
+  assert.match(app, /disc\.toggleAttribute\("hidden", !visible\)/);
+  assert.match(app, /if \(spinning && !discFrame\) discFrame = requestAnimationFrame\(tickDiscs\)/);
+  assert.equal(app.includes('toggleAttribute("hidden", !playing && !heldPlaying)'), false);
 });
 
 test("cue while playing returns and pauses", () => {

@@ -17,7 +17,7 @@ import { formatRate } from "./rate.js";
 import { handleKeydown, isSearchTarget, isTypingTarget, legendGroups } from "./keys.js";
 import { createDeckPlayer, startDeckAudio } from "./player.js";
 import { bindCookies, cookiePanelOpen } from "./cookies.js";
-import { discRotationDegrees } from "./disc.js";
+import { discRotationDegrees, discSpinning, discVisible } from "./disc.js";
 import { publicPrefix } from "./prefix.js";
 
 const prefix = publicPrefix();
@@ -404,25 +404,28 @@ let discFrame = 0;
 function paintDisc(deck) {
   const disc = document.getElementById(`disc-${deck}`);
   const deckState = state.decks[deck];
-  const playing = !!deckState.playing && !!deckState.id;
-  const heldPlaying = !!deckState.discHeld && !!deckState.discWasPlaying && !!deckState.id;
-  disc.toggleAttribute("hidden", !playing && !heldPlaying);
+  const spinning = discSpinning(deckState);
+  const held = !!deckState.discHeld && !!deckState.discWasPlaying && !!deckState.id;
+  const visible = discVisible(deckState);
+  disc.toggleAttribute("hidden", !visible);
   const spin = disc.querySelector(".deck-disc-spin");
-  if (!playing) {
-    if (!heldPlaying) spin.removeAttribute("transform");
+  // A hand on the disc keeps the last angle. Playback is what turns it.
+  if (held && !spinning) return;
+  if (!visible) {
+    spin.removeAttribute("transform");
     return;
   }
-  // Media time already advances with this deck's playbackRate.
+  // Media time already advances with this deck's playbackRate. Stopped decks keep that angle and do not spin.
   const angle = discRotationDegrees(audios[deck].currentTime || 0);
   spin.setAttribute("transform", `rotate(${angle.toFixed(2)} 50 50)`);
-  if (!discFrame) discFrame = requestAnimationFrame(tickDiscs);
+  if (spinning && !discFrame) discFrame = requestAnimationFrame(tickDiscs);
 }
 
 function tickDiscs() {
   discFrame = 0;
   let live = false;
   for (const deck of ["A", "B"]) {
-    if (!state.decks[deck].playing || !state.decks[deck].id) continue;
+    if (!discSpinning(state.decks[deck])) continue;
     live = true;
     paintDisc(deck);
   }
