@@ -1,5 +1,5 @@
 import { SOURCE_UNAVAILABLE, createActions, freshState, sourcePlaybackBlocked } from "./actions.js";
-import { connectController, controllerStatusText, midiButtonState } from "./controller.js";
+import { connectController, controllerStatusText, flx4LedPort, midiButtonState, paintFlx4Leds } from "./controller.js";
 import { deckGains } from "./gains.js";
 import { eqGainDb, formatEqDb } from "./eq.js";
 import { formatFilter } from "./filter.js";
@@ -311,6 +311,7 @@ function renderDeck(deck) {
   renderVolume(deck);
   updateTime(deck);
   paintDisc(deck);
+  paintFlx4Leds(flx4LedPort, deck, !!deckState.playing, !!deckState.syncing);
 }
 
 function renderTempo(deck) {

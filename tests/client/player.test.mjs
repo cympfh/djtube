@@ -8,10 +8,15 @@ import {
   JOG_SEARCH_STEP_SECONDS,
   JOG_STEP_SECONDS,
   controllerStatusText,
+  createFlx4LedPort,
   dispatchControllerEvent,
+  flx4LedMessage,
+  isFlx4Port,
   midiButtonState,
   messageFromMidi,
+  paintFlx4Leds,
   relativeMidiTicks,
+  setFlx4Outputs,
 } from "../../djtube/static/controller.js";
 import { bpmText, formatBpm, heardBpm, tempoValueText } from "../../djtube/static/bpm.js";
 import { formatTime } from "../../djtube/static/format.js";
@@ -330,6 +335,75 @@ test("FLX4 map sends notes and CCs to deck actions", async () => {
   assert.equal(controllerStatusText({ state: "unsupported" }), "Web MIDI 非対応");
   assert.equal(controllerStatusText({ state: "denied" }), "MIDI が拒否されました");
   assert.equal(controllerStatusText({ state: "opening" }), "MIDI を開いています…");
+});
+
+test("FLX4 PLAY and BEAT SYNC LEDs follow deck state", () => {
+  assert.deepEqual(flx4LedMessage("play", "A", true), [0x90, 0x0b, 0x7f]);
+  assert.deepEqual(flx4LedMessage("play", "A", false), [0x90, 0x0b, 0x00]);
+  assert.deepEqual(flx4LedMessage("play", "B", true), [0x91, 0x0b, 0x7f]);
+  assert.deepEqual(flx4LedMessage("play", "B", false), [0x91, 0x0b, 0x00]);
+  assert.deepEqual(flx4LedMessage("sync", "A", true), [0x90, 0x58, 0x7f]);
+  assert.deepEqual(flx4LedMessage("sync", "A", false), [0x90, 0x58, 0x00]);
+  assert.deepEqual(flx4LedMessage("sync", "B", true), [0x91, 0x58, 0x7f]);
+  assert.deepEqual(flx4LedMessage("sync", "B", false), [0x91, 0x58, 0x00]);
+  assert.equal(flx4LedMessage("cue", "A", true), null);
+  assert.equal(flx4LedMessage("play", "C", true), null);
+  assert.equal(flx4LedMessage("play", "A", true)[1], 0x0b);
+  assert.equal(flx4LedMessage("sync", "B", true)[1], 0x58);
+
+  assert.equal(isFlx4Port({ name: "DDJ-FLX4" }), true);
+  assert.equal(isFlx4Port({ name: "DDJ-FLX4 - DDJ-FLX4 MIDI 1" }), true);
+  assert.equal(isFlx4Port({ name: "ddj-flx4" }), true);
+  assert.equal(isFlx4Port({ name: "IAC Driver" }), false);
+  assert.equal(isFlx4Port({}), false);
+  assert.equal(isFlx4Port(null), false);
+
+  const sent = [];
+  const output = {
+    send(bytes) {
+      sent.push(Array.from(bytes));
+    },
+  };
+  const other = {
+    send() {
+      throw new Error("closed");
+    },
+  };
+  const port = createFlx4LedPort();
+  assert.deepEqual(paintFlx4Leds(port, "A", false, false), [
+    [0x90, 0x0b, 0x00],
+    [0x90, 0x58, 0x00],
+  ]);
+  assert.deepEqual(sent, []);
+  assert.deepEqual(setFlx4Outputs(port, [output, { name: "no send" }, other]), [
+    [0x90, 0x0b, 0x00],
+    [0x90, 0x58, 0x00],
+  ]);
+  assert.deepEqual(sent, [
+    [0x90, 0x0b, 0x00],
+    [0x90, 0x58, 0x00],
+  ]);
+  sent.length = 0;
+  assert.deepEqual(paintFlx4Leds(port, "A", true, false), [[0x90, 0x0b, 0x7f]]);
+  assert.deepEqual(paintFlx4Leds(port, "B", false, true), [
+    [0x91, 0x0b, 0x00],
+    [0x91, 0x58, 0x7f],
+  ]);
+  assert.deepEqual(paintFlx4Leds(port, "A", true, false), []);
+  assert.deepEqual(paintFlx4Leds(port, "C", true, true), []);
+  assert.deepEqual(sent, [
+    [0x90, 0x0b, 0x7f],
+    [0x91, 0x0b, 0x00],
+    [0x91, 0x58, 0x7f],
+  ]);
+
+  const app = readFileSync(new URL("../../djtube/static/app.js", import.meta.url), "utf8");
+  const renderDeck = app.slice(app.indexOf("function renderDeck"), app.indexOf("function renderTempo"));
+  assert.match(renderDeck, /paintFlx4Leds\(flx4LedPort, deck, !!deckState\.playing, !!deckState\.syncing\)/);
+  const controller = readFileSync(new URL("../../djtube/static/controller.js", import.meta.url), "utf8");
+  const connect = controller.slice(controller.indexOf("export async function connectController"));
+  assert.match(connect, /isFlx4Port\(output\)/);
+  assert.match(connect, /setFlx4Outputs\(flx4LedPort, outputs\)/);
 });
 
 test("MIDI button is on only after a device connects", () => {
