@@ -1149,6 +1149,169 @@ test("releasing the disc does not start a deck that was already paused", async (
   assert.equal(state.decks.A.playing, true);
 });
 
+function elementPlayer(deck) {
+  const player = createDeckPlayer(deck, `player-${deck}`);
+  const listeners = {};
+  let time = 10;
+  let rate = 1;
+  const element = {
+    duration: 200,
+    paused: true,
+    volume: 1,
+    muted: false,
+    src: "",
+    load() {},
+    play() {
+      this.paused = false;
+      return Promise.resolve();
+    },
+    pause() {
+      this.paused = true;
+    },
+    addEventListener(type, fn) {
+      listeners[type] = fn;
+    },
+    emit(type) {
+      listeners[type]?.();
+    },
+  };
+  Object.defineProperty(element, "currentTime", {
+    configurable: true,
+    get() {
+      return time;
+    },
+    set(value) {
+      time = Number(value);
+    },
+  });
+  Object.defineProperty(element, "playbackRate", {
+    configurable: true,
+    get() {
+      return rate;
+    },
+    set(value) {
+      rate = value;
+    },
+  });
+  player.audio = element;
+  return {
+    player,
+    element,
+    timeOf: () => time,
+    rateOf: () => rate,
+  };
+}
+
+test("a pause event that arrives after the platter resumes does not stop the deck", () => {
+  const { state, audios, actions } = harness();
+  const deck = elementPlayer("A");
+  audios.A = deck.player;
+  state.decks.A.id = "abcdefghijk";
+  state.decks.A.status = "ready";
+  deck.player.attach({
+    onPlaying() {
+      state.decks.A.playing = true;
+    },
+    onPaused() {
+      state.decks.A.playing = false;
+    },
+  });
+
+  actions.togglePlay("A");
+  assert.equal(deck.element.paused, false);
+  assert.equal(deck.player.paused, false);
+  assert.equal(state.decks.A.playing, true);
+
+  actions.pressDisc("A", true);
+  assert.equal(deck.element.paused, true);
+  assert.equal(state.decks.A.playing, false);
+  actions.pressDisc("A", false);
+  assert.equal(deck.element.paused, false);
+  assert.equal(deck.player.paused, false);
+  assert.equal(state.decks.A.playing, true);
+
+  deck.element.emit("pause");
+  assert.equal(deck.element.paused, false);
+  assert.equal(deck.player.paused, false);
+  assert.equal(state.decks.A.playing, true);
+
+  deck.element.pause();
+  deck.player.pause();
+  deck.element.emit("pause");
+  assert.equal(deck.element.paused, true);
+  assert.equal(deck.player.paused, true);
+  assert.equal(state.decks.A.playing, false);
+});
+
+test("holding the disc follows the element when the wrapper still says paused", () => {
+  const { state, audios, actions } = harness();
+  const deck = elementPlayer("A");
+  audios.A = deck.player;
+  state.decks.A.id = "abcdefghijk";
+  state.decks.A.status = "ready";
+  deck.element.paused = false;
+  deck.player.paused = true;
+  state.decks.A.playing = false;
+
+  actions.pressDisc("A", true);
+  assert.equal(deck.element.paused, true);
+  assert.equal(state.decks.A.discWasPlaying, true);
+  assert.equal(state.decks.A.playing, false);
+
+  actions.pressDisc("A", false);
+  assert.equal(deck.element.paused, false);
+  assert.equal(deck.player.paused, false);
+  assert.equal(state.decks.A.playing, true);
+  assert.equal(state.decks.A.discHeld, false);
+});
+
+test("FLX4 jog on channel 1 spins deck B and leaves deck A alone", () => {
+  const { state, audios, actions } = harness({
+    deps: {
+      now: () => 1000,
+      later() {
+        return 1;
+      },
+      cancelLater() {},
+    },
+  });
+  const a = elementPlayer("A");
+  const b = elementPlayer("B");
+  audios.A = a.player;
+  audios.B = b.player;
+  for (const name of ["A", "B"]) {
+    state.decks[name].id = "abcdefghijk";
+    state.decks[name].status = "ready";
+    state.decks[name].playing = true;
+    state.decks[name].rate = 1;
+    audios[name].paused = false;
+    audios[name].audio.paused = false;
+    audios[name].audio.currentTime = 10;
+    audios[name].playbackRate = 1;
+  }
+
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb1, 0x22, 0x48])), actions), true);
+  assert.equal(a.rateOf(), 1);
+  assert.equal(a.timeOf(), 10);
+  assert.equal(a.element.paused, false);
+  assert.equal(a.element.muted, false);
+  assert.equal(a.player.paused, false);
+  assert.equal(state.decks.A.playing, true);
+  assert.equal(state.decks.A.rate, 1);
+  assert.equal(b.rateOf(), SPIN_RATE_MAX);
+  assert.ok(Math.abs(b.timeOf() - 10.4) < 1e-9);
+  assert.equal(b.element.muted, false);
+  assert.equal(state.decks.B.rate, 1);
+  assert.equal(state.decks.B.playing, true);
+
+  assert.equal(dispatchControllerEvent(messageFromMidi(new Uint8Array([0xb0, 0x22, 0x42])), actions), true);
+  assert.ok(Math.abs(a.timeOf() - 10.1) < 1e-9);
+  assert.equal(a.rateOf(), 5);
+  assert.equal(b.timeOf(), 10.4);
+  assert.equal(b.rateOf(), SPIN_RATE_MAX);
+  assert.equal(state.decks.B.playing, true);
+});
+
 test("+ seeks deck B backward about 10 seconds from the commanded position", () => {
   const { state, audios, actions } = harness();
   state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 120 }];
@@ -3169,6 +3332,38 @@ test("letting go of a playing deck returns to that deck's tempo and keeps playin
   assert.equal(state.decks.A.playing, true);
   assert.equal(state.decks.A.rate, 1.25);
   assert.equal(rig.time, 30);
+});
+
+test("a forward jog does not borrow a stopped spin when the element is already playing", async () => {
+  const rig = platterHarness();
+  const { state, audios, actions, player, element } = rig;
+  state.results = [{ id: "abcdefghijk", title: "曲", channel: "", duration: 200 }];
+  await actions.loadSelected("A");
+  state.decks.A.status = "ready";
+  rig.at(30);
+  actions.setRate("A", 1.25);
+  actions.setRate("B", 0.5);
+  audios.B.currentTime = 4;
+  element.paused = false;
+  player.paused = true;
+  state.decks.A.playing = false;
+
+  rig.now = 2000;
+  assert.equal(vinylTick(actions, 68), true);
+  assert.equal(player.jogHear.hear, "track");
+  assert.equal(element.paused, false);
+  assert.equal(rig.rate, 0.2 / JOG_FIRST_TICK_SECONDS);
+  rig.release();
+  assert.equal(element.paused, false);
+  assert.equal(player.paused, false);
+  assert.equal(state.decks.A.playing, true);
+  assert.equal(rig.rate, 1.25);
+  assert.equal(state.decks.A.rate, 1.25);
+  assert.equal(rig.time, 30.2);
+  assert.equal(audios.B.currentTime, 4);
+  assert.equal(audios.B.playbackRate, 0.5);
+  assert.equal(audios.B.paused, true);
+  assert.equal(state.decks.B.playing, false);
 });
 
 test("keyboard jog uses the same scratch and spin-speed split", async () => {
