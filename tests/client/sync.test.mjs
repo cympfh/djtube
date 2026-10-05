@@ -179,28 +179,33 @@ function fakeAudio() {
 }
 
 function step(env) {
-  const tick = env.queued();
-  assert.equal(typeof tick, "function");
-  tick();
+  const batch = [...env.timers.entries()];
+  assert.equal(batch.length, 1);
+  for (const [id] of batch) env.timers.delete(id);
+  for (const [, fn] of batch) fn();
 }
 
 function harness(extra = {}) {
   const state = freshState();
   const audios = { A: fakeAudio(), B: fakeAudio() };
-  let queued = null;
+  const timers = new Map();
+  const clock = { t: 1000 };
+  let nextTimer = 1;
   const actions = createActions({
     state,
     audios,
     prefix: "/djtube",
     scheduleRender() {},
     queryValue: () => "",
-    now: () => 1000,
+    now: () => clock.t,
     later(fn) {
-      queued = fn;
-      return 7;
+      const id = nextTimer;
+      nextTimer += 1;
+      timers.set(id, fn);
+      return id;
     },
-    cancelLater() {
-      queued = null;
+    cancelLater(id) {
+      timers.delete(id);
     },
     async fetchSearch() {
       return { tracks: [] };
@@ -211,7 +216,12 @@ function harness(extra = {}) {
     state,
     audios,
     actions,
-    queued: () => queued,
+    timers,
+    clock,
+    queued() {
+      if (timers.size !== 1) return null;
+      return timers.values().next().value;
+    },
   };
 }
 
@@ -470,7 +480,7 @@ test("a locked deck keeps the other deck's tempo, including half and double", ()
   assert.ok(Math.abs(env.state.decks.A.rate - 1) < 1e-9);
 
   env.actions.setRate("B", 1.1);
-  assert.equal(env.state.decks.A.rate, 1);
+  assert.ok(Math.abs(env.state.decks.A.rate - 1.1) < 1e-9);
   step(env);
   assert.ok(Math.abs(env.state.decks.A.rate - 1.1) < 1e-9);
   assert.ok(Math.abs(env.state.decks.A.rate - 2.2) > 0.5);
@@ -535,6 +545,8 @@ test("a master tempo change updates the follower rate and does not seek", () => 
   const parked = env.audios.A.currentTime;
   for (const rate of [1.04, 1.11, 1.2, 0.9]) {
     env.actions.setRate("B", rate);
+    assert.ok(Math.abs(env.state.decks.A.rate - rate) < 1e-9);
+    assert.equal(env.audios.A.currentTime, parked);
     step(env);
     assert.ok(Math.abs(env.state.decks.A.rate - rate) < 1e-9);
     assert.equal(env.audios.A.currentTime, parked);
@@ -567,6 +579,69 @@ test("changing the follower tempo leaves sync", () => {
   env.actions.setRateFromController("A", 127);
   assert.equal(env.state.decks.A.syncing, false);
   assert.ok(env.state.decks.A.rate > 1.9);
+  assert.equal(env.audios.A.playCalls, 0);
+});
+
+test("starting playback realigns phase and drops a paused slip", () => {
+  const env = harness();
+  arm(env, "A", { bpm: 120, beatOffset: 0, time: 1, rate: 1 });
+  arm(env, "B", { bpm: 120, beatOffset: 0, time: 1, rate: 1 });
+  env.audios.B.paused = false;
+  env.state.decks.B.playing = true;
+  env.actions.syncBeat("A");
+  assert.equal(env.audios.A.paused, true);
+  assert.ok(Math.abs(env.audios.A.currentTime - 1) < 1e-9);
+
+  env.audios.A.currentTime = 1.2;
+  step(env);
+  assert.ok(Math.abs(env.audios.A.currentTime - 1.2) < 1e-9);
+
+  env.clock.t += 1000;
+  env.audios.B.currentTime = 2;
+  env.actions.togglePlay("A");
+  assert.equal(env.audios.A.playCalls, 1);
+  assert.equal(env.audios.A.paused, false);
+  assert.equal(env.audios.B.playCalls, 0);
+  assert.ok(
+    alignError(env.audios.A.currentTime, deck(120, 0, 0), deck(120, 0, env.audios.B.currentTime), 1) < 1e-6,
+  );
+  assert.ok(Math.abs(env.audios.A.currentTime - 1.2) > 0.05);
+
+  env.actions.syncBeat("A");
+  arm(env, "A", { bpm: 120, time: 4, rate: 1 });
+  arm(env, "B", { bpm: 120, time: 4, rate: 1 });
+  env.actions.syncBeat("A");
+  env.audios.A.currentTime += 0.2;
+  step(env);
+  const slipped = env.audios.A.currentTime;
+  env.clock.t += 400;
+  env.actions.togglePlay("B");
+  assert.equal(env.audios.B.playCalls, 1);
+  assert.equal(env.audios.A.playCalls, 0);
+  assert.equal(env.audios.A.paused, true);
+  assert.ok(Math.abs(env.audios.A.currentTime - slipped) > 0.05);
+  assert.ok(
+    alignError(env.audios.A.currentTime, deck(120, 0, 0), deck(120, 0, env.audios.B.currentTime), 1) < 1e-6,
+  );
+});
+
+test("a jog timer does not replace the sync follow timer", () => {
+  const env = harness();
+  arm(env, "A", { bpm: 120, time: 3, rate: 1 });
+  arm(env, "B", { bpm: 120, time: 3, rate: 1 });
+  env.actions.syncBeat("A");
+  assert.equal(env.timers.size, 1);
+  const syncId = env.timers.keys().next().value;
+  env.audios.A.paused = false;
+  env.state.decks.A.playing = true;
+  env.actions.jog("A", 1);
+  assert.equal(env.timers.size, 2);
+  assert.equal(env.timers.has(syncId), true);
+  const jogId = [...env.timers.keys()].find((id) => id !== syncId);
+  const release = env.timers.get(jogId);
+  env.timers.delete(jogId);
+  release();
+  assert.equal(env.timers.has(syncId), true);
   assert.equal(env.audios.A.playCalls, 0);
 });
 

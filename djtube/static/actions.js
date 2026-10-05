@@ -516,12 +516,14 @@ export function createActions(deps) {
     const audio = audios[deck];
     if (!deckState?.id || (deckState.status !== "ready" && deckState.status !== "error")) return;
     if (sourcePlaybackBlocked(deckState)) return;
+    const wasPaused = audio.paused !== false;
     finishJogHear(deck, "keep");
     deckState.playError = "";
     deckState.error = "";
     deckState.status = "ready";
     const pending = audio.play();
     deckState.playing = true;
+    if (wasPaused) alignSyncOnPlay(deck);
     if (pending && typeof pending.catch === "function") {
       pending.catch(() => {
         if (audio.paused) {
@@ -646,6 +648,32 @@ export function createActions(deps) {
     deckState.rate = rate;
     audio.playbackRate = rate;
     scheduleRender();
+    // Tempo sweeps must not wait for the follow tick, or phase walks off.
+    syncFollowerRate(deck);
+  }
+
+  function syncFollowerRate(master) {
+    const followerName = otherDeck(master);
+    const follower = followerName ? deckOf(state, followerName) : null;
+    if (!follower?.syncing) return;
+    const found = syncPlanFor(followerName, master);
+    if (!found) {
+      releaseDeckSync(followerName);
+      return;
+    }
+    const next = found.plan.rate;
+    if (Math.abs((Number(follower.rate) || 0) - next) > 0.0001) {
+      follower.rate = next;
+      const audio = audios[followerName];
+      if (audio) audio.playbackRate = next;
+      scheduleRender();
+    }
+    const watch = syncWatch[followerName];
+    if (!watch) return;
+    watch.leaderRate = Number(deckOf(state, master)?.rate) || 0;
+    watch.followerRate = Number(follower.rate) || 0;
+    const slipped = syncPlanFor(followerName, master);
+    if (slipped) watch.slipWall = slipWallOf(slipped);
   }
 
   function setRate(deck, value) {
@@ -773,7 +801,8 @@ export function createActions(deps) {
     return current - previous - expected;
   }
 
-  // Snap phase, then keep that slip. Used when sync starts and when the leader jumps.
+  // Snap phase, then keep that slip. Play-start passes 0: a jog while stopped
+  // is not a live phase offset. Also used when sync starts and when the leader jumps.
   function alignSync(deck, leaderName, slipWall) {
     const found = syncPlanFor(deck, leaderName);
     if (!found) return false;
@@ -882,6 +911,15 @@ export function createActions(deps) {
     }
     ensureSyncLoop();
     scheduleRender();
+  }
+
+  function alignSyncOnPlay(deck) {
+    for (const name of [deck, otherDeck(deck)]) {
+      const follower = name ? deckOf(state, name) : null;
+      if (!follower?.syncing) continue;
+      const leaderName = otherDeck(name);
+      if (!leaderName || !alignSync(name, leaderName, 0)) releaseDeckSync(name);
+    }
   }
 
   function setEq(deck, band, value) {

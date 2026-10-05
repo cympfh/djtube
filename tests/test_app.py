@@ -246,6 +246,8 @@ def test_readme_and_docker_contract():
     assert "もう一度 `Shift+3` で同期を切る" in readme
     assert "同期中にそのデッキのテンポを動かすと、同期は切れて、動かしたテンポが残る" in readme
     assert "再生位置は動かさない" in readme
+    assert "どちらかが再生を始めたとき" in readme
+    assert "速さはすぐ合う" in readme
     assert "FLX4 の BEAT SYNC" in readme
     assert "一度合わせる" not in readme
     assert "canplay" not in readme

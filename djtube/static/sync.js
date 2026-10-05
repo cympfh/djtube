@@ -60,9 +60,11 @@ function nearestFactor(ratio) {
 
 /**
  * Follower playback rate that shares the leader's groove.
- * Returns null when either BPM or the leader rate is unusable, or when half
- * and double still leave the rate outside 0.5–2. The follower's current rate
- * is not an input: the octave closest to 1× wins. Never clamped.
+ * Returns null when either BPM or the leader rate is unusable.
+ * The follower's current rate is not an input. Half and double are folded
+ * until the rate is as close to 1× as those octaves get, which lands near 1
+ * (about 0.71–1.41). Null is only when it is still outside 0.5–2 after that
+ * limit: an extreme ratio, not a normal half or double. Never clamped.
  */
 export function beatSyncRate(ownBpm, otherBpm, otherRate) {
   if (!finiteBpm(ownBpm) || !finiteBpm(otherBpm) || !positiveRate(otherRate)) return null;
