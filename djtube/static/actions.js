@@ -750,6 +750,7 @@ export function createActions(deps) {
         time: otherTime,
         measuring: leader.bpmMeasuring,
       },
+      syncWatch[deck]?.factor,
     );
     if (!plan) return null;
     return { plan, ownTime };
@@ -789,6 +790,7 @@ export function createActions(deps) {
       leaderRate: Number(leader.rate) || 0,
       followerRate: Number(follower.rate) || 0,
       slipWall: Number.isFinite(slipWall) ? slipWall : 0,
+      factor: syncWatch[deck]?.factor,
     };
   }
 
@@ -894,9 +896,12 @@ export function createActions(deps) {
       releaseDeckSync(deck);
       return;
     }
-    if (!syncPlanFor(deck, leaderName)) return;
+    const picked = syncPlanFor(deck, leaderName);
+    if (!picked) return;
     releaseDeckSync(leaderName);
     follower.syncing = true;
+    // Octave is chosen from the pre-sync tempo and kept for the whole lock.
+    syncWatch[deck] = { factor: picked.plan.factor };
     releaseJogHear(deck);
     follower.jogCommand = null;
     if (!alignSync(deck, leaderName, 0)) {

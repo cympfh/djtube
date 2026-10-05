@@ -4,7 +4,7 @@ import test from "node:test";
 import { createActions, freshState } from "../../djtube/static/actions.js";
 import { FLX4_MAP, dispatchControllerEvent, messageFromMidi } from "../../djtube/static/controller.js";
 import { BINDINGS, handleKeydown, legendGroups } from "../../djtube/static/keys.js";
-import { beatSyncPlan, beatSyncRate, placeSyncTime } from "../../djtube/static/sync.js";
+import { beatSyncFactor, beatSyncPlan, beatSyncRate, placeSyncTime } from "../../djtube/static/sync.js";
 
 function mod(value, period) {
   const wrapped = value % period;
@@ -25,7 +25,7 @@ function alignError(time, own, other, rate) {
   return Math.abs(delta);
 }
 
-/** Closest half / same / double of the master heard tempo, or null if it will not play. */
+/** Log-closest half / same / double, or null if that rate will not play. */
 function expectedRate(ownBpm, ownRate, otherBpm, otherRate) {
   const masterHeard = otherBpm * otherRate;
   const currentHeard = ownBpm * ownRate;
@@ -33,8 +33,8 @@ function expectedRate(ownBpm, ownRate, otherBpm, otherRate) {
   let bestDist = Infinity;
   let bestBias = Infinity;
   for (const factor of [0.5, 1, 2]) {
-    const dist = Math.abs(currentHeard - masterHeard * factor);
-    const bias = Math.abs(factor - 1);
+    const dist = Math.abs(Math.log(currentHeard / (masterHeard * factor)));
+    const bias = Math.abs(Math.log(factor));
     if (dist < bestDist - 1e-9 || (Math.abs(dist - bestDist) <= 1e-9 && bias < bestBias - 1e-9)) {
       bestFactor = factor;
       bestDist = dist;
@@ -50,7 +50,7 @@ function deck(bpm, beatOffset, time, rate = 1) {
   return { bpm, beatOffset, time, rate, measuring: false };
 }
 
-test("sync rate picks half, same, or double closest to the current heard BPM", () => {
+test("sync rate picks half, same, or double by log distance to the current heard BPM", () => {
   assert.equal(beatSyncRate(null, 128, 1, 1), null);
   assert.equal(beatSyncRate(128, null, 1, 1), null);
   assert.equal(beatSyncRate(Number.NaN, 128, 1, 1), null);
@@ -74,11 +74,16 @@ test("sync rate picks half, same, or double closest to the current heard BPM", (
   assert.ok(Math.abs(beatSyncRate(67.9, 135.8, 1, 1.6) - 2) < 1e-9);
   assert.ok(Math.abs(beatSyncRate(135.8, 67.9, 1, 0.55) - 0.5) < 1e-9);
 
-  // A tie on the 1.5× and 0.75× boundaries keeps same, not half or double.
-  assert.equal(beatSyncRate(128, 128, 1, 1.5), 1);
-  assert.equal(beatSyncRate(128, 128, 1, 0.75), 1);
-  assert.equal(beatSyncRate(128, 128, 1, 1.51), 2);
-  assert.equal(beatSyncRate(128, 128, 1, 0.74), 0.5);
+  // Log boundaries are √2 and 1/√2. A tie stays on 1×.
+  assert.equal(beatSyncFactor(128, 128, 1, Math.SQRT2), 1);
+  assert.equal(beatSyncFactor(128, 128, 1, 1 / Math.SQRT2), 1);
+  assert.equal(beatSyncRate(128, 128, 1, Math.SQRT2), 1);
+  assert.equal(beatSyncRate(128, 128, 1, 1 / Math.SQRT2), 1);
+  assert.equal(beatSyncRate(128, 128, 1, Math.SQRT2 + 0.01), 2);
+  assert.equal(beatSyncRate(128, 128, 1, 1 / Math.SQRT2 - 0.01), 0.5);
+  // 1.45 is past √2 and short of the old 1.5 absolute midpoint. 0.74 is still inside 1/√2.
+  assert.equal(beatSyncRate(128, 128, 1, 1.45), 2);
+  assert.equal(beatSyncRate(128, 128, 1, 0.74), 1);
 
   // Four times is only one step away from double, which is playable. Do not fold on to 1×.
   assert.equal(beatSyncRate(100, 400, 1, 1), 2);
@@ -118,6 +123,11 @@ test("sync phase uses beatOffset, currentTime, and rate, including half and doub
   assert.equal(beatSyncPlan(deck(128, 0, 4, 1.9), deck(128, 0, 4, 1.05)), null);
   // 0.6× is closer to half of the leader than to the same tempo, and 0.525× plays.
   assert.ok(Math.abs(beatSyncPlan(deck(128, 0, 4, 0.6), deck(128, 0, 4, 1.05)).rate - 1.05 / 2) < 1e-12);
+  // A stored double stays double even when the current rate would now pick 1×.
+  const held = beatSyncPlan(deck(128, 0, 4, 1.4), deck(128, 0, 4, 1), 2);
+  assert.equal(held.factor, 2);
+  assert.equal(held.rate, 2);
+  assert.equal(beatSyncPlan(deck(128, 0, 4, 1.4), deck(128, 0, 4, 1)).factor, 1);
 
   const samples = [
     { ownBpm: 128, otherBpm: 128, otherRate: 1, ownTime: 10, otherTime: 10.2, ownOffset: 0.1, otherOffset: 0.4 },
@@ -713,6 +723,48 @@ test("sync keeps a tempo that is already near half or double", () => {
   assert.equal(env.state.decks.A.syncing, true);
   assert.ok(Math.abs(env.state.decks.A.rate - 0.5) < 1e-9);
   assert.equal(env.audios.A.playbackRate, 0.5);
+  assert.equal(env.audios.A.playCalls, 0);
+});
+
+test("a locked octave does not flip when the master tempo jumps", () => {
+  const env = harness();
+  // 1 / 0.7 is past √2, so the pre-sync tempo locks double (rate 1.4). Resetting
+  // the master to 1.0 must stay on double (rate 2), not fall back to 1×.
+  arm(env, "A", { bpm: 128, time: 4, rate: 1 });
+  arm(env, "B", { bpm: 128, time: 4, rate: 0.7 });
+  env.actions.syncBeat("A");
+  assert.equal(env.state.decks.A.syncing, true);
+  assert.ok(Math.abs(env.state.decks.A.rate - 1.4) < 1e-9);
+  assert.equal(env.audios.A.playbackRate, env.state.decks.A.rate);
+
+  env.actions.resetRate("B");
+  assert.equal(env.state.decks.B.rate, 1);
+  assert.equal(env.state.decks.A.syncing, true);
+  assert.ok(Math.abs(env.state.decks.A.rate - 2) < 1e-9);
+  assert.equal(env.audios.A.playbackRate, 2);
+  step(env);
+  assert.equal(env.state.decks.A.syncing, true);
+  assert.ok(Math.abs(env.state.decks.A.rate - 2) < 1e-9);
+  assert.equal(env.audios.A.playCalls, 0);
+
+  env.actions.syncBeat("A");
+  assert.equal(env.state.decks.A.syncing, false);
+
+  arm(env, "A", { bpm: 128, time: 4, rate: 1 });
+  arm(env, "B", { bpm: 128, time: 4, rate: 1 });
+  env.actions.syncBeat("A");
+  assert.equal(env.state.decks.A.syncing, true);
+  assert.ok(Math.abs(env.state.decks.A.rate - 1) < 1e-9);
+
+  env.actions.setRate("B", 1.4);
+  assert.equal(env.state.decks.B.rate, 1.4);
+  assert.equal(env.state.decks.A.syncing, true);
+  assert.ok(Math.abs(env.state.decks.A.rate - 1.4) < 1e-9);
+  assert.equal(env.audios.A.playbackRate, env.state.decks.A.rate);
+  step(env);
+  assert.equal(env.state.decks.A.syncing, true);
+  assert.ok(Math.abs(env.state.decks.A.rate - 1.4) < 1e-9);
+  assert.notEqual(env.state.decks.A.rate, 0.7);
   assert.equal(env.audios.A.playCalls, 0);
 });
 
