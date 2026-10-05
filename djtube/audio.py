@@ -137,26 +137,39 @@ def _header_subset(raw: object) -> dict[str, str]:
     return headers
 
 
+def _within_window(stored_at: float, now: float) -> bool:
+    age = now - stored_at
+    return 0 <= age <= CACHE_SECONDS
+
+
 def _entry_from_disk(video_id: object, item: object) -> tuple[str, float, AudioSource] | None:
-    if not isinstance(video_id, str) or not is_video_id(video_id) or not isinstance(item, dict):
+    try:
+        if not isinstance(video_id, str) or not is_video_id(video_id) or not isinstance(item, dict):
+            return None
+        stored_at = item.get("stored_at")
+        if isinstance(stored_at, bool) or not isinstance(stored_at, (int, float)) or not math.isfinite(stored_at):
+            return None
+        stored_at = float(stored_at)
+        url = item.get("url")
+        if not isinstance(url, str) or len(url) > 16384 or not host_allowed(url):
+            return None
+        content_type = item.get("content_type")
+        if not isinstance(content_type, str):
+            return None
+        content_type = content_type.split(";", 1)[0].strip()
+        if (
+            not content_type.startswith("audio/")
+            or len(content_type) > 100
+            or any(char in content_type for char in "\r\n")
+        ):
+            return None
+        return (
+            video_id,
+            stored_at,
+            AudioSource(url=url, content_type=content_type, headers=_header_subset(item.get("headers"))),
+        )
+    except (OverflowError, ValueError, RecursionError):
         return None
-    stored_at = item.get("stored_at")
-    if isinstance(stored_at, bool) or not isinstance(stored_at, (int, float)) or not math.isfinite(stored_at):
-        return None
-    url = item.get("url")
-    if not isinstance(url, str) or len(url) > 16384 or not host_allowed(url):
-        return None
-    content_type = item.get("content_type")
-    if not isinstance(content_type, str):
-        return None
-    content_type = content_type.split(";", 1)[0].strip()
-    if not content_type.startswith("audio/") or len(content_type) > 100 or any(char in content_type for char in "\r\n"):
-        return None
-    return (
-        video_id,
-        float(stored_at),
-        AudioSource(url=url, content_type=content_type, headers=_header_subset(item.get("headers"))),
-    )
 
 
 class AudioCache:
@@ -178,7 +191,7 @@ class AudioCache:
         with self._lock:
             self._ensure_loaded(stamp)
             self._entries[video_id] = (stamp, source)
-            self._write_locked()
+            self._write_locked(stamp)
 
     def recall(self, video_id: str, now: float | None = None) -> AudioSource | None:
         stamp = time.time() if now is None else now
@@ -188,18 +201,19 @@ class AudioCache:
             if cached is None:
                 return None
             stored_at, source = cached
-            if stamp - stored_at > CACHE_SECONDS:
-                self._entries.pop(video_id, None)
-                self._write_locked()
-                return None
-            return source
+            if _within_window(stored_at, stamp):
+                return source
+            self._entries.pop(video_id, None)
+            self._write_locked(stamp)
+            return None
 
     def forget(self, video_id: str) -> None:
         with self._lock:
-            self._ensure_loaded(time.time())
+            stamp = time.time()
+            self._ensure_loaded(stamp)
             if self._entries.pop(video_id, None) is None:
                 return
-            self._write_locked()
+            self._write_locked(stamp)
 
     def clear(self) -> None:
         with self._lock:
@@ -216,12 +230,12 @@ class AudioCache:
             return
         dropped = False
         for video_id, stored_at, source in loaded:
-            if now - stored_at > CACHE_SECONDS:
+            if not _within_window(stored_at, now):
                 dropped = True
                 continue
             self._entries.setdefault(video_id, (stored_at, source))
         if dropped:
-            self._write_locked()
+            self._write_locked(now)
 
     def _read(self) -> list[tuple[str, float, AudioSource]] | None:
         try:
@@ -231,7 +245,7 @@ class AudioCache:
                 log.warning("audio cache unreadable: %s", self.path)
                 return None
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError, RecursionError, OverflowError):
             log.warning("audio cache unreadable: %s", self.path)
             return None
         if not isinstance(raw, dict):
@@ -244,7 +258,10 @@ class AudioCache:
                 parsed.append(entry)
         return parsed
 
-    def _write_locked(self) -> None:
+    def _write_locked(self, now: float) -> None:
+        stale = [video_id for video_id, (stored_at, _) in self._entries.items() if not _within_window(stored_at, now)]
+        for video_id in stale:
+            self._entries.pop(video_id, None)
         if not self._entries:
             self._remove_locked()
             return
@@ -258,11 +275,12 @@ class AudioCache:
             for video_id, (stored_at, source) in self._entries.items()
         }
         text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
-        temporary = self.path.with_name(self.path.name + ".tmp")
+        temporary = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary.write_text(text, encoding="utf-8")
-            os.chmod(temporary, 0o600)
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(text)
             os.replace(temporary, self.path)
         except OSError:
             log.warning("could not write audio cache to %s", self.path)
