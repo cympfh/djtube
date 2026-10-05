@@ -3,9 +3,11 @@
  * rate. Phase is applied when sync starts and when the leader jumps, not on
  * every tick. Nothing here starts, stops, or seeks.
  *
- * Rate is (otherBpm * otherRate) / ownBpm, folded by half and double until it
- * is as close to 1 as those octaves allow. 67.9 against 135.8 stays at 1×.
- * If it is still outside 0.5–2 after folding, there is no rate: do not clamp.
+ * The follower rate makes its heard BPM half, the same, or double the master
+ * heard tempo. Closeness is |ln(currentHeard / targetHeard)| against the
+ * pre-sync heard BPM. The caller stores that factor for the whole lock.
+ * If the rate for that factor is outside 0.5–2, there is no rate: do not
+ * clamp, and do not substitute a farther octave.
  *
  * Phase is wall-clock seconds since the last beat:
  *   mod(currentTime - beatOffset, 60 / bpm) / rate
@@ -15,7 +17,7 @@
 
 const RATE_MIN = 0.5;
 const RATE_MAX = 2;
-const MAX_FOLDS = 8;
+const HEARD_FACTORS = [0.5, 1, 2];
 
 function finiteBpm(value) {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
@@ -45,44 +47,56 @@ function circularDelta(current, target, period) {
   return delta;
 }
 
-function nearestFactor(ratio) {
-  let best = 1;
-  let bestDist = Math.abs(ratio - 1);
-  for (let octave = -MAX_FOLDS; octave <= MAX_FOLDS; octave += 1) {
-    const factor = 2 ** octave;
-    const dist = Math.abs(ratio - factor);
-    if (dist < bestDist - 1e-9) {
-      best = factor;
-      bestDist = dist;
-    }
-  }
-  return best;
+function syncFactor(value) {
+  return value === 0.5 || value === 1 || value === 2;
 }
 
 /**
- * Follower playback rate that shares the leader's groove.
- * Returns null when either BPM or the leader rate is unusable.
- * The follower's current rate is not an input. Half and double are folded
- * until the rate is as close to 1× as those octaves get, which lands near 1
- * (about 0.71–1.41). Null is only when it is still outside 0.5–2 after that
- * limit: an extreme ratio, not a normal half or double. Never clamped.
+ * Half, same, or double of the master heard tempo.
+ * Minimizes |ln(currentHeard / targetHeard)|. An equal distance keeps 1×.
+ * Null when a BPM or rate is unusable. Does not apply the 0.5–2 rate limit.
  */
-export function beatSyncRate(ownBpm, otherBpm, otherRate) {
-  if (!finiteBpm(ownBpm) || !finiteBpm(otherBpm) || !positiveRate(otherRate)) return null;
-  let rate = (otherBpm * otherRate) / ownBpm;
-  if (!Number.isFinite(rate) || !(rate > 0)) return null;
-  for (let fold = 0; fold < MAX_FOLDS; fold += 1) {
-    const half = rate * 0.5;
-    const doubled = rate * 2;
-    const dist = Math.abs(rate - 1);
-    const halfDist = Math.abs(half - 1);
-    const doubleDist = Math.abs(doubled - 1);
-    if (halfDist + 1e-9 < dist && halfDist <= doubleDist + 1e-9) rate = half;
-    else if (doubleDist + 1e-9 < dist) rate = doubled;
-    else break;
+export function beatSyncFactor(ownBpm, otherBpm, otherRate, ownRate) {
+  if (!finiteBpm(ownBpm) || !finiteBpm(otherBpm) || !positiveRate(otherRate) || !positiveRate(ownRate)) {
+    return null;
   }
-  if (rate < RATE_MIN - 1e-9 || rate > RATE_MAX + 1e-9) return null;
+  const masterHeard = otherBpm * otherRate;
+  const currentHeard = ownBpm * ownRate;
+  if (!Number.isFinite(masterHeard) || !Number.isFinite(currentHeard) || !(masterHeard > 0)) return null;
+
+  let best = null;
+  for (const factor of HEARD_FACTORS) {
+    const dist = Math.abs(Math.log(currentHeard / (masterHeard * factor)));
+    const bias = Math.abs(Math.log(factor));
+    if (
+      !best
+      || dist < best.dist - 1e-9
+      || (Math.abs(dist - best.dist) <= 1e-9 && bias < best.bias - 1e-9)
+    ) {
+      best = { factor, dist, bias };
+    }
+  }
+  return best ? best.factor : null;
+}
+
+function rateForFactor(ownBpm, otherBpm, otherRate, factor) {
+  if (!finiteBpm(ownBpm) || !finiteBpm(otherBpm) || !positiveRate(otherRate) || !syncFactor(factor)) return null;
+  const rate = (otherBpm * otherRate * factor) / ownBpm;
+  if (!Number.isFinite(rate) || rate < RATE_MIN - 1e-9 || rate > RATE_MAX + 1e-9) return null;
   return rate;
+}
+
+/**
+ * Follower playback rate for one octave of the master heard tempo.
+ * Without `factor`, the octave is the log-closest of {0.5, 1, 2} to the
+ * follower's current heard BPM (`ownBpm * ownRate`). With `factor`, that
+ * octave is used as-is. Null when the rate is outside 0.5–2, or inputs are
+ * unusable. Never clamped, and a farther octave is not substituted.
+ */
+export function beatSyncRate(ownBpm, otherBpm, otherRate, ownRate, factor) {
+  const chosen = syncFactor(factor) ? factor : beatSyncFactor(ownBpm, otherBpm, otherRate, ownRate);
+  if (chosen == null) return null;
+  return rateForFactor(ownBpm, otherBpm, otherRate, chosen);
 }
 
 /** Wall-clock seconds since the last beat at this file position and tempo. */
@@ -150,23 +164,23 @@ function usableDeck(deck) {
 /**
  * Rate and file time for the follower. Null when either side has no beat grid
  * (missing BPM, missing beatOffset, or still measuring). Does not read clocks.
+ * `factor` is the octave chosen when sync locked (0.5, 1, or 2). Omit it only
+ * to choose from the follower's current rate.
  */
-export function beatSyncPlan(own, other) {
+export function beatSyncPlan(own, other, factor) {
   if (!usableDeck(own) || !usableDeck(other)) return null;
-  const rate = beatSyncRate(own.bpm, other.bpm, other.rate);
+  const chosen = syncFactor(factor) ? factor : beatSyncFactor(own.bpm, other.bpm, other.rate, own.rate);
+  const rate = rateForFactor(own.bpm, other.bpm, other.rate, chosen);
   if (rate == null) return null;
   const ownHeard = 60 / (own.bpm * rate);
   const otherHeard = 60 / (other.bpm * other.rate);
   if (!(ownHeard > 0) || !(otherHeard > 0)) return null;
-  const heardRatio = (own.bpm * rate) / (other.bpm * other.rate);
-  if (!Number.isFinite(heardRatio) || !(heardRatio > 0)) return null;
-  const factor = nearestFactor(heardRatio);
   const ownWall = wallSinceBeat(own.time, own.beatOffset, own.bpm, rate);
   const otherWall = wallSinceBeat(other.time, other.beatOffset, other.bpm, other.rate);
-  const deltaWall = nearestWallDelta(ownWall, otherWall, ownHeard, otherHeard, factor);
+  const deltaWall = nearestWallDelta(ownWall, otherWall, ownHeard, otherHeard, chosen);
   if (!Number.isFinite(deltaWall)) return null;
   const period = Math.min(ownHeard, otherHeard) * rate;
   const time = placeSyncTime(own.time + deltaWall * rate, period);
   if (!Number.isFinite(time) || !(period > 0)) return null;
-  return { rate, time, period };
+  return { rate, time, period, factor: chosen };
 }
