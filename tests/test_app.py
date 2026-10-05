@@ -71,6 +71,12 @@ def test_index_uses_public_asset_prefix():
     assert "テンポ" in html
     assert 'id="rate-A" type="range" min="50" max="200" step="1"' in html
     assert 'id="rate-B" type="range" min="50" max="200" step="1"' in html
+    for deck in ("A", "B"):
+        head = html.split(f'id="rate-readout-{deck}"', 1)[1].split(f'id="rate-{deck}"', 1)[0]
+        assert f'id="bpm-readout-{deck}"' in head
+        assert "aria-live" not in head
+        assert head.index(f'id="bpm-readout-{deck}"') < head.index(f'id="rate-reset-{deck}"')
+        assert ">– BPM</span>" in head
     assert 'id="volume-A" type="range" min="0" max="100" step="1"' in html
     assert 'id="volume-B" type="range" min="0" max="100" step="1"' in html
     assert 'id="volume-reset-A"' in html

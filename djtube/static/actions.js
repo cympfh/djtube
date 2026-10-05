@@ -20,6 +20,8 @@ export function freshDeck() {
     cue: 0,
     playing: false,
     rate: 1,
+    bpm: null,
+    beatOffset: null,
     volume: 1,
     eq: { high: 0.5, mid: 0.5, low: 0.5 },
     eqError: "",
@@ -245,6 +247,8 @@ export function createActions(deps) {
     deckState.discWasPlaying = false;
     deckState.jogCommand = null;
     deckState.rate = 1;
+    deckState.bpm = null;
+    deckState.beatOffset = null;
     finishJogHear(deck, "drop");
     audio.cancelPendingSeek?.();
     audio.pause();
