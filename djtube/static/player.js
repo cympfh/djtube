@@ -223,11 +223,15 @@ export function createDeckPlayer(deck, elementId) {
         if (this.videoId) hooks.onReady?.(this.deck);
       });
       this.audio.addEventListener("play", () => {
+        // A platter release can queue play before an older pause event, or the
+        // reverse. Follow the element, not the event name, and only this deck.
+        if (this.audio.paused === true) return;
         this.paused = false;
         this._ensureGraph();
         hooks.onPlaying?.(this.deck);
       });
       this.audio.addEventListener("pause", () => {
+        if (this.audio.paused === false) return;
         this.paused = true;
         hooks.onPaused?.(this.deck);
       });

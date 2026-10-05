@@ -1000,6 +1000,8 @@ startDeckAudio(audios, {
   onPlaying(deck) {
     const deckState = state.decks[deck];
     if (!deckState.id) return;
+    // Ignore a play event that arrives after this deck's element is already paused.
+    if (audios[deck]?.audio?.paused === true) return;
     deckState.playing = true;
     deckState.playError = "";
     deckState.error = "";
@@ -1012,6 +1014,9 @@ startDeckAudio(audios, {
   onPaused(deck) {
     const deckState = state.decks[deck];
     if (!deckState.id) return;
+    // A jog-hold pause queues this event. Releasing first resumes the element,
+    // and the late event must not paint this deck paused or touch the other one.
+    if (audios[deck]?.audio?.paused === false) return;
     deckState.playing = false;
     updateTime(deck);
     renderDeck(deck);
