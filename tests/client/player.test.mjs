@@ -10,12 +10,15 @@ import {
   controllerStatusText,
   createFlx4LedPort,
   dispatchControllerEvent,
+  extinguishFlx4Leds,
   flx4LedMessage,
+  flx4LedMessages,
   isFlx4Port,
   midiButtonState,
   messageFromMidi,
   paintFlx4Leds,
   relativeMidiTicks,
+  resumeFlx4Leds,
   setFlx4Outputs,
 } from "../../djtube/static/controller.js";
 import { bpmText, formatBpm, heardBpm, tempoValueText } from "../../djtube/static/bpm.js";
@@ -337,6 +340,20 @@ test("FLX4 map sends notes and CCs to deck actions", async () => {
   assert.equal(controllerStatusText({ state: "opening" }), "MIDI を開いています…");
 });
 
+function armLedDeck(state, audios, deck) {
+  const deckState = state.decks[deck];
+  deckState.status = "ready";
+  deckState.id = deck === "A" ? "abcdefghijk" : "zzzzzzzzzzz";
+  deckState.bpm = 128;
+  deckState.beatOffset = 0;
+  deckState.rate = 1;
+  deckState.playing = false;
+  deckState.syncing = false;
+  audios[deck].currentTime = 1;
+  audios[deck].paused = true;
+  audios[deck].playbackRate = 1;
+}
+
 test("FLX4 PLAY and BEAT SYNC LEDs follow deck state", () => {
   assert.deepEqual(flx4LedMessage("play", "A", true), [0x90, 0x0b, 0x7f]);
   assert.deepEqual(flx4LedMessage("play", "A", false), [0x90, 0x0b, 0x00]);
@@ -346,10 +363,18 @@ test("FLX4 PLAY and BEAT SYNC LEDs follow deck state", () => {
   assert.deepEqual(flx4LedMessage("sync", "A", false), [0x90, 0x58, 0x00]);
   assert.deepEqual(flx4LedMessage("sync", "B", true), [0x91, 0x58, 0x7f]);
   assert.deepEqual(flx4LedMessage("sync", "B", false), [0x91, 0x58, 0x00]);
+  assert.deepEqual(flx4LedMessages("play", "A", true), [
+    [0x90, 0x0b, 0x7f],
+    [0x90, 0x47, 0x7f],
+  ]);
+  assert.deepEqual(flx4LedMessages("play", "B", false), [
+    [0x91, 0x0b, 0x00],
+    [0x91, 0x47, 0x00],
+  ]);
+  assert.equal(flx4LedMessages("play", "A", true).some((message) => message[1] === 0x0e), false);
+  assert.deepEqual(flx4LedMessages("sync", "A", true), [[0x90, 0x58, 0x7f]]);
   assert.equal(flx4LedMessage("cue", "A", true), null);
   assert.equal(flx4LedMessage("play", "C", true), null);
-  assert.equal(flx4LedMessage("play", "A", true)[1], 0x0b);
-  assert.equal(flx4LedMessage("sync", "B", true)[1], 0x58);
 
   assert.equal(isFlx4Port({ name: "DDJ-FLX4" }), true);
   assert.equal(isFlx4Port({ name: "DDJ-FLX4 - DDJ-FLX4 MIDI 1" }), true);
@@ -372,38 +397,148 @@ test("FLX4 PLAY and BEAT SYNC LEDs follow deck state", () => {
   const port = createFlx4LedPort();
   assert.deepEqual(paintFlx4Leds(port, "A", false, false), [
     [0x90, 0x0b, 0x00],
+    [0x90, 0x47, 0x00],
     [0x90, 0x58, 0x00],
   ]);
   assert.deepEqual(sent, []);
   assert.deepEqual(setFlx4Outputs(port, [output, { name: "no send" }, other]), [
     [0x90, 0x0b, 0x00],
+    [0x90, 0x47, 0x00],
     [0x90, 0x58, 0x00],
   ]);
   assert.deepEqual(sent, [
     [0x90, 0x0b, 0x00],
+    [0x90, 0x47, 0x00],
     [0x90, 0x58, 0x00],
   ]);
   sent.length = 0;
-  assert.deepEqual(paintFlx4Leds(port, "A", true, false), [[0x90, 0x0b, 0x7f]]);
+  assert.deepEqual(paintFlx4Leds(port, "A", true, false), [
+    [0x90, 0x0b, 0x7f],
+    [0x90, 0x47, 0x7f],
+  ]);
   assert.deepEqual(paintFlx4Leds(port, "B", false, true), [
     [0x91, 0x0b, 0x00],
+    [0x91, 0x47, 0x00],
     [0x91, 0x58, 0x7f],
   ]);
   assert.deepEqual(paintFlx4Leds(port, "A", true, false), []);
   assert.deepEqual(paintFlx4Leds(port, "C", true, true), []);
   assert.deepEqual(sent, [
     [0x90, 0x0b, 0x7f],
+    [0x90, 0x47, 0x7f],
     [0x91, 0x0b, 0x00],
+    [0x91, 0x47, 0x00],
     [0x91, 0x58, 0x7f],
   ]);
 
+  sent.length = 0;
+  const hidden = extinguishFlx4Leds(port);
+  assert.deepEqual(hidden, [
+    [0x90, 0x0b, 0x00],
+    [0x90, 0x47, 0x00],
+    [0x90, 0x58, 0x00],
+    [0x91, 0x0b, 0x00],
+    [0x91, 0x47, 0x00],
+    [0x91, 0x58, 0x00],
+  ]);
+  assert.deepEqual(sent, hidden);
+  sent.length = 0;
+  assert.deepEqual(paintFlx4Leds(port, "A", true, false), []);
+  assert.deepEqual(paintFlx4Leds(port, "B", false, false), []);
+  assert.deepEqual(setFlx4Outputs(port, [output]), []);
+  assert.deepEqual(sent, []);
+  const restored = resumeFlx4Leds(port);
+  assert.deepEqual(restored, [
+    [0x90, 0x0b, 0x7f],
+    [0x90, 0x47, 0x7f],
+    [0x90, 0x58, 0x00],
+    [0x91, 0x0b, 0x00],
+    [0x91, 0x47, 0x00],
+    [0x91, 0x58, 0x00],
+  ]);
+  assert.deepEqual(sent, restored);
+  assert.deepEqual(resumeFlx4Leds(port), []);
+
   const app = readFileSync(new URL("../../djtube/static/app.js", import.meta.url), "utf8");
+  const schedule = app.slice(app.indexOf("function scheduleRender"), app.indexOf("const actions"));
+  assert.match(schedule, /paintControllerLeds\(\)/);
+  assert.ok(schedule.indexOf("paintControllerLeds") < schedule.indexOf("if (frame) return"));
+  assert.ok(schedule.indexOf("paintControllerLeds") < schedule.indexOf("requestAnimationFrame"));
   const renderDeck = app.slice(app.indexOf("function renderDeck"), app.indexOf("function renderTempo"));
-  assert.match(renderDeck, /paintFlx4Leds\(flx4LedPort, deck, !!deckState\.playing, !!deckState\.syncing\)/);
+  assert.equal(renderDeck.includes("paintFlx4Leds"), false);
+  assert.match(app, /addEventListener\("pagehide", \(\) => \{\s*extinguishFlx4Leds\(flx4LedPort\);/);
+  assert.match(app, /addEventListener\("pageshow", \(\) => \{\s*resumeFlx4Leds\(flx4LedPort\);/);
   const controller = readFileSync(new URL("../../djtube/static/controller.js", import.meta.url), "utf8");
   const connect = controller.slice(controller.indexOf("export async function connectController"));
   assert.match(connect, /isFlx4Port\(output\)/);
   assert.match(connect, /setFlx4Outputs\(flx4LedPort, outputs\)/);
+});
+
+test("syncBeat and play light FLX4 lamps from the action, without a frame", () => {
+  const sent = [];
+  const port = createFlx4LedPort();
+  const box = {};
+  setFlx4Outputs(port, [
+    {
+      send(bytes) {
+        sent.push(Array.from(bytes));
+      },
+    },
+  ]);
+  const { state, actions, audios } = harness({
+    deps: {
+      scheduleRender() {
+        const decks = box.state?.decks;
+        if (!decks) return;
+        for (const deck of ["A", "B"]) {
+          paintFlx4Leds(port, deck, !!decks[deck].playing, !!decks[deck].syncing);
+        }
+      },
+    },
+  });
+  box.state = state;
+  armLedDeck(state, audios, "A");
+  armLedDeck(state, audios, "B");
+  for (const deck of ["A", "B"]) paintFlx4Leds(port, deck, false, false);
+  sent.length = 0;
+
+  actions.togglePlay("A");
+  assert.equal(state.decks.A.playing, true);
+  assert.deepEqual(sent, [
+    [0x90, 0x0b, 0x7f],
+    [0x90, 0x47, 0x7f],
+  ]);
+  const quiet = sent.length;
+  actions.setVolume("A", 0.4);
+  assert.equal(sent.length, quiet);
+
+  actions.syncBeat("A");
+  assert.equal(state.decks.A.syncing, true);
+  assert.equal(state.decks.B.syncing, false);
+  assert.deepEqual(sent.slice(quiet), [[0x90, 0x58, 0x7f]]);
+
+  const noteB = messageFromMidi(new Uint8Array([0x91, 0x58, 0x7f]));
+  assert.equal(dispatchControllerEvent(noteB, actions), true);
+  assert.equal(state.decks.A.syncing, false);
+  assert.equal(state.decks.B.syncing, true);
+  assert.deepEqual(sent.slice(quiet + 1), [
+    [0x90, 0x58, 0x00],
+    [0x91, 0x58, 0x7f],
+  ]);
+
+  actions.pressDisc("A", true);
+  assert.equal(state.decks.A.playing, false);
+  assert.equal(audios.A.paused, true);
+  assert.deepEqual(sent.slice(quiet + 3), [
+    [0x90, 0x0b, 0x00],
+    [0x90, 0x47, 0x00],
+  ]);
+  actions.pressDisc("A", false);
+  assert.equal(state.decks.A.playing, true);
+  assert.deepEqual(sent.slice(quiet + 5), [
+    [0x90, 0x0b, 0x7f],
+    [0x90, 0x47, 0x7f],
+  ]);
 });
 
 test("MIDI button is on only after a device connects", () => {

@@ -1,5 +1,13 @@
 import { SOURCE_UNAVAILABLE, createActions, freshState, sourcePlaybackBlocked } from "./actions.js";
-import { connectController, controllerStatusText, flx4LedPort, midiButtonState, paintFlx4Leds } from "./controller.js";
+import {
+  connectController,
+  controllerStatusText,
+  extinguishFlx4Leds,
+  flx4LedPort,
+  midiButtonState,
+  paintFlx4Leds,
+  resumeFlx4Leds,
+} from "./controller.js";
 import { deckGains } from "./gains.js";
 import { eqGainDb, formatEqDb } from "./eq.js";
 import { formatFilter } from "./filter.js";
@@ -66,7 +74,14 @@ async function fetchSearch(query, musicOnly = state.musicOnly) {
 }
 
 let frame = 0;
+function paintControllerLeds() {
+  for (const deck of ["A", "B"]) {
+    const deckState = state.decks[deck];
+    paintFlx4Leds(flx4LedPort, deck, !!deckState?.playing, !!deckState?.syncing);
+  }
+}
 function scheduleRender() {
+  paintControllerLeds();
   if (frame) return;
   frame = requestAnimationFrame(() => {
     frame = 0;
@@ -311,7 +326,6 @@ function renderDeck(deck) {
   renderVolume(deck);
   updateTime(deck);
   paintDisc(deck);
-  paintFlx4Leds(flx4LedPort, deck, !!deckState.playing, !!deckState.syncing);
 }
 
 function renderTempo(deck) {
@@ -990,6 +1004,7 @@ startDeckAudio(audios, {
     if (deckState.status !== "error") deckState.status = "ready";
     updateTime(deck);
     renderDeck(deck);
+    paintControllerLeds();
   },
   onPaused(deck) {
     const deckState = state.decks[deck];
@@ -997,6 +1012,7 @@ startDeckAudio(audios, {
     deckState.playing = false;
     updateTime(deck);
     renderDeck(deck);
+    paintControllerLeds();
   },
   onEnded(deck) {
     const deckState = state.decks[deck];
@@ -1004,6 +1020,7 @@ startDeckAudio(audios, {
     deckState.playing = false;
     updateTime(deck);
     renderDeck(deck);
+    paintControllerLeds();
   },
   onError(deck) {
     const deckState = state.decks[deck];
@@ -1015,6 +1032,7 @@ startDeckAudio(audios, {
     deckState.error = SOURCE_UNAVAILABLE;
     deckState.cookies = false;
     renderDeck(deck);
+    paintControllerLeds();
     fetch(`${prefix}/api/audio/${encodeURIComponent(videoId)}/cause`)
       .then((response) => (response.ok ? response.json() : null))
       .then((body) => {
@@ -1034,5 +1052,12 @@ setInterval(() => {
   if (state.decks.B.playing) updateTime("B");
 }, 250);
 render();
+paintControllerLeds();
+window.addEventListener("pagehide", () => {
+  extinguishFlx4Leds(flx4LedPort);
+});
+window.addEventListener("pageshow", () => {
+  resumeFlx4Leds(flx4LedPort);
+});
 
 window.djtube = { actions, state, audios };
