@@ -13,6 +13,7 @@ import { createPlaylistActions, freshPlaylistState, trackSnapshot } from "./play
 import { publicPrefix } from "./prefix.js";
 import { clampRate, rateFromMidi } from "./rate.js";
 import { commandedSeekLanded } from "./seekland.js";
+import { beatSyncPlan } from "./sync.js";
 
 export function freshDeck() {
   return {
@@ -31,6 +32,7 @@ export function freshDeck() {
     bpm: null,
     beatOffset: null,
     bpmMeasuring: false,
+    syncing: false,
     volume: 1,
     eq: { high: 0.5, mid: 0.5, low: 0.5 },
     eqError: "",
@@ -84,6 +86,11 @@ function emptySpin() {
 export function createActions(deps) {
   const { state, audios } = deps;
   const jogSpin = { A: emptySpin(), B: emptySpin() };
+  let syncTimer = null;
+  let syncLoopOn = false;
+  const SYNC_FOLLOW_MS = 50;
+  const SYNC_PHASE_SNAP = 0.0005;
+  const SYNC_PHASE_FOLLOW = 0.012;
   const bpmWatch = {
     A: { token: 0, forGen: null, controller: null },
     B: { token: 0, forGen: null, controller: null },
@@ -240,7 +247,35 @@ export function createActions(deps) {
     }
   }
 
+  function otherDeck(deck) {
+    if (deck === "A") return "B";
+    if (deck === "B") return "A";
+    return null;
+  }
+
+  function cancelSyncLoop() {
+    syncLoopOn = false;
+    if (syncTimer != null) cancelLater(syncTimer);
+    syncTimer = null;
+  }
+
+  function releaseDeckSync(deck) {
+    const deckState = deckOf(state, deck);
+    if (!deckState?.syncing) return;
+    deckState.syncing = false;
+    const other = otherDeck(deck);
+    if (!other || !deckOf(state, other)?.syncing) cancelSyncLoop();
+    scheduleRender();
+  }
+
+  function forgetSync(deck) {
+    releaseDeckSync(deck);
+    const other = otherDeck(deck);
+    if (other) releaseDeckSync(other);
+  }
+
   function stopBpm(deck) {
+    forgetSync(deck);
     const watch = bpmWatch[deck];
     if (!watch) return;
     watch.token += 1;
@@ -392,12 +427,14 @@ export function createActions(deps) {
       deckState.bpm = null;
       deckState.beatOffset = null;
       deckState.bpmMeasuring = false;
+      forgetSync(deck);
       scheduleRender();
       return Promise.resolve();
     }
     deckState.bpm = null;
     deckState.beatOffset = null;
     deckState.bpmMeasuring = true;
+    forgetSync(deck);
     scheduleRender();
     return Promise.resolve()
       .then(() => readTrackBpm(id, controller.signal))
@@ -630,6 +667,138 @@ export function createActions(deps) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return;
     applyRate(deck, rateFromMidi(numeric));
+  }
+
+  // Drop a platter spin's temporary rate without seeking or starting playback.
+  function releaseJogHear(deck) {
+    const spin = jogSpin[deck];
+    const deckState = deckOf(state, deck);
+    const audio = audios[deck];
+    if (!spin?.active || !deckState || !audio) return;
+    spin.token += 1;
+    spin.active = false;
+    if (spin.timer) cancelLater(spin.timer);
+    spin.timer = 0;
+    spin.at = null;
+    spin.borrowed = false;
+    audio.jogHear = null;
+    audio.scratch = null;
+    audio.stopScratch?.();
+    applySpinRate(audio, null);
+    if (typeof audio.setSpinRate !== "function") audio.playbackRate = deckState.rate;
+    setTrackHeld(audio, false);
+  }
+
+  function followerBusy(deck) {
+    const deckState = deckOf(state, deck);
+    return !!(deckState?.discHeld || jogSpin[deck]?.active);
+  }
+
+  function syncPlanFor(deck, leaderName) {
+    const follower = deckOf(state, deck);
+    const leader = deckOf(state, leaderName);
+    const followerAudio = audios[deck];
+    const leaderAudio = audios[leaderName];
+    if (!follower || !leader || !followerAudio || !leaderAudio) return null;
+    if (follower.status !== "ready" || leader.status !== "ready") return null;
+    const ownTime = Number(followerAudio.currentTime);
+    const otherTime = Number(leaderAudio.currentTime);
+    const plan = beatSyncPlan(
+      {
+        bpm: follower.bpm,
+        beatOffset: follower.beatOffset,
+        rate: follower.rate,
+        time: ownTime,
+        measuring: follower.bpmMeasuring,
+      },
+      {
+        bpm: leader.bpm,
+        beatOffset: leader.beatOffset,
+        rate: leader.rate,
+        time: otherTime,
+        measuring: leader.bpmMeasuring,
+      },
+    );
+    if (!plan) return null;
+    return { plan, ownTime };
+  }
+
+  function applySync(deck, leaderName, snap) {
+    const follower = deckOf(state, deck);
+    const followerAudio = audios[deck];
+    const leaderAudio = audios[leaderName];
+    const found = syncPlanFor(deck, leaderName);
+    if (!found || !follower || !followerAudio || !leaderAudio) return false;
+    const { plan, ownTime } = found;
+    const rateChanged = Math.abs((Number(follower.rate) || 0) - plan.rate) > 0.0001;
+    if (rateChanged) applyRate(deck, plan.rate);
+    let next = plan.time;
+    if (next < 0) next = 0;
+    const duration = Number(followerAudio.duration);
+    if (Number.isFinite(duration) && duration > 0 && next > duration) next = duration;
+    const playingPair = followerAudio.paused === false && leaderAudio.paused === false;
+    const threshold = snap || rateChanged ? SYNC_PHASE_SNAP : SYNC_PHASE_FOLLOW;
+    const shouldSeek = (snap || (playingPair && !followerBusy(deck))) && Math.abs(next - ownTime) >= threshold;
+    if (shouldSeek) {
+      follower.jogCommand = null;
+      followerAudio.cancelPendingSeek?.();
+      followerAudio.currentTime = next;
+    }
+    if (rateChanged || shouldSeek) scheduleRender();
+    return true;
+  }
+
+  function followSync(deck) {
+    const follower = deckOf(state, deck);
+    if (!follower?.syncing) return false;
+    const leaderName = otherDeck(deck);
+    if (!leaderName) {
+      releaseDeckSync(deck);
+      return false;
+    }
+    if (followerBusy(deck)) return true;
+    if (!applySync(deck, leaderName, false)) {
+      releaseDeckSync(deck);
+      return false;
+    }
+    return true;
+  }
+
+  function ensureSyncLoop() {
+    if (syncLoopOn) return;
+    syncLoopOn = true;
+    syncTimer = later(() => {
+      syncTimer = null;
+      syncLoopOn = false;
+      let keep = false;
+      for (const name of ["A", "B"]) {
+        if (followSync(name)) keep = true;
+      }
+      if (keep) ensureSyncLoop();
+    }, SYNC_FOLLOW_MS);
+  }
+
+  function syncBeat(deck) {
+    const follower = deckOf(state, deck);
+    const leaderName = otherDeck(deck);
+    if (!follower || !leaderName) return;
+    if (follower.syncing) {
+      releaseDeckSync(deck);
+      return;
+    }
+    if (!syncPlanFor(deck, leaderName)) return;
+    releaseDeckSync(leaderName);
+    follower.syncing = true;
+    releaseJogHear(deck);
+    follower.jogCommand = null;
+    if (!applySync(deck, leaderName, true)) {
+      follower.syncing = false;
+      cancelSyncLoop();
+      scheduleRender();
+      return;
+    }
+    ensureSyncLoop();
+    scheduleRender();
   }
 
   function setEq(deck, band, value) {
@@ -866,6 +1035,7 @@ export function createActions(deps) {
     nudgeRate,
     resetRate,
     setRateFromController,
+    syncBeat,
     setVolume,
     nudgeVolume,
     resetVolume,

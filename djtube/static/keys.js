@@ -37,6 +37,8 @@ export const BINDINGS = [
   { keys: ["8"], action: "nudgeRate", args: ["B", -RATE_STEP], label: "デッキ B のテンポを下げる", group: "テンポ" },
   { keys: ["9"], action: "nudgeRate", args: ["B", RATE_STEP], label: "デッキ B のテンポを上げる", group: "テンポ" },
   { keys: ["0"], action: "resetRate", args: ["B"], label: "デッキ B のテンポを 1.0 に戻す", group: "テンポ" },
+  { keys: ["3"], action: "syncBeat", args: ["A"], shift: true, label: "デッキ A の同期を入／切", group: "テンポ" },
+  { keys: ["8"], action: "syncBeat", args: ["B"], shift: true, label: "デッキ B の同期を入／切", group: "テンポ" },
   { keys: ["-"], action: "nudgeVolume", args: ["A", -VOLUME_STEP], label: "デッキ A の音量を下げる", group: "音量" },
   { keys: ["="], action: "nudgeVolume", args: ["A", VOLUME_STEP], label: "デッキ A の音量を上げる", group: "音量" },
   {
@@ -208,6 +210,9 @@ const SHIFT_ALIASES = {
   "'": ['"'],
   ",": ["<"],
   ".": [">"],
+  // Shift+3 is "#" on JIS and US. Shift+8 is "(" on JIS and "*" on US.
+  "3": ["#"],
+  "8": ["(", "*"],
 };
 
 function shiftAliases(bindingKey) {

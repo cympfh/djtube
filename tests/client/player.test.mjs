@@ -1146,7 +1146,7 @@ test("tempo clamps, nudges, resets, and stays callable from the action table", a
   assert.ok(labels.includes("デッキ A のテンポを上げる"));
   assert.ok(labels.includes("デッキ B のテンポを 1.0 に戻す"));
   const tempoKeys = BINDINGS.filter((binding) => binding.group === "テンポ").flatMap((binding) => binding.keys);
-  assert.deepEqual(tempoKeys, ["1", "2", "3", "8", "9", "0"]);
+  assert.deepEqual(tempoKeys, ["1", "2", "3", "8", "9", "0", "3", "8"]);
 
   const deck = createDeckPlayer("A", "player-A");
   const seen = [];

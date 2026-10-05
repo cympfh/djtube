@@ -76,6 +76,9 @@ def test_index_uses_public_asset_prefix():
         assert f'id="bpm-readout-{deck}"' in head
         assert "aria-live" not in head
         assert head.index(f'id="bpm-readout-{deck}"') < head.index(f'id="rate-reset-{deck}"')
+        assert f'id="sync-{deck}"' in head
+        assert 'aria-pressed="false"' in head
+        assert ">同期</button>" in head
         assert ">– BPM</span>" in head
     assert 'id="volume-A" type="range" min="0" max="100" step="1"' in html
     assert 'id="volume-B" type="range" min="0" max="100" step="1"' in html
@@ -236,6 +239,13 @@ def test_readme_and_docker_contract():
     assert "計測中" in readme
     assert "15 分より長い曲も「– BPM」のまま" in readme
     assert "測っているあいだも、そのデッキは再生できる" in readme
+    assert "`Shift+3`" in readme
+    assert "`Shift+8`" in readme
+    assert "BPM が半分や倍のときも、同じ拍として合わせる" in readme
+    assert "合わせ続ける" in readme
+    assert "もう一度 `Shift+3` で同期を切る" in readme
+    assert "FLX4 の BEAT SYNC" in readme
+    assert "一度合わせる" not in readme
     assert "canplay" not in readme
     assert "AudioContext" not in readme
     assert "曲を載せても、そのデッキの音量は戻らない" in readme
@@ -280,4 +290,8 @@ def test_readme_and_docker_contract():
 
 
 def test_client_unit_tests():
-    subprocess.run(["node", "--test", "tests/client/player.test.mjs"], cwd=ROOT, check=True)
+    subprocess.run(
+        ["node", "--test", "tests/client/player.test.mjs", "tests/client/sync.test.mjs"],
+        cwd=ROOT,
+        check=True,
+    )

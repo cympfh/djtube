@@ -48,6 +48,9 @@ const EQ_LOW = 0x0f;
 const CHANNEL_FADER = 0x13;
 const CFX_A = 0x17;
 const CFX_B = 0x18;
+// BEAT SYNC. DDJ-FLX4 MIDI Message List E1: note 0x58 on the deck channel.
+// Each press toggles sync lock for that deck. Note-off is ignored, so release does not unlock.
+const BEAT_SYNC = 0x58;
 
 /** Seconds of seek for one jog tick (value 65 or 63). */
 export const JOG_STEP_SECONDS = 0.05;
@@ -96,6 +99,8 @@ function deckJog(channel, deck) {
 export const FLX4_MAP = {
   [`note:${DECK_A}:${PLAY}`]: binding("togglePlay", ["A"]),
   [`note:${DECK_B}:${PLAY}`]: binding("togglePlay", ["B"]),
+  [`note:${DECK_A}:${BEAT_SYNC}`]: binding("syncBeat", ["A"]),
+  [`note:${DECK_B}:${BEAT_SYNC}`]: binding("syncBeat", ["B"]),
   [`note:${DECK_A}:${CUE}`]: binding("cue", ["A"]),
   [`note:${DECK_B}:${CUE}`]: binding("cue", ["B"]),
   [`note:${MIXER}:${LOAD_A}`]: binding("loadOpenSelection", ["A"]),
