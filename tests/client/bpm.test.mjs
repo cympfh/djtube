@@ -42,9 +42,18 @@ function assertClick(result, bpm, lead) {
   assert.ok(error <= 0.02, `beat ${result.beatOffset} vs ${lead} (err ${error})`);
 }
 
-function drumTrack({ bpm, seconds = 40, kick = [1, 0, 0, 0], hat = 0, hatAmp = 0.3, snare = false, swing = 0, seed = 7 } = {}) {
-  const sampleRate = 44100;
-  const total = sampleRate * seconds;
+function drumTrack({
+  bpm,
+  seconds = 40,
+  kick = [1, 0, 0, 0],
+  hat = 0,
+  hatAmp = 0.3,
+  snare = false,
+  swing = 0,
+  seed = 7,
+  sampleRate = 44100,
+} = {}) {
+  const total = Math.floor(sampleRate * seconds);
   const samples = new Float32Array(total);
   const beat = 60 / bpm;
   let state = seed;
@@ -89,9 +98,12 @@ test("drum patterns read within 0.2 BPM", () => {
     ["slow kick and snare", { bpm: 70, snare: true }],
   ];
   for (const [name, options] of cases) {
-    const result = analyzeBpm(drumTrack(options), 44100);
-    assert.ok(result, name);
-    assert.ok(Math.abs(result.bpm - options.bpm) <= 0.2, `${name} ${result.bpm}`);
+    const high = analyzeBpm(drumTrack({ ...options, sampleRate: 44100 }), 44100);
+    const low = analyzeBpm(drumTrack({ ...options, sampleRate: 22050 }), 22050);
+    assert.ok(high, name);
+    assert.ok(Math.abs(high.bpm - options.bpm) <= 0.2, `${name} ${high.bpm}`);
+    assert.ok(low, `${name} at 22050`);
+    assert.ok(Math.abs(high.bpm - low.bpm) <= 0.1, `${name} ${high.bpm} vs ${low.bpm}`);
   }
 });
 

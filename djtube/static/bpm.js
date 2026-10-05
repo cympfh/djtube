@@ -64,9 +64,10 @@ export function mixToMono(channels) {
 }
 
 const TEMPO_CENTER = 124;
-const TEMPO_SIGMA = 0.85;
 const HIGH_BAND = 0.65;
 const MIN_PEAK = 0.2;
+/** Floor under mean-square energy so the log does not depend on window length. */
+const ENERGY_FLOOR = 1e-3;
 
 function isLoud(sample) {
   return sample >= SILENCE_PEAK || sample <= -SILENCE_PEAK;
@@ -160,17 +161,20 @@ function onsetFlux(samples, sampleRate, start, stop) {
   let previousLow = 0;
   let previousHigh = 0;
   const logEnergy = (end) => {
-    if (end < regionStart) return [0, 0];
+    if (end < regionStart) return [Math.log(ENERGY_FLOOR), Math.log(ENERGY_FLOOR)];
     const from = Math.max(regionStart, end - win + 1);
     let lowEnergy = 0;
     let highEnergy = 0;
+    let count = 0;
     for (let index = from; index <= end && index < regionEnd; index += 1) {
       const lowSample = low[index - regionStart];
       const highSample = samples[index] - lowSample;
       lowEnergy += lowSample * lowSample;
       highEnergy += highSample * highSample;
+      count += 1;
     }
-    return [Math.log1p(lowEnergy), Math.log1p(highEnergy)];
+    const scale = count > 0 ? 1 / count : 0;
+    return [Math.log(ENERGY_FLOOR + lowEnergy * scale), Math.log(ENERGY_FLOOR + highEnergy * scale)];
   };
   [previousLow, previousHigh] = logEnergy(start - hop);
   for (let frame = 0; frame < frameCount; frame += 1) {
@@ -212,11 +216,6 @@ function autocorrelation(onset, minLag, maxLag) {
   return scores;
 }
 
-function tempoWeight(bpm) {
-  const octaves = Math.log(bpm / TEMPO_CENTER) / Math.log(2);
-  return Math.exp(-0.5 * (octaves / TEMPO_SIGMA) ** 2);
-}
-
 function isLocalMax(scores, lag, minLag, maxLag) {
   const left = lag > minLag ? scores[lag - 1] : -Infinity;
   const right = lag < maxLag ? scores[lag + 1] : -Infinity;
@@ -249,6 +248,10 @@ function interp(values, at) {
 function combScore(flux, envelopeRate, bpm) {
   const period = (60 / bpm) * envelopeRate;
   if (!(period > 2)) return { score: 0, phase: 0 };
+  let mean = 0;
+  for (let index = 0; index < flux.length; index += 1) mean += flux[index];
+  mean /= flux.length || 1;
+  if (!(mean > 0)) return { score: 0, phase: 0 };
   const steps = Math.max(8, Math.round(period));
   let bestOn = -Infinity;
   let bestOff = 0;
@@ -269,7 +272,7 @@ function combScore(flux, envelopeRate, bpm) {
   if (!(bestOn > 0)) return { score: 0, phase: bestPhase };
   const beats = Math.max(1, (flux.length - bestPhase) / period);
   const accent = bestOn / (bestOn + Math.max(0, bestOff));
-  return { score: (bestOn / beats) * accent, phase: bestPhase };
+  return { score: ((bestOn / beats) * accent) / mean, phase: bestPhase };
 }
 
 function refineTempo(flux, envelopeRate, centerBpm) {
@@ -293,6 +296,16 @@ function refineTempo(flux, envelopeRate, centerBpm) {
   return { bpm: bestBpm, score: best, phase: bestPhase };
 }
 
+/** True when bpm is within a few percent of fundamental × a power of two. */
+function relatedByOctave(bpm, fundamental) {
+  if (!(bpm > 0) || !(fundamental > 0)) return false;
+  const ratio = Math.log(bpm / fundamental) / Math.log(2);
+  const nearest = Math.round(ratio);
+  if (nearest < -2 || nearest > 3) return false;
+  const aligned = fundamental * 2 ** nearest;
+  return Math.abs(bpm - aligned) / bpm < 0.04;
+}
+
 function acfNear(scores, envelopeRate, bpm) {
   if (!(bpm > 0)) return 0;
   const lag = (60 / bpm) * envelopeRate;
@@ -310,7 +323,7 @@ function chooseTempo(flux, scores, envelopeRate, baseBpm) {
   const acfBase = acfNear(scores, envelopeRate, base.bpm);
   const acfFast = acfNear(scores, envelopeRate, fast.bpm);
   if (acfFast < 0.2 && acfBase >= 0.3) return base;
-  const fasterPulse = acfFast > acfBase * 1.05;
+  const fasterPulse = acfFast > acfBase * 1.15;
   const fasterComb = acfFast > acfBase * 0.75 && fast.score > base.score * 1.35;
   return fasterPulse || fasterComb ? fast : base;
 }
@@ -370,8 +383,7 @@ function tempoAt(samples, rate, start, stop) {
     if (!isLocalMax(scores, lag, minLag, maxLag)) continue;
     const bpm = (60 * envelopeRate) / lag;
     const acf = scoreAt(scores, lag);
-    const weight = bpm >= BPM_MIN && bpm <= BPM_MAX ? tempoWeight(bpm) : 1;
-    peaks.push({ lag, bpm, acf, score: harmonicScore(scores, lag) * weight });
+    peaks.push({ lag, bpm, acf, score: harmonicScore(scores, lag) });
   }
   if (!peaks.length) return null;
 
@@ -411,15 +423,37 @@ function tempoAt(samples, rate, start, stop) {
     support = slow.acf;
   }
 
-  const chosen = chooseTempo(flux, scores, envelopeRate, baseBpm);
-  const peak = Math.max(support, acfNear(scores, envelopeRate, chosen.bpm), acfNear(scores, envelopeRate, chosen.bpm / 2));
+  let chosen = chooseTempo(flux, scores, envelopeRate, baseBpm);
+  const dominant = peaks.reduce((best, peak) => (peak.acf > best.acf ? peak : best));
+  // 4:3 and 3:2 are not octaves of the strongest period. Use that period, or nothing.
+  const supportOf = Math.max(support, acfNear(scores, envelopeRate, chosen.bpm), acfNear(scores, envelopeRate, chosen.bpm / 2));
+  if (!relatedByOctave(chosen.bpm, dominant.bpm) && dominant.acf > supportOf * 1.5) {
+    const octaves = [2, 4]
+      .map((factor) => dominant.bpm * factor)
+      .filter((bpm) => bpm >= BPM_MIN && bpm <= BPM_MAX)
+      .map((bpm) => refineTempo(flux, envelopeRate, bpm));
+    const rescued = octaves.sort((a, b) => b.score - a.score)[0];
+    if (!rescued) return null;
+    const rivals = [3 / 4, 2 / 3, 3 / 2, 4 / 3].map((factor) => {
+      const bpm = rescued.bpm * factor;
+      if (bpm < BPM_MIN || bpm > BPM_MAX) return 0;
+      return combScore(flux, envelopeRate, bpm).score;
+    });
+    if (!(rescued.score > Math.max(...rivals, 0) * 1.25)) return null;
+    chosen = rescued;
+  }
+  const peak = Math.max(
+    acfNear(scores, envelopeRate, chosen.bpm),
+    acfNear(scores, envelopeRate, chosen.bpm / 2),
+    acfNear(scores, envelopeRate, chosen.bpm / 4),
+  );
   const decoyScores = [0.9, 1.12, 1.18].map((factor) => {
     const bpm = chosen.bpm * factor;
     if (bpm < BPM_MIN || bpm > BPM_MAX || Math.abs(bpm - chosen.bpm) < 4) return 0;
     return combScore(flux, envelopeRate, bpm).score;
   });
   const decoy = Math.max(...decoyScores, 0);
-  const clearPulse = chosen.score > decoy * 1.5 && chosen.score > 0.04;
+  const clearPulse = chosen.score > decoy * 1.35 && chosen.score > 1;
   if (!(peak >= MIN_PEAK) || !clearPulse) return null;
   if (!(chosen.bpm >= BPM_MIN && chosen.bpm <= BPM_MAX)) return null;
 
@@ -432,8 +466,9 @@ function tempoAt(samples, rate, start, stop) {
 
 /**
  * Track BPM and the media time of one beat.
- * Low and high energy are log-compressed over a short window; only rises count.
- * Autocorrelation (70–180) picks a coarse lag, then a 0.05 BPM comb refines it.
+ * Each frame is the log of mean energy, so 22050 and 44100 describe the same rise.
+ * Autocorrelation picks a coarse lag, then a 0.05 BPM comb refines it.
+ * A tempo that is not an octave of a stronger period is dropped.
  * Leading silence is skipped. Only the following ~30s is read.
  * A quiet opening is skipped inside that window when it has no beat.
  * Returns null when the peak is not a beat.
@@ -448,6 +483,8 @@ export function analyzeBpm(samples, sampleRate) {
   const limit = Math.min(length, sound + Math.floor(ANALYZE_SECONDS * rate));
   for (const skipSeconds of [0, 3, 6, 9]) {
     const start = sound + Math.floor(skipSeconds * rate);
+    const retryFloor = skipSeconds === 0 ? MIN_SECONDS : 15;
+    if (limit - start < Math.floor(retryFloor * rate)) continue;
     const found = tempoAt(samples, rate, start, limit);
     if (found) return found;
   }
