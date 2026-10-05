@@ -352,23 +352,8 @@ function nearestPeak(samples, center, radius) {
   return best;
 }
 
-/**
- * Track BPM and the media time of one beat.
- * Low and high energy are log-compressed over a short window; only rises count.
- * Autocorrelation (70–180) picks a coarse lag, then a 0.05 BPM comb refines it.
- * Leading silence is skipped. Only the following ~30s is read.
- * Returns null when the peak is not a beat.
- */
-export function analyzeBpm(samples, sampleRate) {
-  const rate = Number(sampleRate);
-  const length = samples?.length || 0;
-  if (!(rate > 0) || length < 2) return null;
-
-  const start = leadingSoundIndex(samples);
-  if (start < 0) return null;
-  const stop = Math.min(length, start + Math.floor(ANALYZE_SECONDS * rate));
+function tempoAt(samples, rate, start, stop) {
   if (stop - start < Math.floor(MIN_SECONDS * rate)) return null;
-
   const onset = onsetFlux(samples, rate, start, stop);
   if (!onset || onset.flux.length < onset.envelopeRate * MIN_SECONDS) return null;
   const { flux, hop, envelopeRate } = onset;
@@ -443,4 +428,28 @@ export function analyzeBpm(samples, sampleRate) {
   const peakSample = nearestPeak(samples, coarse, Math.round(rate * 0.02));
   const beatOffset = Math.round((peakSample / rate) * 1e5) / 1e5;
   return { bpm: chosen.bpm, beatOffset };
+}
+
+/**
+ * Track BPM and the media time of one beat.
+ * Low and high energy are log-compressed over a short window; only rises count.
+ * Autocorrelation (70–180) picks a coarse lag, then a 0.05 BPM comb refines it.
+ * Leading silence is skipped. Only the following ~30s is read.
+ * A quiet opening is skipped inside that window when it has no beat.
+ * Returns null when the peak is not a beat.
+ */
+export function analyzeBpm(samples, sampleRate) {
+  const rate = Number(sampleRate);
+  const length = samples?.length || 0;
+  if (!(rate > 0) || length < 2) return null;
+
+  const sound = leadingSoundIndex(samples);
+  if (sound < 0) return null;
+  const limit = Math.min(length, sound + Math.floor(ANALYZE_SECONDS * rate));
+  for (const skipSeconds of [0, 3, 6, 9]) {
+    const start = sound + Math.floor(skipSeconds * rate);
+    const found = tempoAt(samples, rate, start, limit);
+    if (found) return found;
+  }
+  return null;
 }
