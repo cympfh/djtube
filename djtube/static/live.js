@@ -212,22 +212,23 @@ export function createLiveControl(options) {
   const copyText = options.copyText;
   const armCopy = options.armCopy;
   const menu = readyMenu(options.menu);
-  const schedule = options.schedule || ((fn, ms) => {
+  const setTimer = options.setTimer || ((fn, ms) => {
     const id = setTimeout(fn, ms);
     if (id && typeof id.unref === "function") id.unref();
     return id;
   });
-  const clearSchedule = options.clearSchedule || ((id) => clearTimeout(id));
+  const clearTimer = options.clearTimer || ((id) => clearTimeout(id));
   const root = options.root;
+  const doc = options.document ?? (typeof document === "undefined" ? undefined : document);
   let session = null;
   // Why the panel is open. null while it is closed.
   let openBy = null;
   let lastPointer = "";
+  // Esc while the icon is hovered. Cleared on pointerleave.
   let blockPointer = false;
+  // Esc restored focus onto the icon. The next focusin is that restoration.
   let ignoreNextFocus = false;
   let swallowClick = false;
-  let handlingClick = false;
-  let wasLive = false;
   let closeTimer = 0;
   let noteTimer = 0;
   let holdTimer = 0;
@@ -274,19 +275,17 @@ export function createLiveControl(options) {
   }
 
   function paint(status) {
+    const wasOn = button.dataset.live === "on";
     applyLiveStatus(button, live, status, menu?.head);
     const liveNow = status?.state === "live";
     if (!liveNow) {
-      if (clearHold() && !handlingClick) swallowClick = true;
+      if (clearHold()) swallowClick = true;
       closeMenu();
-      wasLive = false;
       return;
     }
-    const becameLive = !wasLive;
-    wasLive = true;
-    if (!becameLive) return;
+    if (wasOn) return;
     // A tap leaves :hover on Chrome's mobile emulation and on WebKit.
-    if (lastPointer !== "touch" && menuIsHovered()) openAs("pointer");
+    if (lastPointer !== "touch" && lastPointer !== "pen" && menuIsHovered()) openAs("pointer");
     if (focusVisible(button)) openAs("focus");
   }
 
@@ -316,7 +315,7 @@ export function createLiveControl(options) {
 
   function clearMenuResult() {
     if (noteTimer) {
-      clearSchedule(noteTimer);
+      clearTimer(noteTimer);
       noteTimer = 0;
     }
     if (!menu?.result) return;
@@ -326,8 +325,16 @@ export function createLiveControl(options) {
 
   function cancelClose() {
     if (!closeTimer) return;
-    clearSchedule(closeTimer);
+    clearTimer(closeTimer);
     closeTimer = 0;
+  }
+
+  function iconHovered() {
+    try {
+      return button.matches(":hover") === true;
+    } catch {
+      return false;
+    }
   }
 
   function closeMenu(kind) {
@@ -335,8 +342,9 @@ export function createLiveControl(options) {
     cancelClose();
     clearMenuResult();
     if (kind === "esc") {
-      blockPointer = true;
-      ignoreNextFocus = true;
+      if (iconHovered()) blockPointer = true;
+      // button.focus() on an already-focused button fires no focusin.
+      if (doc?.activeElement !== button) ignoreNextFocus = true;
     }
     const anchor = menu?.anchor;
     if (anchor?.dataset?.menu) delete anchor.dataset.menu;
@@ -353,7 +361,7 @@ export function createLiveControl(options) {
 
   function scheduleClose() {
     cancelClose();
-    closeTimer = schedule(() => {
+    closeTimer = setTimer(() => {
       closeTimer = 0;
       closeMenu();
     }, LIVE_MENU_CLOSE_MS);
@@ -362,12 +370,12 @@ export function createLiveControl(options) {
   function showMenuResult(text, kind) {
     if (!menu?.result) return;
     if (noteTimer) {
-      clearSchedule(noteTimer);
+      clearTimer(noteTimer);
       noteTimer = 0;
     }
     if (menu.result.textContent !== text) menu.result.textContent = text;
     if (menu.result.dataset) menu.result.dataset.result = kind;
-    noteTimer = schedule(() => {
+    noteTimer = setTimer(() => {
       noteTimer = 0;
       const viaTouch = openBy === "touch";
       clearMenuResult();
@@ -653,22 +661,22 @@ export function createLiveControl(options) {
     menu.video.addEventListener("click", copyClick("video"));
     const pointerArrived = (event) => {
       rememberPointer(event);
-      const type = event?.pointerType;
-      if (type !== "mouse" && type !== "pen") return;
+      if (event?.pointerType !== "mouse") return;
+      if (openBy === "focus") return;
       openAs("pointer");
     };
     menu.anchor.addEventListener("pointerenter", pointerArrived);
     menu.anchor.addEventListener("pointermove", pointerArrived);
     menu.anchor.addEventListener("pointerdown", (event) => {
       rememberPointer(event);
-      const type = event?.pointerType;
-      if (type !== "mouse" && type !== "pen") return;
+      if (event?.pointerType !== "mouse") return;
       if (openBy === "touch") openBy = "pointer";
     });
     menu.anchor.addEventListener("pointerleave", (event) => {
       blockPointer = false;
-      if (event?.pointerType === "touch" || button.dataset.live !== "on") return;
-      if (openBy === "touch" || menu.anchor.dataset.menu !== "open") return;
+      const type = event?.pointerType;
+      if (type === "touch" || type === "pen" || button.dataset.live !== "on") return;
+      if (openBy === "focus" || menu.anchor.dataset.menu !== "open") return;
       scheduleClose();
     });
     menu.anchor.addEventListener("focusin", (event) => {
@@ -693,21 +701,12 @@ export function createLiveControl(options) {
       button.focus?.();
     });
     if (root && typeof root.addEventListener === "function") {
-      root.addEventListener(
-        "pointerdown",
-        (event) => {
-          const shown = menu.anchor.dataset.menu === "open";
-          if (!shown && openBy !== "touch") return;
-          const target = event?.target;
-          if (target && typeof menu.anchor.contains === "function" && menu.anchor.contains(target)) return;
-          if (openBy === "touch") {
-            event?.preventDefault?.();
-            event?.stopPropagation?.();
-          }
-          closeMenu();
-        },
-        true,
-      );
+      root.addEventListener("pointerdown", (event) => {
+        if (menu.anchor.dataset.menu !== "open") return;
+        const target = event?.target;
+        if (target && typeof menu.anchor.contains === "function" && menu.anchor.contains(target)) return;
+        closeMenu();
+      });
     }
   }
 
@@ -722,27 +721,27 @@ export function createLiveControl(options) {
 
   function clearHold() {
     if (!holdTimer) return false;
-    clearSchedule(holdTimer);
+    clearTimer(holdTimer);
     holdTimer = 0;
     return true;
   }
   button.addEventListener("pointerdown", (event) => {
     rememberPointer(event);
     const type = event?.pointerType;
-    if (type === "mouse" || type === "pen") {
+    if (type === "mouse") {
       if (openBy === "touch") openBy = "pointer";
       swallowClick = false;
       clearHold();
       return;
     }
-    if (type !== "touch") {
+    if (type !== "touch" && type !== "pen") {
       swallowClick = false;
       return;
     }
     swallowClick = false;
     clearHold();
     if (button.dataset.live !== "on") return;
-    holdTimer = schedule(() => {
+    holdTimer = setTimer(() => {
       holdTimer = 0;
       swallowClick = true;
       openAs("touch");
@@ -765,11 +764,11 @@ export function createLiveControl(options) {
       event?.stopPropagation?.();
       return;
     }
-    handlingClick = true;
+    const pendingHold = holdTimer !== 0;
     try {
       Promise.resolve(onClick()).catch(() => {});
     } finally {
-      handlingClick = false;
+      if (pendingHold) swallowClick = false;
     }
   });
 
