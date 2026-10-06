@@ -64,6 +64,8 @@ button:hover { border-color: #5c564b; }
   display: flex;
   align-items: end;
   gap: 16px;
+  position: relative;
+  z-index: 5;
 }
 
 .mark {
@@ -129,6 +131,12 @@ button:hover { border-color: #5c564b; }
   color: var(--muted);
 }
 
+.live-button {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 .midi-button svg,
 .live-button svg {
   width: 22px;
@@ -141,6 +149,70 @@ button:hover { border-color: #5c564b; }
   color: #16140f;
   background: var(--a);
   border-color: var(--a);
+}
+
+.live-anchor {
+  position: relative;
+  flex: none;
+}
+
+.live-menu {
+  display: none;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 6;
+  width: max-content;
+  max-width: min(320px, 80vw);
+  padding-top: 8px;
+}
+
+.live-anchor[data-menu="open"] > .live-menu {
+  display: block;
+}
+
+/* The card hangs left of the icon. This covers the first diagonal step
+   without reaching the MIDI button 16px to the left. */
+.live-menu::before {
+  content: "";
+  position: absolute;
+  top: -36px;
+  right: 36px;
+  width: 14px;
+  height: 44px;
+}
+
+.live-menu-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.live-menu-head,
+.live-menu-result {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.live-menu-result { color: var(--cue); }
+
+.live-menu-result:empty { display: none; }
+
+.live-menu-result[data-result="fail"] { color: var(--danger); }
+
+.live-menu button {
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: left;
+  padding: 6px 8px;
 }
 
 .stage {

@@ -107,6 +107,11 @@ def test_index_uses_public_asset_prefix():
     assert "<svg" in live_button
     assert "配信を始める" not in live_button.split(">", 1)[1]
     assert 'class="sr-only" id="live-status" role="status"></p>' in html
+    assert 'id="live-copy-audio"' in html
+    assert "音声ストリーミングURLをコピー" in html
+    assert 'id="live-copy-video"' in html
+    assert "動画ストリーミングURLをコピー" in html
+    assert 'id="live-menu"' in html
     assert 'id="live-status"' not in html.split('id="live-button"', 1)[0]
     live_js = client.get("/djtube/static/live.js")
     assert live_js.status_code == 200

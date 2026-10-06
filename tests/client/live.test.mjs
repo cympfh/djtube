@@ -6,8 +6,15 @@ import {
   LIVE_BITRATE,
   LIVE_BUFFER_LIMIT,
   LIVE_BUTTON_LABEL,
+  LIVE_COPY_AUDIO,
   LIVE_COPY_FAILED,
+  LIVE_COPY_VIDEO,
+  LIVE_COPIED,
   LIVE_DROPPED,
+  LIVE_MENU_CLOSE_MS,
+  LIVE_MENU_COPY_FAILED,
+  LIVE_MENU_HOLD_MS,
+  LIVE_MENU_NOTE_MS,
   LIVE_SEND_BACKLOG,
   LIVE_TAKEN,
   LIVE_IDLE,
@@ -19,6 +26,7 @@ import {
   closeReason,
   createLiveControl,
   listenerUrl,
+  videoListenerUrl,
   liveButtonFace,
   livePublishUrl,
   liveStatusText,
@@ -37,11 +45,13 @@ function fakeButton() {
   const writes = [];
   let title = LIVE_IDLE;
   let label = LIVE_BUTTON_LABEL;
+  let expanded = "false";
   let face = "off";
   let liveText = "";
   const listeners = {};
   const button = {
     writes,
+    focused: false,
     get title() {
       return title;
     },
@@ -50,12 +60,17 @@ function fakeButton() {
       title = value;
     },
     getAttribute(name) {
-      return name === "aria-label" ? label : null;
+      if (name === "aria-label") return label;
+      if (name === "aria-expanded") return expanded;
+      return null;
     },
     setAttribute(name, value) {
-      if (name !== "aria-label") return;
-      writes.push("aria-label");
-      label = value;
+      if (name === "aria-label") {
+        writes.push("aria-label");
+        label = value;
+        return;
+      }
+      if (name === "aria-expanded") expanded = value;
     },
     dataset: {
       get live() {
@@ -69,8 +84,21 @@ function fakeButton() {
     addEventListener(type, fn) {
       listeners[type] = fn;
     },
+    focusVisible: false,
+    hover: false,
+    matches(selector) {
+      if (selector === ":focus-visible") return this.focusVisible === true;
+      if (selector === ":hover") return this.hover === true;
+      return false;
+    },
     click() {
       return listeners.click();
+    },
+    focus() {
+      this.focused = true;
+    },
+    emit(type, event) {
+      return listeners[type]?.(event);
     },
   };
   const live = {
@@ -196,8 +224,92 @@ function openBus(state = "running") {
   return { context, master, failed: false, destination };
 }
 
+function fakeClock() {
+  let now = 0;
+  let nextId = 1;
+  const queue = [];
+  return {
+    schedule(fn, ms) {
+      const id = nextId;
+      nextId += 1;
+      queue.push({ id, at: now + ms, fn });
+      return id;
+    },
+    clear(id) {
+      const item = queue.find((entry) => entry.id === id);
+      if (item) item.fn = null;
+    },
+    advance(ms) {
+      now += ms;
+      const due = queue.filter((entry) => entry.fn && entry.at <= now);
+      for (const entry of due) {
+        const fn = entry.fn;
+        entry.fn = null;
+        fn();
+      }
+    },
+  };
+}
+
+function fakeMenu() {
+  const listeners = { anchor: {} };
+  let headText = "";
+  let resultText = "";
+  const anchor = {
+    dataset: {},
+    hover: false,
+    focus: false,
+    matches(selector) {
+      if (selector === ":hover") return this.hover;
+      if (selector === ":focus-within") return this.focus;
+      return false;
+    },
+    contains(node) {
+      return node?.inside === true;
+    },
+    addEventListener(type, fn) {
+      listeners.anchor[type] = fn;
+    },
+    emit(type, event) {
+      listeners.anchor[type]?.(event);
+    },
+  };
+  const head = {
+    get textContent() {
+      return headText;
+    },
+    set textContent(value) {
+      headText = String(value);
+    },
+  };
+  const result = {
+    dataset: {},
+    get textContent() {
+      return resultText;
+    },
+    set textContent(value) {
+      resultText = String(value);
+    },
+  };
+  function pressable(slot) {
+    return {
+      addEventListener(type, fn) {
+        if (type === "click") listeners[slot] = fn;
+      },
+      click() {
+        return listeners[slot]?.({
+          preventDefault() {},
+          stopPropagation() {},
+        });
+      },
+    };
+  }
+  return { anchor, head, audio: pressable("audio"), video: pressable("video"), result };
+}
+
 function setup(extra = {}) {
   const ui = fakeButton();
+  const menu = extra.menu === null ? null : extra.menu || fakeMenu();
   const sockets = [];
   const recorders = [];
   const copies = [];
@@ -243,8 +355,13 @@ function setup(extra = {}) {
       }),
     armCopy: extra.armCopy,
     sleep: extra.sleep,
+    menu,
+    setTimer: extra.setTimer,
+    clearTimer: extra.clearTimer,
+    document: extra.document,
+    root: extra.root,
   });
-  return { ui, sockets, recorders, copies, bus, control };
+  return { ui, menu, sockets, recorders, copies, bus, control };
 }
 
 const LIVE_TOKEN = "secret-token";
@@ -269,6 +386,10 @@ async function goLive(harness, id = "ABCD", token = LIVE_TOKEN) {
 
 test("listener and publish URLs use the public prefix", () => {
   assert.equal(listenerUrl("/djtube", "ABCD", "https://s.cympfh.cc"), "https://s.cympfh.cc/djtube/stream/ABCD");
+  assert.equal(
+    videoListenerUrl("/djtube", "ABCD", "https://s.cympfh.cc"),
+    "https://s.cympfh.cc/djtube/stream/ABCD?thumbnail=1",
+  );
   assert.equal(livePublishUrl("/djtube", "https://s.cympfh.cc"), PUBLISH_URL);
   assert.equal(livePublishUrl("/djtube", "http://127.0.0.1:8098"), "ws://127.0.0.1:8098/djtube/api/live/publish");
   assert.equal(livePublishUrl("/djtube", "https://s.cympfh.cc", "ABCD", LIVE_TOKEN), PUBLISH_URL);
@@ -310,6 +431,7 @@ test("listener and publish URLs use the public prefix", () => {
 
 test("applyLiveStatus writes a result once and leaves the button name", () => {
   const ui = fakeButton();
+  const head = { textContent: "" };
   assert.equal(liveStatusText({ state: "idle" }), LIVE_IDLE);
   assert.equal(liveStatusText({ state: "unsupported" }), LIVE_UNSUPPORTED);
   assert.equal(liveStatusText({ state: "starting" }), LIVE_STARTING);
@@ -318,7 +440,7 @@ test("applyLiveStatus writes a result once and leaves the button name", () => {
     "配信中：https://s.cympfh.cc/djtube/stream/ABCD",
   );
 
-  applyLiveStatus(ui.button, ui.live, { state: "idle" });
+  applyLiveStatus(ui.button, ui.live, { state: "idle" }, head);
   assert.deepEqual(ui.painted(), {
     title: LIVE_IDLE,
     label: LIVE_BUTTON_LABEL,
@@ -328,10 +450,11 @@ test("applyLiveStatus writes a result once and leaves the button name", () => {
   assert.deepEqual(ui.button.writes, ["status"]);
 
   ui.button.writes.length = 0;
-  applyLiveStatus(ui.button, ui.live, { state: "idle" });
+  applyLiveStatus(ui.button, ui.live, { state: "idle" }, head);
   assert.deepEqual(ui.button.writes, []);
+  assert.equal(head.textContent, "");
 
-  applyLiveStatus(ui.button, ui.live, { state: "starting" });
+  applyLiveStatus(ui.button, ui.live, { state: "starting" }, head);
   assert.deepEqual(ui.painted(), {
     title: LIVE_STARTING,
     label: LIVE_BUTTON_LABEL,
@@ -341,32 +464,35 @@ test("applyLiveStatus writes a result once and leaves the button name", () => {
   assert.deepEqual(ui.button.writes, ["title"]);
 
   ui.button.writes.length = 0;
-  applyLiveStatus(ui.button, ui.live, { state: "starting" });
+  applyLiveStatus(ui.button, ui.live, { state: "starting" }, head);
   assert.deepEqual(ui.button.writes, []);
+  assert.equal(head.textContent, "");
 
   const url = "https://s.cympfh.cc/djtube/stream/ABCD";
-  applyLiveStatus(ui.button, ui.live, { state: "live", url, note: "" });
+  applyLiveStatus(ui.button, ui.live, { state: "live", url, note: "" }, head);
   assert.deepEqual(ui.painted(), {
-    title: `配信中：${url}`,
+    title: "",
     label: LIVE_BUTTON_LABEL,
     face: "on",
     live: `配信中：${url}`,
   });
+  assert.equal(head.textContent, `配信中：${url}`);
   assert.deepEqual(ui.button.writes, ["title", "status", "data-live"]);
 
   ui.button.writes.length = 0;
-  applyLiveStatus(ui.button, ui.live, { state: "live", url, note: "" });
+  applyLiveStatus(ui.button, ui.live, { state: "live", url, note: "" }, head);
   assert.deepEqual(ui.button.writes, []);
 
-  applyLiveStatus(ui.button, ui.live, { state: "live", url, copyFailed: true });
-  assert.equal(ui.painted().title, `配信中：${url}`);
+  applyLiveStatus(ui.button, ui.live, { state: "live", url, copyFailed: true }, head);
+  assert.equal(ui.painted().title, "");
+  assert.equal(head.textContent, `配信中：${url}`);
   assert.equal(ui.painted().live, `配信中：${url}。${LIVE_COPY_FAILED}`);
   assert.deepEqual(ui.button.writes, ["status"]);
   ui.button.writes.length = 0;
-  applyLiveStatus(ui.button, ui.live, { state: "live", url, copyFailed: true });
+  applyLiveStatus(ui.button, ui.live, { state: "live", url, copyFailed: true }, head);
   assert.deepEqual(ui.button.writes, []);
 
-  applyLiveStatus(ui.button, ui.live, { state: "error", reason: "配信の上限に達しました" });
+  applyLiveStatus(ui.button, ui.live, { state: "error", reason: "配信の上限に達しました" }, head);
   assert.deepEqual(ui.painted(), {
     title: "配信の上限に達しました",
     label: LIVE_BUTTON_LABEL,
@@ -374,9 +500,10 @@ test("applyLiveStatus writes a result once and leaves the button name", () => {
     live: "配信の上限に達しました",
   });
   assert.deepEqual(ui.button.writes, ["title", "status", "data-live"]);
+  assert.equal(head.textContent, "");
 
   ui.button.writes.length = 0;
-  applyLiveStatus(ui.button, ui.live, { state: "error", reason: "配信の上限に達しました" });
+  applyLiveStatus(ui.button, ui.live, { state: "error", reason: "配信の上限に達しました" }, head);
   assert.deepEqual(ui.button.writes, []);
 });
 
@@ -400,7 +527,8 @@ test("the first click publishes the master, copies the listener URL, and sends m
   await flush();
   const url = "https://s.cympfh.cc/djtube/stream/ABCD";
   assert.deepEqual(harness.copies, [url]);
-  assert.equal(harness.ui.painted().title, `配信中：${url}`);
+  assert.equal(harness.ui.painted().title, "");
+  assert.equal(harness.menu.head.textContent, `配信中：${url}`);
   assert.equal(harness.ui.painted().live, `配信中：${url}`);
   assert.equal(harness.ui.painted().face, "on");
   assert.equal(harness.ui.painted().label, LIVE_BUTTON_LABEL);
@@ -513,7 +641,8 @@ test("a failed copy still starts, and the URL stays on the hover", async () => {
   await goLive(harness, "WXYZ");
   const url = "https://s.cympfh.cc/djtube/stream/WXYZ";
   assert.equal(harness.ui.painted().face, "on");
-  assert.equal(harness.ui.painted().title, `配信中：${url}`);
+  assert.equal(harness.ui.painted().title, "");
+  assert.equal(harness.menu.head.textContent, `配信中：${url}`);
   assert.equal(harness.ui.painted().live, `配信中：${url}。${LIVE_COPY_FAILED}`);
   assert.equal(harness.sockets[0].sent[0], openedClaim());
 });
@@ -533,7 +662,8 @@ test("a rejected clipboard reservation falls back, and a failed fallback stays o
   const savedUrl = "https://s.cympfh.cc/djtube/stream/COPY";
   assert.deepEqual(saved.copies, [savedUrl]);
   assert.equal(saved.ui.painted().face, "on");
-  assert.equal(saved.ui.painted().title, `配信中：${savedUrl}`);
+  assert.equal(saved.ui.painted().title, "");
+  assert.equal(saved.menu.head.textContent, `配信中：${savedUrl}`);
   assert.equal(saved.ui.painted().live, `配信中：${savedUrl}`);
 
   const failed = setup({
@@ -552,7 +682,8 @@ test("a rejected clipboard reservation falls back, and a failed fallback stays o
   await goLive(failed, "FAIL");
   const failedUrl = "https://s.cympfh.cc/djtube/stream/FAIL";
   assert.equal(failed.ui.painted().face, "on");
-  assert.equal(failed.ui.painted().title, `配信中：${failedUrl}`);
+  assert.equal(failed.ui.painted().title, "");
+  assert.equal(failed.menu.head.textContent, `配信中：${failedUrl}`);
   assert.equal(failed.ui.painted().live, `配信中：${failedUrl}。${LIVE_COPY_FAILED}`);
   assert.equal(failed.sockets[0].sent[0], openedClaim());
   assert.equal(failed.sockets.length, 1);
@@ -566,6 +697,7 @@ test("the second click stops without copying or asking", async () => {
   await flush();
   assert.deepEqual(harness.copies, ["https://s.cympfh.cc/djtube/stream/ABCD"]);
   assert.equal(harness.ui.painted().title, LIVE_IDLE);
+  assert.equal(harness.menu.head.textContent, "");
   assert.equal(harness.ui.painted().live, LIVE_IDLE);
   assert.equal(harness.ui.painted().face, "off");
   assert.equal(harness.recorders[0].stopped, true);
@@ -591,7 +723,8 @@ test("silence keeps a zero-gain source on the stream until the broadcast stops",
   assert.deepEqual(keep.connections[0].connections, [dest]);
   assert.equal(harness.bus.master.connections.includes(keep.connections[0]), false);
   assert.equal(harness.ui.painted().face, "on");
-  assert.equal(harness.ui.painted().title, "配信中：https://s.cympfh.cc/djtube/stream/ABCD");
+  assert.equal(harness.ui.painted().title, "");
+  assert.equal(harness.menu.head.textContent, "配信中：https://s.cympfh.cc/djtube/stream/ABCD");
   harness.ui.button.click();
   await flush();
   assert.equal(keep.stopped, true);
@@ -661,7 +794,8 @@ test("starting again reuses the id and copies the same listener URL", async () =
   assert.equal(harness.sockets[1].sent[0], claimMessage("ABCD", LIVE_TOKEN, 2));
   harness.sockets[1].receive(idMessage());
   await flush();
-  assert.equal(harness.ui.painted().title, `配信中：${url}`);
+  assert.equal(harness.ui.painted().title, "");
+  assert.equal(harness.menu.head.textContent, `配信中：${url}`);
   assert.equal(harness.ui.painted().live, `配信中：${url}`);
   assert.equal(harness.ui.painted().face, "on");
   assert.deepEqual(harness.copies, [url, url]);
@@ -715,7 +849,8 @@ test("an immediate restart reuses the id and token without waiting for the old c
   harness.sockets[1].receive(idMessage());
   await flush();
   assert.equal(harness.ui.painted().face, "on");
-  assert.equal(harness.ui.painted().title, "配信中：https://s.cympfh.cc/djtube/stream/ABCD");
+  assert.equal(harness.ui.painted().title, "");
+  assert.equal(harness.menu.head.textContent, "配信中：https://s.cympfh.cc/djtube/stream/ABCD");
   releaseClose();
   await flush();
   assert.equal(harness.ui.painted().face, "on");
@@ -755,7 +890,8 @@ test("a 4409 drops the id and the next click takes a new one", async () => {
   assert.equal(harness.sockets[2].url, "wss://s.cympfh.cc/djtube/api/live/publish");
   harness.sockets[2].receive(idMessage("EFGH", "next-token"));
   await flush();
-  assert.equal(harness.ui.painted().title, "配信中：https://s.cympfh.cc/djtube/stream/EFGH");
+  assert.equal(harness.ui.painted().title, "");
+  assert.equal(harness.menu.head.textContent, "配信中：https://s.cympfh.cc/djtube/stream/EFGH");
   assert.equal(harness.ui.painted().face, "on");
   assert.equal(JSON.parse(harness.sockets[2].sent[0]).seq, 3);
 });
@@ -928,14 +1064,16 @@ test("a deck that missed the master is named on the live hover", async () => {
   await goLive(harness);
   const url = "https://s.cympfh.cc/djtube/stream/ABCD";
   const noted = `${`配信中：${url}`}。デッキ A はマスターに入っていないため、配信には入りません`;
-  assert.equal(harness.ui.painted().title, noted);
+  assert.equal(harness.ui.painted().title, "");
+  assert.equal(harness.menu.head.textContent, noted);
   assert.equal(harness.ui.painted().live, noted);
   harness.ui.button.writes.length = 0;
   harness.control.refresh();
   assert.deepEqual(harness.ui.button.writes, []);
   gap.A = false;
   harness.control.refresh();
-  assert.equal(harness.ui.painted().title, `配信中：${url}`);
+  assert.equal(harness.ui.painted().title, "");
+  assert.equal(harness.menu.head.textContent, `配信中：${url}`);
   assert.equal(harness.ui.painted().live, `配信中：${url}`);
   harness.ui.button.writes.length = 0;
   harness.control.refresh();
@@ -956,6 +1094,630 @@ test("an unsupported browser keeps the hover and does not open a socket", async 
   assert.equal(harness.ui.painted().title, LIVE_UNSUPPORTED);
 });
 
+test("the live menu copies the audio and video URLs without stopping", async () => {
+  const harness = setup();
+  await harness.menu.audio.click();
+  await flush();
+  assert.deepEqual(harness.copies, []);
+  assert.equal(harness.menu.result.textContent, "");
+
+  await goLive(harness);
+  const url = "https://s.cympfh.cc/djtube/stream/ABCD";
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  harness.menu.anchor.emit("pointerenter", { pointerType: "mouse" });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+
+  await harness.menu.audio.click();
+  await flush();
+  assert.deepEqual(harness.copies, [url, url]);
+  assert.equal(harness.menu.result.textContent, LIVE_COPIED);
+  assert.equal(harness.menu.result.dataset.result, "ok");
+  assert.equal(harness.ui.painted().face, "on");
+  assert.equal(harness.sockets[0].closed, null);
+
+  await harness.menu.video.click();
+  await flush();
+  assert.equal(harness.copies[2], `${url}?thumbnail=1`);
+  assert.equal(harness.menu.result.textContent, LIVE_COPIED);
+  assert.equal(harness.ui.painted().face, "on");
+  assert.equal(harness.sockets.length, 1);
+});
+
+test("a failed menu copy stays on the air and says so", async () => {
+  let fail = false;
+  const harness = setup({
+    async copyText(url) {
+      if (fail) throw new Error("denied");
+      harness.copies.push(url);
+    },
+  });
+  await goLive(harness);
+  fail = true;
+  await harness.menu.audio.click();
+  await flush();
+  assert.equal(harness.menu.result.textContent, LIVE_MENU_COPY_FAILED);
+  assert.equal(harness.menu.result.dataset.result, "fail");
+  assert.equal(harness.ui.painted().face, "on");
+  assert.equal(harness.copies.length, 1);
+});
+
+test("the live menu opens from the pointer and closes after it has left", async () => {
+  const clock = fakeClock();
+  const harness = setup({ setTimer: clock.schedule, clearTimer: clock.clear });
+  await goLive(harness);
+  harness.menu.anchor.emit("pointerenter", { pointerType: "touch" });
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  harness.menu.anchor.emit("pointerenter", { pointerType: "mouse" });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  harness.menu.anchor.emit("pointerleave");
+  clock.advance(LIVE_MENU_CLOSE_MS - 1);
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  harness.menu.anchor.emit("pointerenter", { pointerType: "mouse" });
+  clock.advance(LIVE_MENU_CLOSE_MS);
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  harness.menu.anchor.emit("pointerleave");
+  clock.advance(LIVE_MENU_CLOSE_MS);
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+});
+
+test("a mouse click does not open the menu, and a keyboard focus does", async () => {
+  const harness = setup();
+  await goLive(harness);
+  harness.ui.button.emit("pointerdown", { pointerType: "mouse" });
+  harness.menu.anchor.emit("focusin", { target: harness.ui.button });
+  harness.ui.button.emit("pointerup");
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  harness.ui.button.focusVisible = true;
+  harness.menu.anchor.emit("focusin", { target: harness.ui.button });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  harness.menu.anchor.emit("focusout", { relatedTarget: { inside: true } });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  harness.menu.anchor.emit("focusout", { relatedTarget: { inside: false } });
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+});
+
+test("escape closes the live menu and does not reopen from the returned focus", async () => {
+  const harness = setup();
+  await goLive(harness);
+  harness.ui.button.focus = () => {
+    harness.ui.button.focused = true;
+    harness.ui.button.focusVisible = true;
+    harness.menu.anchor.emit("focusin", { target: harness.ui.button });
+  };
+  harness.ui.button.focusVisible = true;
+  harness.menu.anchor.emit("focusin", { target: harness.ui.button });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  const event = {
+    key: "Escape",
+    prevented: false,
+    stopped: false,
+    preventDefault() {
+      this.prevented = true;
+    },
+    stopPropagation() {
+      this.stopped = true;
+    },
+  };
+  harness.menu.anchor.emit("keydown", event);
+  assert.equal(event.prevented, true);
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  assert.equal(harness.ui.button.focused, true);
+  assert.equal(harness.ui.painted().face, "on");
+});
+
+test("a long press opens the menu and the following click does not stop", async () => {
+  const clock = fakeClock();
+  const harness = setup({ setTimer: clock.schedule, clearTimer: clock.clear });
+  await goLive(harness);
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS - 1);
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  clock.advance(1);
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  harness.ui.button.click();
+  await flush();
+  assert.equal(harness.ui.painted().face, "on");
+  assert.equal(harness.sockets[0].closed, null);
+});
+
+test("lifting a touch long-press sends pointerleave and leaves the menu open", async () => {
+  const clock = fakeClock();
+  const root = {
+    listener: null,
+    addEventListener(_type, fn) {
+      this.listener = fn;
+    },
+    emit(event) {
+      this.listener?.(event);
+    },
+  };
+  const harness = setup({ setTimer: clock.schedule, clearTimer: clock.clear, root });
+  await goLive(harness);
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS);
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  harness.ui.button.emit("pointerup");
+  harness.menu.anchor.emit("pointerleave", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_CLOSE_MS);
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  root.emit({ target: { inside: false } });
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+});
+
+test("a long-press that ends without a click does not swallow the next tap", async () => {
+  const clock = fakeClock();
+  const harness = setup({ setTimer: clock.schedule, clearTimer: clock.clear });
+  await goLive(harness);
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS);
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  harness.ui.button.emit("pointercancel");
+  harness.ui.button.click();
+  await flush();
+  assert.equal(harness.ui.painted().face, "off");
+  assert.equal(harness.sockets[0].closed, 1000);
+
+  const early = setup({ setTimer: clock.schedule, clearTimer: clock.clear });
+  await goLive(early);
+  early.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS - 1);
+  early.ui.button.emit("pointercancel");
+  clock.advance(1);
+  early.ui.button.click();
+  await flush();
+  assert.equal(early.ui.painted().face, "off");
+  assert.equal(early.sockets[0].closed, 1000);
+});
+
+test("pointerdown clears a leftover long-press so the next click stops", async () => {
+  const clock = fakeClock();
+  const harness = setup({ setTimer: clock.schedule, clearTimer: clock.clear });
+  await goLive(harness);
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS);
+  assert.equal(harness.ui.painted().face, "on");
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
+  harness.ui.button.click();
+  await flush();
+  assert.equal(harness.ui.painted().face, "off");
+  assert.equal(harness.sockets[0].closed, 1000);
+});
+
+test("a pointer already on the icon opens the menu when the broadcast starts", async () => {
+  const harness = setup();
+  harness.menu.anchor.emit("pointerenter", { pointerType: "mouse" });
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  harness.menu.anchor.hover = true;
+  await goLive(harness);
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+});
+
+test("a pointermove after the start click opens the menu for a mouse", async () => {
+  const harness = setup();
+  harness.menu.anchor.emit("pointerenter", { pointerType: "mouse" });
+  await goLive(harness);
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  harness.menu.anchor.emit("pointermove", { pointerType: "touch" });
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  harness.menu.anchor.emit("pointermove", { pointerType: "pen" });
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  harness.menu.anchor.emit("pointermove", { pointerType: "mouse" });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+});
+
+test("stopping closes the menu and drops a pending long-press", async () => {
+  const clock = fakeClock();
+  const harness = setup({ setTimer: clock.schedule, clearTimer: clock.clear });
+  await goLive(harness);
+  harness.menu.anchor.emit("pointerenter", { pointerType: "mouse" });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
+  harness.ui.button.click();
+  await flush();
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  assert.equal(harness.ui.painted().title, LIVE_IDLE);
+  clock.advance(LIVE_MENU_HOLD_MS);
+  harness.ui.button.click();
+  await flush();
+  assert.equal(harness.sockets.length, 2);
+  harness.sockets[1].receive(idMessage());
+  await flush();
+  assert.equal(harness.ui.painted().face, "on");
+});
+
+test("a second copy extends the note, and a touch copy closes the menu when it fades", async () => {
+  const clock = fakeClock();
+  const harness = setup({ setTimer: clock.schedule, clearTimer: clock.clear });
+  await goLive(harness);
+  harness.menu.anchor.emit("pointerenter", { pointerType: "mouse" });
+  await harness.menu.audio.click();
+  await flush();
+  assert.equal(harness.menu.result.textContent, LIVE_COPIED);
+  clock.advance(LIVE_MENU_NOTE_MS - 1);
+  assert.equal(harness.menu.result.textContent, LIVE_COPIED);
+  await harness.menu.audio.click();
+  await flush();
+  clock.advance(1);
+  assert.equal(harness.menu.result.textContent, LIVE_COPIED);
+  clock.advance(LIVE_MENU_NOTE_MS - 2);
+  assert.equal(harness.menu.result.textContent, LIVE_COPIED);
+  clock.advance(1);
+  assert.equal(harness.menu.result.textContent, "");
+  assert.equal(harness.menu.result.dataset.result, undefined);
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS);
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  await harness.menu.audio.click();
+  await flush();
+  assert.equal(harness.menu.result.textContent, LIVE_COPIED);
+  clock.advance(LIVE_MENU_NOTE_MS);
+  assert.equal(harness.menu.result.textContent, "");
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+});
+
+test("the live icon swallows the long-press context menu", () => {
+  const harness = setup();
+  const event = {
+    prevented: false,
+    preventDefault() {
+      this.prevented = true;
+    },
+  };
+  harness.ui.button.emit("contextmenu", event);
+  assert.equal(event.prevented, true);
+});
+
+test("a tap outside closes the menu and stopping clears the copy note", async () => {
+  const clock = fakeClock();
+  const root = {
+    listener: null,
+    addEventListener(_type, fn) {
+      this.listener = fn;
+    },
+    emit(event) {
+      this.listener?.(event);
+    },
+  };
+  const harness = setup({ setTimer: clock.schedule, clearTimer: clock.clear, root });
+  await goLive(harness);
+  harness.menu.anchor.emit("pointerenter", { pointerType: "mouse" });
+  root.emit({ target: { inside: true } });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  root.emit({ target: { inside: false } });
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+
+  await harness.menu.audio.click();
+  await flush();
+  assert.equal(harness.menu.result.textContent, LIVE_COPIED);
+  clock.advance(LIVE_MENU_NOTE_MS);
+  assert.equal(harness.menu.result.textContent, "");
+
+  await harness.menu.audio.click();
+  await flush();
+  assert.equal(harness.menu.result.textContent, LIVE_COPIED);
+  harness.ui.button.click();
+  await flush();
+  assert.equal(harness.menu.result.textContent, "");
+  assert.equal(harness.ui.painted().title, LIVE_IDLE);
+});
+
+function outsidePointer() {
+  return {
+    target: { inside: false },
+    prevented: false,
+    stopped: false,
+    preventDefault() {
+      this.prevented = true;
+    },
+    stopPropagation() {
+      this.stopped = true;
+    },
+  };
+}
+
+function rootHarness(clock) {
+  const root = {
+    listener: null,
+    addEventListener(_type, fn) {
+      this.listener = fn;
+    },
+    emit(event) {
+      this.listener?.(event);
+    },
+  };
+  const harness = setup({ setTimer: clock.schedule, clearTimer: clock.clear, root });
+  return { root, harness };
+}
+
+test("pressing the url text does not close the menu", async () => {
+  const { root, harness } = rootHarness(fakeClock());
+  await goLive(harness);
+  harness.menu.anchor.emit("pointerenter", { pointerType: "mouse" });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  const head = harness.menu.head.textContent;
+  root.emit({ target: { inside: true } });
+  harness.menu.anchor.emit("focusout", { relatedTarget: null });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  assert.equal(harness.menu.head.textContent, head);
+  assert.equal(head.includes("配信中："), true);
+});
+
+test("closing clears the copy note so a reopened menu stays up", async () => {
+  const clock = fakeClock();
+  const { root, harness } = rootHarness(clock);
+  await goLive(harness);
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS);
+  await harness.menu.audio.click();
+  await flush();
+  assert.equal(harness.menu.result.textContent, LIVE_COPIED);
+  root.emit(outsidePointer());
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  assert.equal(harness.menu.result.textContent, "");
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS);
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  assert.equal(harness.menu.result.textContent, "");
+  clock.advance(LIVE_MENU_NOTE_MS);
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  assert.equal(harness.menu.result.textContent, "");
+});
+
+test("a mouse after a touch open keeps the menu up, and a mouse hold still stops", async () => {
+  const clock = fakeClock();
+  const harness = setup({ setTimer: clock.schedule, clearTimer: clock.clear });
+  await goLive(harness);
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS);
+  harness.menu.anchor.emit("pointerdown", { pointerType: "mouse" });
+  await harness.menu.audio.click();
+  await flush();
+  clock.advance(LIVE_MENU_NOTE_MS);
+  assert.equal(harness.menu.result.textContent, "");
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  assert.equal(harness.ui.painted().face, "on");
+
+  harness.ui.button.emit("pointerdown", { pointerType: "mouse" });
+  clock.advance(700);
+  harness.ui.button.click();
+  await flush();
+  assert.equal(harness.ui.painted().face, "off");
+  assert.equal(harness.sockets[0].closed, 1000);
+});
+
+test("an outside tap closes the menu and is not prevented", async () => {
+  const clock = fakeClock();
+  const { root, harness } = rootHarness(clock);
+  await goLive(harness);
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS);
+  const tap = outsidePointer();
+  root.emit(tap);
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  assert.equal(tap.prevented, false);
+  assert.equal(tap.stopped, false);
+  assert.equal(harness.ui.painted().face, "on");
+  const again = outsidePointer();
+  root.emit(again);
+  assert.equal(again.prevented, false);
+  assert.equal(again.stopped, false);
+});
+
+test("a touch tap that leaves :hover does not open the menu when the broadcast starts", async () => {
+  const clock = fakeClock();
+  const harness = setup({ setTimer: clock.schedule, clearTimer: clock.clear });
+  harness.menu.anchor.hover = true;
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
+  harness.ui.button.emit("pointerup");
+  await goLive(harness);
+  clock.advance(60);
+  harness.menu.anchor.emit("focusin", { target: harness.ui.button });
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  assert.equal(harness.ui.painted().face, "on");
+});
+
+test("enter from the keyboard opens the menu when the broadcast starts", async () => {
+  const harness = setup();
+  harness.ui.button.focusVisible = true;
+  harness.ui.button.emit("keydown", { key: "Enter" });
+  await goLive(harness);
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  assert.equal(harness.ui.painted().face, "on");
+});
+
+test("escape stays closed until the pointer leaves and comes back", async () => {
+  const harness = setup();
+  await goLive(harness);
+  harness.menu.anchor.hover = true;
+  harness.ui.button.hover = true;
+  harness.menu.anchor.emit("pointerenter", { pointerType: "mouse" });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  harness.ui.button.focus = () => {
+    harness.ui.button.focused = true;
+    harness.ui.button.focusVisible = true;
+    harness.menu.anchor.emit("focusin", { target: harness.ui.button });
+  };
+  harness.menu.anchor.emit("keydown", {
+    key: "Escape",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  harness.menu.anchor.emit("pointermove", { pointerType: "mouse" });
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  harness.control.refresh();
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  harness.menu.anchor.emit("pointerleave", { pointerType: "mouse" });
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  harness.menu.anchor.emit("pointerenter", { pointerType: "mouse" });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+});
+
+test("a socket drop during a long-press does not start another broadcast on the lift click", async () => {
+  const clock = fakeClock();
+  const during = setup({ setTimer: clock.schedule, clearTimer: clock.clear });
+  await goLive(during);
+  during.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS - 1);
+  during.sockets[0].serverClose(1006);
+  await flush();
+  during.ui.button.emit("pointerup");
+  during.ui.button.click();
+  await flush();
+  assert.equal(during.sockets.length, 1);
+  assert.equal(during.ui.painted().face, "off");
+
+  const after = setup({ setTimer: clock.schedule, clearTimer: clock.clear });
+  await goLive(after);
+  after.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS);
+  assert.equal(after.menu.anchor.dataset.menu, "open");
+  after.sockets[0].serverClose(1006);
+  await flush();
+  after.ui.button.emit("pointerup");
+  after.ui.button.click();
+  await flush();
+  assert.equal(after.sockets.length, 1);
+  assert.equal(after.menu.anchor.dataset.menu, undefined);
+  assert.equal(after.ui.painted().face, "off");
+});
+
+test("a mouse outside tap closes the menu and is not prevented", async () => {
+  const { root, harness } = rootHarness(fakeClock());
+  await goLive(harness);
+  harness.menu.anchor.emit("pointerenter", { pointerType: "mouse" });
+  const mouse = outsidePointer();
+  root.emit(mouse);
+  assert.equal(mouse.prevented, false);
+  assert.equal(mouse.stopped, false);
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  assert.equal(harness.ui.painted().face, "on");
+});
+
+test("a mouse pointerenter after a touch open keeps the menu when the note fades", async () => {
+  const clock = fakeClock();
+  const harness = setup({ setTimer: clock.schedule, clearTimer: clock.clear });
+  await goLive(harness);
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS);
+  await harness.menu.audio.click();
+  await flush();
+  harness.menu.anchor.emit("pointerenter", { pointerType: "mouse" });
+  clock.advance(LIVE_MENU_NOTE_MS);
+  assert.equal(harness.menu.result.textContent, "");
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+});
+
+test("a mouse pointermove after a touch open keeps the menu when the note fades", async () => {
+  const clock = fakeClock();
+  const harness = setup({ setTimer: clock.schedule, clearTimer: clock.clear });
+  await goLive(harness);
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS);
+  await harness.menu.audio.click();
+  await flush();
+  harness.menu.anchor.emit("pointermove", { pointerType: "mouse" });
+  clock.advance(LIVE_MENU_NOTE_MS);
+  assert.equal(harness.menu.result.textContent, "");
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+});
+
+test("escape with the pointer outside does not block the next hover", async () => {
+  const harness = setup();
+  await goLive(harness);
+  harness.ui.button.focusVisible = true;
+  harness.menu.anchor.emit("focusin", { target: harness.ui.button });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  harness.ui.button.focus = () => {
+    harness.ui.button.focused = true;
+  };
+  harness.menu.anchor.emit("keydown", {
+    key: "Escape",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  harness.ui.button.focusVisible = false;
+  harness.menu.anchor.emit("focusout", { relatedTarget: { inside: false } });
+  harness.menu.anchor.emit("pointerenter", { pointerType: "mouse" });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+});
+
+test("escape while the icon is focused opens again when focus returns", async () => {
+  const doc = { activeElement: null };
+  const harness = setup({ document: doc });
+  await goLive(harness);
+  harness.ui.button.focusVisible = true;
+  doc.activeElement = harness.ui.button;
+  harness.menu.anchor.emit("focusin", { target: harness.ui.button });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  harness.menu.anchor.emit("keydown", {
+    key: "Escape",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  assert.equal(harness.ui.button.focused, true);
+  harness.ui.button.focusVisible = false;
+  harness.menu.anchor.emit("focusout", { relatedTarget: { inside: false } });
+  harness.ui.button.focusVisible = true;
+  harness.menu.anchor.emit("focusin", { target: harness.ui.button });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+});
+
+test("a pen already on the icon does not open the menu when the broadcast starts", async () => {
+  const harness = setup();
+  harness.menu.anchor.hover = true;
+  harness.ui.button.emit("pointerdown", { pointerType: "pen" });
+  harness.ui.button.emit("pointerup");
+  await goLive(harness);
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  assert.equal(harness.ui.painted().face, "on");
+});
+
+test("a pen hold opens the menu and a pen leave does not close it", async () => {
+  const clock = fakeClock();
+  const harness = setup({ setTimer: clock.schedule, clearTimer: clock.clear });
+  await goLive(harness);
+  harness.ui.button.emit("pointerdown", { pointerType: "pen" });
+  clock.advance(LIVE_MENU_HOLD_MS - 1);
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  clock.advance(1);
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  harness.ui.button.click();
+  await flush();
+  assert.equal(harness.ui.painted().face, "on");
+  harness.menu.anchor.emit("pointerleave", { pointerType: "pen" });
+  clock.advance(LIVE_MENU_CLOSE_MS);
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+});
+
+test("a mouse passing over a keyboard-opened menu leaves it open", async () => {
+  const clock = fakeClock();
+  const harness = setup({ setTimer: clock.schedule, clearTimer: clock.clear });
+  await goLive(harness);
+  const panel = {
+    inside: true,
+    matches() {
+      return true;
+    },
+  };
+  harness.menu.anchor.emit("focusin", { target: panel });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  let blurred = false;
+  harness.ui.button.blur = () => {
+    blurred = true;
+  };
+  harness.menu.anchor.emit("pointerenter", { pointerType: "mouse" });
+  harness.menu.anchor.emit("pointermove", { pointerType: "mouse" });
+  harness.menu.anchor.emit("pointerleave", { pointerType: "mouse" });
+  clock.advance(LIVE_MENU_CLOSE_MS);
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  assert.equal(blurred, false);
+});
+
 test("the header button matches the MIDI control and the page tells a DJ how to start", () => {
   const app = readFileSync(new URL("../../djtube/static/app.js", import.meta.url), "utf8");
   const css = readFileSync(new URL("../../djtube/static/app.css", import.meta.url), "utf8");
@@ -974,6 +1736,22 @@ test("the header button matches the MIDI control and the page tells a DJ how to 
   assert.match(html, /id="live-button"/);
   assert.match(html, /id="live-status" role="status"/);
   assert.match(html, /title="配信を始める"/);
+  assert.match(html, /id="live-copy-audio">音声ストリーミングURLをコピー/);
+  assert.match(html, /id="live-copy-video">動画ストリーミングURLをコピー/);
+  assert.equal(LIVE_COPY_AUDIO, "音声ストリーミングURLをコピー");
+  assert.equal(LIVE_COPY_VIDEO, "動画ストリーミングURLをコピー");
+  assert.match(css, /\.live-anchor\[data-menu="open"\] > \.live-menu/);
+  assert.match(css, /\.live-menu::before\s*\{[^}]*width:\s*14px/);
+  assert.equal(css.includes(":focus-within"), false);
+  assert.match(css, /\.live-menu\s*\{[^}]*padding-top:\s*8px/);
+  assert.match(html, /id="live-button"[^>]*aria-describedby="live-menu-head"/);
+  assert.match(css, /\.live-button\s*\{[^}]*-webkit-touch-callout:\s*none/);
+  assert.match(css, /\.live-button\s*\{[^}]*-webkit-user-select:\s*none/);
+  assert.match(css, /\.live-button\s*\{[^}]*user-select:\s*none/);
+  assert.equal(/id="live-button"[^>]*aria-expanded/.test(html), false);
+  assert.equal(/id="live-button"[^>]*aria-controls/.test(html), false);
+  assert.match(app, /getElementById\("live-copy-audio"\)/);
+  assert.match(app, /getElementById\("live-copy-video"\)/);
   assert.equal(html.includes("おもちゃ"), false);
   assert.match(
     readme,

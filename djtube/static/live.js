@@ -14,6 +14,13 @@ export const LIVE_UNSUPPORTED = "このブラウザでは配信できません";
 export const LIVE_CONNECT_FAILED = "音声を配信に接続できませんでした";
 export const LIVE_DROPPED = "配信が切れました";
 export const LIVE_COPY_FAILED = "URL をコピーできませんでした";
+export const LIVE_COPIED = "コピーしました";
+export const LIVE_MENU_COPY_FAILED = "コピーできませんでした";
+export const LIVE_MENU_CLOSE_MS = 250;
+export const LIVE_MENU_NOTE_MS = 4000;
+export const LIVE_MENU_HOLD_MS = 500;
+export const LIVE_COPY_AUDIO = "音声ストリーミングURLをコピー";
+export const LIVE_COPY_VIDEO = "動画ストリーミングURLをコピー";
 export const LIVE_SEND_BACKLOG = "送信が追いつかないため、配信を止めました";
 export const LIVE_TAKEN = "この配信 ID は他の人が使っています。もう一度押すと新しい ID で配信します";
 export const LIVE_BUFFER_LIMIT = 1024 * 1024;
@@ -65,6 +72,10 @@ export function listenerUrl(prefix, id, origin) {
   return `${base}${prefix}/stream/${encodeURIComponent(id)}`;
 }
 
+export function videoListenerUrl(prefix, id, origin) {
+  return `${listenerUrl(prefix, id, origin)}?thumbnail=1`;
+}
+
 export function closeReason(code) {
   return CLOSE_TEXT[code] || LIVE_DROPPED;
 }
@@ -96,22 +107,34 @@ export function liveButtonFace(status) {
   return status?.state === "live" ? "on" : "off";
 }
 
-/** Hover stays the live URL. A failed copy is only added for the screen reader. */
+/** The screen reader hears the live URL. A failed copy is only added there. */
 export function liveAnnounceText(status) {
   const text = liveStatusText(status);
   if (status?.state === "live" && status.copyFailed) return `${text}。${LIVE_COPY_FAILED}`;
   return text;
 }
 
-/** Paint the header button and the hidden result. Skip a write when the value is unchanged. */
-export function applyLiveStatus(button, live, status) {
+/**
+ * Paint the header button, the hidden result, and the live menu heading.
+ * While live the browser title stays empty so it does not sit on top of the menu.
+ * Skip a write when the value is unchanged.
+ */
+export function applyLiveStatus(button, live, status, menuHead) {
   const hover = liveStatusText(status);
   const announced = liveAnnounceText(status);
-  if (button.title !== hover) button.title = hover;
+  const nativeTitle = status?.state === "live" ? "" : hover;
+  if (button.title !== nativeTitle) button.title = nativeTitle;
   if (button.getAttribute("aria-label") !== LIVE_BUTTON_LABEL) button.setAttribute("aria-label", LIVE_BUTTON_LABEL);
   if (status?.state !== "starting" && live.textContent !== announced) live.textContent = announced;
   const face = liveButtonFace(status);
   if (button.dataset.live !== face) button.dataset.live = face;
+  const menuText = status?.state === "live" ? hover : "";
+  if (menuHead && menuHead.textContent !== menuText) menuHead.textContent = menuText;
+}
+
+function readyMenu(menu) {
+  if (!menu?.anchor || !menu.head || !menu.audio || !menu.video || !menu.result) return null;
+  return menu;
 }
 
 export async function copyLiveUrl(url, doc = globalThis.document, nav = globalThis.navigator) {
@@ -188,7 +211,27 @@ export function createLiveControl(options) {
   const createRecorder = options.createRecorder;
   const copyText = options.copyText;
   const armCopy = options.armCopy;
+  const menu = readyMenu(options.menu);
+  const setTimer = options.setTimer || ((fn, ms) => {
+    const id = setTimeout(fn, ms);
+    if (id && typeof id.unref === "function") id.unref();
+    return id;
+  });
+  const clearTimer = options.clearTimer || ((id) => clearTimeout(id));
+  const root = options.root;
+  const doc = options.document ?? (typeof document === "undefined" ? undefined : document);
   let session = null;
+  // Why the panel is open. null while it is closed.
+  let openBy = null;
+  let lastPointer = "";
+  // Esc while the icon is hovered. Cleared on pointerleave.
+  let blockPointer = false;
+  // Esc restored focus onto the icon. The next focusin is that restoration.
+  let ignoreNextFocus = false;
+  let swallowClick = false;
+  let closeTimer = 0;
+  let noteTimer = 0;
+  let holdTimer = 0;
   let pinnedId = "";
   let pinnedToken = "";
   let claimSeq = 0;
@@ -232,7 +275,127 @@ export function createLiveControl(options) {
   }
 
   function paint(status) {
-    applyLiveStatus(button, live, status);
+    const wasOn = button.dataset.live === "on";
+    applyLiveStatus(button, live, status, menu?.head);
+    const liveNow = status?.state === "live";
+    if (!liveNow) {
+      if (clearHold()) swallowClick = true;
+      closeMenu();
+      return;
+    }
+    if (wasOn) return;
+    // A tap leaves :hover on Chrome's mobile emulation and on WebKit.
+    if (lastPointer !== "touch" && lastPointer !== "pen" && menuIsHovered()) openAs("pointer");
+    if (focusVisible(button)) openAs("focus");
+  }
+
+  function menuIsHovered() {
+    const anchor = menu?.anchor;
+    if (!anchor || typeof anchor.matches !== "function") return false;
+    try {
+      return anchor.matches(":hover") === true;
+    } catch {
+      return false;
+    }
+  }
+
+  function focusVisible(node) {
+    if (!node || typeof node.matches !== "function") return false;
+    try {
+      return node.matches(":focus-visible") === true;
+    } catch {
+      return false;
+    }
+  }
+
+  function rememberPointer(event) {
+    const type = event?.pointerType;
+    if (type === "mouse" || type === "pen" || type === "touch") lastPointer = type;
+  }
+
+  function clearMenuResult() {
+    if (noteTimer) {
+      clearTimer(noteTimer);
+      noteTimer = 0;
+    }
+    if (!menu?.result) return;
+    if (menu.result.textContent) menu.result.textContent = "";
+    if (menu.result.dataset?.result) delete menu.result.dataset.result;
+  }
+
+  function cancelClose() {
+    if (!closeTimer) return;
+    clearTimer(closeTimer);
+    closeTimer = 0;
+  }
+
+  function iconHovered() {
+    try {
+      return button.matches(":hover") === true;
+    } catch {
+      return false;
+    }
+  }
+
+  function closeMenu(kind) {
+    openBy = null;
+    cancelClose();
+    clearMenuResult();
+    if (kind === "esc") {
+      if (iconHovered()) blockPointer = true;
+      // button.focus() on an already-focused button fires no focusin.
+      if (doc?.activeElement !== button) ignoreNextFocus = true;
+    }
+    const anchor = menu?.anchor;
+    if (anchor?.dataset?.menu) delete anchor.dataset.menu;
+  }
+
+  function openAs(reason) {
+    const anchor = menu?.anchor;
+    if (!anchor || button.dataset.live !== "on") return;
+    if (reason === "pointer" && blockPointer) return;
+    openBy = reason;
+    cancelClose();
+    if (anchor.dataset.menu !== "open") anchor.dataset.menu = "open";
+  }
+
+  function scheduleClose() {
+    cancelClose();
+    closeTimer = setTimer(() => {
+      closeTimer = 0;
+      closeMenu();
+    }, LIVE_MENU_CLOSE_MS);
+  }
+
+  function showMenuResult(text, kind) {
+    if (!menu?.result) return;
+    if (noteTimer) {
+      clearTimer(noteTimer);
+      noteTimer = 0;
+    }
+    if (menu.result.textContent !== text) menu.result.textContent = text;
+    if (menu.result.dataset) menu.result.dataset.result = kind;
+    noteTimer = setTimer(() => {
+      noteTimer = 0;
+      const viaTouch = openBy === "touch";
+      clearMenuResult();
+      if (viaTouch) closeMenu();
+    }, LIVE_MENU_NOTE_MS);
+  }
+
+  async function copyMenu(kind) {
+    const mine = session;
+    if (!mine || mine.ended || !mine.url) return;
+    const url = kind === "video" ? `${mine.url}?thumbnail=1` : mine.url;
+    try {
+      if (typeof copyText !== "function") throw new Error("clipboard");
+      await copyText(url);
+      if (mine.ended || session !== mine) return;
+      showMenuResult(LIVE_COPIED, "ok");
+    } catch {
+      if (mine.ended || session !== mine) return;
+      showMenuResult(LIVE_MENU_COPY_FAILED, "fail");
+    }
   }
 
   function teardown(mine) {
@@ -488,6 +651,65 @@ export function createLiveControl(options) {
     openPublish(mine);
   }
 
+  if (menu) {
+    const copyClick = (kind) => (event) => {
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      return copyMenu(kind);
+    };
+    menu.audio.addEventListener("click", copyClick("audio"));
+    menu.video.addEventListener("click", copyClick("video"));
+    const pointerArrived = (event) => {
+      rememberPointer(event);
+      if (event?.pointerType !== "mouse") return;
+      if (openBy === "focus") return;
+      openAs("pointer");
+    };
+    menu.anchor.addEventListener("pointerenter", pointerArrived);
+    menu.anchor.addEventListener("pointermove", pointerArrived);
+    menu.anchor.addEventListener("pointerdown", (event) => {
+      rememberPointer(event);
+      if (event?.pointerType !== "mouse") return;
+      if (openBy === "touch") openBy = "pointer";
+    });
+    menu.anchor.addEventListener("pointerleave", (event) => {
+      blockPointer = false;
+      const type = event?.pointerType;
+      if (type === "touch" || type === "pen" || button.dataset.live !== "on") return;
+      if (openBy === "focus" || menu.anchor.dataset.menu !== "open") return;
+      scheduleClose();
+    });
+    menu.anchor.addEventListener("focusin", (event) => {
+      if (ignoreNextFocus) {
+        ignoreNextFocus = false;
+        return;
+      }
+      if (button.dataset.live !== "on" || !focusVisible(event?.target)) return;
+      openAs("focus");
+    });
+    menu.anchor.addEventListener("focusout", (event) => {
+      const next = event?.relatedTarget;
+      if (next == null) return;
+      if (typeof menu.anchor.contains === "function" && menu.anchor.contains(next)) return;
+      closeMenu();
+    });
+    menu.anchor.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || menu.anchor.dataset.menu !== "open") return;
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      closeMenu("esc");
+      button.focus?.();
+    });
+    if (root && typeof root.addEventListener === "function") {
+      root.addEventListener("pointerdown", (event) => {
+        if (menu.anchor.dataset.menu !== "open") return;
+        const target = event?.target;
+        if (target && typeof menu.anchor.contains === "function" && menu.anchor.contains(target)) return;
+        closeMenu();
+      });
+    }
+  }
+
   function onClick() {
     if (!supported) return;
     if (session) {
@@ -497,8 +719,57 @@ export function createLiveControl(options) {
     return start();
   }
 
-  button.addEventListener("click", () => {
-    Promise.resolve(onClick()).catch(() => {});
+  function clearHold() {
+    if (!holdTimer) return false;
+    clearTimer(holdTimer);
+    holdTimer = 0;
+    return true;
+  }
+  button.addEventListener("pointerdown", (event) => {
+    rememberPointer(event);
+    const type = event?.pointerType;
+    if (type === "mouse") {
+      if (openBy === "touch") openBy = "pointer";
+      swallowClick = false;
+      clearHold();
+      return;
+    }
+    if (type !== "touch" && type !== "pen") {
+      swallowClick = false;
+      return;
+    }
+    swallowClick = false;
+    clearHold();
+    if (button.dataset.live !== "on") return;
+    holdTimer = setTimer(() => {
+      holdTimer = 0;
+      swallowClick = true;
+      openAs("touch");
+    }, LIVE_MENU_HOLD_MS);
+  });
+  button.addEventListener("pointerup", () => {
+    clearHold();
+  });
+  button.addEventListener("pointercancel", () => {
+    clearHold();
+    swallowClick = false;
+  });
+  button.addEventListener("contextmenu", (event) => {
+    event?.preventDefault?.();
+  });
+  button.addEventListener("click", (event) => {
+    if (swallowClick) {
+      swallowClick = false;
+      event?.preventDefault?.();
+      event?.stopPropagation?.();
+      return;
+    }
+    const pendingHold = holdTimer !== 0;
+    try {
+      Promise.resolve(onClick()).catch(() => {});
+    } finally {
+      if (pendingHold) swallowClick = false;
+    }
   });
 
   paint(supported ? { state: "idle" } : { state: "unsupported" });
@@ -528,5 +799,7 @@ export function bindLive(options) {
     connectSocket: options.connectSocket || ((url) => new WebSocket(url)),
     createRecorder: options.createRecorder || ((stream, recorderOptions) => new MediaRecorder(stream, recorderOptions)),
     copyText: options.copyText || ((url) => copyLiveUrl(url)),
+    menu: options.menu,
+    root: options.root || (typeof document === "undefined" ? null : document),
   });
 }
