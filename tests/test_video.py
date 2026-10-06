@@ -1943,7 +1943,12 @@ def test_a_marker_tone_stays_within_a_fifth_of_a_second_of_the_picture(tmp_path:
             publisher.receive_json()
             publisher.send_json({"type": "mime", "mime": "audio/webm"})
             publisher.send_bytes(init + b"".join(clusters[:9]))
-            stream = hub.get("AVSY")
+            with _deadline(2):
+                while True:
+                    stream = hub.get("AVSY")
+                    if stream is not None and len(stream.recent) >= 2:
+                        break
+                    time.sleep(0.01)
             assert stream is not None and len(stream.recent) >= 2
             now_tc = cluster_timecode(stream.recent[-1])
             assert now_tc is not None
@@ -2700,7 +2705,7 @@ def _ts(marker: bytes) -> bytes:
     return bytes(packet)
 
 
-def test_two_generations_overlap_on_the_threads_the_relay_started():
+def test_two_generations_overlap_on_the_threads_the_relay_started(monkeypatch):
     """The threads _start_locked creates keep the process and stop flag they were given.
 
     A later generation must not clear that flag. A read still leaving the first
@@ -2719,8 +2724,6 @@ def test_two_generations_overlap_on_the_threads_the_relay_started():
     watch_entered = threading.Event()
     audio_release = threading.Event()
     audio_entered = threading.Event()
-    original_event = video_mod.threading.Event
-    original_tc = video_mod.cluster_timecode
 
     class _Event(threading.Event):
         def wait(self, timeout=None):
@@ -2732,7 +2735,7 @@ def test_two_generations_overlap_on_the_threads_the_relay_started():
                 return False
             return super().wait(timeout)
 
-    video_mod.threading.Event = _Event
+    monkeypatch.setattr(video_mod.threading, "Event", _Event)
 
     def popen(*_args, **kwargs) -> _PipeProc:
         proc = _PipeProc()
@@ -2764,15 +2767,17 @@ def test_two_generations_overlap_on_the_threads_the_relay_started():
 
     relay._fail = spy_fail
 
+    _real_tc = video_mod.cluster_timecode
+
     def blocked_tc(item: bytes):
         # Past the stop check, before the mux identity check. The swap happens
         # while this cluster is still in the first generation's hands.
         if not audio_entered.is_set():
             audio_entered.set()
             assert audio_release.wait(3)
-        return original_tc(item)
+        return _real_tc(item)
 
-    video_mod.cluster_timecode = blocked_tc
+    monkeypatch.setattr(video_mod, "cluster_timecode", blocked_tc)
     listener = _Seen()
     entered = threading.Event()
     calls = {"n": 0}
@@ -2845,8 +2850,6 @@ def test_two_generations_overlap_on_the_threads_the_relay_started():
         watch_release.set()
         audio_release.set()
         release.set()
-        video_mod.threading.Event = original_event
-        video_mod.cluster_timecode = original_tc
         for proc in procs:
             proc.close_writes()
         with contextlib.suppress(Exception):
@@ -2965,3 +2968,51 @@ def test_reopening_while_someone_else_watches_waits_then_refuses(tmp_path: Path)
                             status, elapsed = _video_get_time(client, "HSAA", starter)
                         assert status == 429
                         assert 0.25 <= elapsed < 0.8
+
+
+def test_a_lingering_encoder_with_no_viewers_is_refused_without_waiting(tmp_path: Path):
+    """N5: an empty linger is not one viewer about to leave. Recounting will not free the slot."""
+
+    script = _write_script(tmp_path, _CONTINUOUS_FFMPEG)
+    hub = _hub(tmp_path, ffmpeg=script, max_video_encoders=1, max_video_per_ip=1, video_linger=30, output_stall=30)
+    other = {"x-real-ip": "198.51.100.23"}
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=LZAA", headers={"x-real-ip": "192.0.2.22"}) as first:
+            _publish_ready(first)
+            with _ws(client, "/api/live/publish?id=LZAB", headers={"x-real-ip": "192.0.2.23"}) as second:
+                _publish_ready(second)
+                with _Audio(
+                    client, "/stream/LZAA", query="thumbnail=1", headers={"x-real-ip": "198.51.100.22"}
+                ) as video:
+                    assert video.read()[:1] == b"\x47"
+                lingering = hub.get("LZAA")
+                assert lingering.relay.occupies()
+                assert len(lingering.video_listeners) == 0
+                status, elapsed = _video_get_time(client, "LZAB", other)
+                assert status == 429
+                assert elapsed < 0.2
+
+
+def test_opening_the_stream_this_address_already_watches_does_not_wait(tmp_path: Path):
+    """W5: the only viewer with this address is on the stream being opened."""
+
+    script = _write_script(tmp_path, _CONTINUOUS_FFMPEG)
+    hub = _hub(
+        tmp_path,
+        ffmpeg=script,
+        max_listeners_per_ip=1,
+        max_video_encoders=1,
+        max_video_per_ip=1,
+        video_linger=30,
+        output_stall=30,
+    )
+    held = {"x-real-ip": "198.51.100.24"}
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=WSAA", headers={"x-real-ip": "192.0.2.24"}) as publisher:
+            _publish_ready(publisher)
+            with _Audio(client, "/stream/WSAA", query="thumbnail=1", headers=held) as video:
+                assert video.read()[:1] == b"\x47"
+                assert len(hub.get("WSAA").video_listeners) == 1
+                status, elapsed = _video_get_time(client, "WSAA", held)
+                assert status == 429
+                assert elapsed < 0.2

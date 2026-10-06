@@ -667,7 +667,7 @@ class LiveHub:
                 if item is target or not self._encoder_busy(item):
                     continue
                 viewers = item.video_listeners
-                if len(viewers) == 1 and all(viewer.address == address for viewer in viewers):
+                if len(viewers) == 1 and next(iter(viewers)).address == address:
                     return True
         return False
 
