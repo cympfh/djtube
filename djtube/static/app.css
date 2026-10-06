@@ -85,7 +85,7 @@ button:hover { border-color: #5c564b; }
   width: calc(1cap * 12 / 10);
 }
 
-.health, .status, .midi-status, .deck-channel, .cue-readout, .gain-readout, .fader-readout {
+.health, .status, .deck-channel, .cue-readout, .gain-readout, .fader-readout {
   color: var(--muted);
 }
 
@@ -139,8 +139,6 @@ button:hover { border-color: #5c564b; }
   background: var(--a);
   border-color: var(--a);
 }
-
-.midi-status.is-connected { color: var(--cue); }
 
 .stage {
   min-height: 0;
@@ -356,7 +354,7 @@ button:disabled { opacity: 0.45; cursor: default; }
   accent-color: var(--a);
 }
 
-.status, .midi-status { margin: 0; font-size: 12px; line-height: 1.45; }
+.status { margin: 0; font-size: 12px; line-height: 1.45; }
 
 .status:empty { display: none; }
 

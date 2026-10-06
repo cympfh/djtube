@@ -952,14 +952,13 @@ window.addEventListener(
   true,
 );
 
-function showMidiStatus(status) {
-  const node = document.getElementById("midi-status");
-  const text = controllerStatusText(status);
-  if (node.textContent !== text) node.textContent = text;
-  node.classList.toggle("is-connected", !!(status?.connected || (status?.state === "open" && status.names?.length)));
-}
-
 const midiButton = document.getElementById("midi-button");
+
+function showMidiStatus(status) {
+  const text = controllerStatusText(status);
+  if (midiButton.title !== text) midiButton.title = text;
+  if (midiButton.getAttribute("aria-label") !== text) midiButton.setAttribute("aria-label", text);
+}
 
 function paintMidiButton(status) {
   midiButton.dataset.midi = midiButtonState(status);

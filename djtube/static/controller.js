@@ -308,14 +308,15 @@ export function setFlx4Outputs(port, outputs) {
   return messages;
 }
 
+/** Hover and screen-reader text for the header MIDI button. */
 export function controllerStatusText(status) {
   if (!status || status.state === "idle") return MIDI_STATUS_IDLE;
   if (status.state === "unsupported") return "Web MIDI 非対応";
   if (status.state === "insecure") return "未接続 — HTTPS が必要です";
   if (status.state === "denied") return "MIDI が拒否されました";
-  if (status.state === "open" && status.names?.length) return `接続: ${status.names.join("、")}`;
+  if (status.state === "open" && status.names?.length) return `MIDI接続済み：${status.names.join("、")}`;
   if (status.state === "opening") return "MIDI を開いています…";
-  return "未接続";
+  return MIDI_STATUS_IDLE;
 }
 
 /** Header button face. "on" only after a device is actually connected. */
