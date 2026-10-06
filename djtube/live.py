@@ -486,7 +486,7 @@ class LiveHub:
                 retry = self._video_retry_after(stream)
                 if retry is not None:
                     return 503, None, retry
-                if self._video_blocked(stream, address):
+                if self._video_blocked(stream, address) and not self._relays_to_hand_over(stream, address):
                     return 429, None, None
                 return 200, VIDEO_MIME, None
             return 200, content_type(stream.mime), None
@@ -623,34 +623,55 @@ class LiveHub:
         if not is_stream_id(stream_id):
             return 404, None, None, None
         with self._lock:
-            stream = self._streams.get(stream_id)
-            if stream is None or stream.closed:
-                return 404, None, None, None
-            if self._listeners_of(stream) >= self.max_listeners:
+            prepared = self._prepare_video_locked(stream_id, address, handover=True)
+        if isinstance(prepared, list):
+            # stop() joins threads. Do that outside the hub lock, then reserve.
+            for relay in prepared:
+                relay.stop_if_abandoned()
+            with self._lock:
+                reserved = self._prepare_video_locked(stream_id, address, handover=False)
+            if isinstance(reserved, list):
                 return 429, None, None, None
-            if self._listeners_at(stream, address) >= self.max_listeners_per_ip:
-                return 429, None, None, None
-            if self._listeners_total() >= self.max_listeners_total:
-                return 429, None, None, None
-            # A crashed encoder still answers 200 with an empty body unless this
-            # is checked before the listener is reserved. 429 wins only when a
-            # new encoder would exceed a cap and this stream is not cooling.
-            retry = self._video_retry_after(stream)
-            if retry is not None:
-                return 503, None, None, None
-            if self._video_blocked(stream, address):
-                return 429, None, None, None
-            needs_slot = not self._encoder_busy(stream)
-            listener = _Listener(self.video_listener_queue, address)
-            stream.video_listeners.add(listener)
-            if needs_slot:
-                stream.video_hold = True
-            if stream.relay is None:
-                stream.relay = self._make_relay(stream)
-            relay = stream.relay
-            init = stream.init
-            recent = tuple(stream.recent)
-            generation = stream.generation
+            return reserved
+        return prepared
+
+    def _prepare_video_locked(
+        self, stream_id: str, address: str, *, handover: bool
+    ) -> tuple[int, "_Listener | None", "_Stream | None", tuple | None] | list[FfmpegRelay]:
+        """Reserve a listener, or return lingering relays to stop first. The caller holds ``_lock``."""
+
+        stream = self._streams.get(stream_id)
+        if stream is None or stream.closed:
+            return 404, None, None, None
+        if self._listeners_of(stream) >= self.max_listeners:
+            return 429, None, None, None
+        if self._listeners_at(stream, address) >= self.max_listeners_per_ip:
+            return 429, None, None, None
+        if self._listeners_total() >= self.max_listeners_total:
+            return 429, None, None, None
+        # A crashed encoder still answers 200 with an empty body unless this
+        # is checked before the listener is reserved. 503 wins over 429 while
+        # this stream is cooling, even when a new encoder would also be over a cap.
+        retry = self._video_retry_after(stream)
+        if retry is not None:
+            return 503, None, None, None
+        if handover:
+            victims = self._relays_to_hand_over(stream, address)
+            if victims:
+                return victims
+        if self._video_blocked(stream, address):
+            return 429, None, None, None
+        needs_slot = not self._encoder_busy(stream)
+        listener = _Listener(self.video_listener_queue, address)
+        stream.video_listeners.add(listener)
+        if needs_slot:
+            stream.video_hold = True
+        if stream.relay is None:
+            stream.relay = self._make_relay(stream)
+        relay = stream.relay
+        init = stream.init
+        recent = tuple(stream.recent)
+        generation = stream.generation
         return 200, listener, stream, (relay, needs_slot, init, recent, generation)
 
     def open_video(
@@ -1124,9 +1145,10 @@ class LiveHub:
         """True when this request must not take or join an encoder.
 
         A new encoder counts against the global cap and the per-IP cap.
-        Joining one that is already running, including during linger, still
-        counts against the per-IP cap, unless this address already holds it.
-        The caller holds ``_lock``.
+        Joining one that is already running still counts against the per-IP
+        cap, unless this address is a listener, or it is the starter and
+        nobody is listening (linger). A starter who already left does not
+        hold the slot while someone else is watching. The caller holds ``_lock``.
         """
 
         if self._address_holds(stream, address):
@@ -1140,23 +1162,54 @@ class LiveHub:
     def _address_holds(self, stream: _Stream, address: str) -> bool:
         if not address or not self._encoder_busy(stream):
             return False
-        relay = stream.relay
-        if relay is not None and relay.holder() == address:
+        if any(listener.address == address for listener in stream.video_listeners):
             return True
-        return any(listener.address == address for listener in stream.video_listeners)
+        if stream.video_listeners:
+            return False
+        relay = stream.relay
+        return relay is not None and relay.holder() == address
 
     def _encoders_held_by(self, address: str) -> int:
+        """Encoders this address is watching, plus its own only while they have no listeners."""
+
         count = 0
         for item in self._streams.values():
             if not self._encoder_busy(item):
                 continue
+            if item.video_listeners:
+                if any(listener.address == address for listener in item.video_listeners):
+                    count += 1
+                continue
             relay = item.relay
             if relay is not None and relay.holder() == address:
                 count += 1
-                continue
-            if any(listener.address == address for listener in item.video_listeners):
-                count += 1
         return count
+
+    def _relays_to_hand_over(self, stream: _Stream, address: str) -> list[FfmpegRelay]:
+        """Lingering relays this address owns, when stopping them lets this request through.
+
+        The caller holds ``_lock`` and does not stop anything. Empty when this
+        request is already allowed, or when freeing those relays would still
+        leave it over a cap.
+        """
+
+        if not address or not self._video_blocked(stream, address):
+            return []
+        victims: list[FfmpegRelay] = []
+        for item in self._streams.values():
+            if item is stream or not self._encoder_busy(item) or item.video_listeners:
+                continue
+            relay = item.relay
+            if relay is not None and relay.holder() == address:
+                victims.append(relay)
+        if not victims:
+            return []
+        released = len(victims)
+        if self._encoders_held_by(address) - released >= self.max_video_per_ip:
+            return []
+        if not self._encoder_busy(stream) and self._encoder_count() - released >= self.max_video_encoders:
+            return []
+        return victims
 
     def _encoder_busy(self, stream: _Stream) -> bool:
         if stream.video_hold:
@@ -1334,7 +1387,7 @@ def mount_live(app: FastAPI, hub: LiveHub) -> None:
         address = _publisher_address(request)
         if request.method == "HEAD":
             status, mime, retry = hub.stream_status(stream_id, video=video, address=address)
-            headers = _status_headers(retry)
+            headers = _status_headers(status, retry)
             if mime is None:
                 return Response(status_code=status, headers=headers)
             return _HeaderOnly(status, mime)
@@ -1344,7 +1397,7 @@ def mount_live(app: FastAPI, hub: LiveHub) -> None:
                 retry = None
                 if status == 503:
                     _status, _mime, retry = hub.stream_status(stream_id, video=True, address=address)
-                return Response(status_code=status, headers=_status_headers(retry))
+                return Response(status_code=status, headers=_status_headers(status, retry))
             owned = opener[0]
             try:
                 await asyncio.to_thread(hub.open_video, stream, listener, *opener)
@@ -1359,12 +1412,14 @@ def mount_live(app: FastAPI, hub: LiveHub) -> None:
             )
         status, listener, stream = await hub.attach_listener(stream_id, address)
         if listener is None or stream is None:
-            return Response(status_code=status, headers=_STREAM_HEADERS)
+            return Response(status_code=status, headers=_status_headers(status, None))
         return _AudioResponse(hub, listener, stream)
 
 
-def _status_headers(retry: int | None) -> dict[str, str]:
+def _status_headers(status: int, retry: int | None) -> dict[str, str]:
     headers = dict(_STREAM_HEADERS)
+    if status == 429 and retry is None:
+        retry = 1
     if retry is not None:
         headers["Retry-After"] = str(retry)
     return headers

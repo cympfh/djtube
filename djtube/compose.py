@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping, Sequence
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageFilter
 
 VIDEO_WIDTH = 1280
 VIDEO_HEIGHT = 720
@@ -23,13 +23,6 @@ _PAD = 0.08
 # Background sits under the sharp picture. 0.55 toward black keeps the
 # blurred cover visible without competing with the centered image.
 _DIM = 0.55
-
-
-def _font(px: int) -> ImageFont.ImageFont:
-    try:
-        return ImageFont.load_default(px)
-    except TypeError:
-        return ImageFont.load_default()
 
 
 def _cover(image: Image.Image, size: tuple[int, int]) -> Image.Image:
@@ -57,22 +50,9 @@ def _paste_contained(base: Image.Image, image: Image.Image, pad: float = _PAD) -
 
 
 def title_card(size: tuple[int, int] = (VIDEO_WIDTH, VIDEO_HEIGHT)) -> Image.Image:
-    """Black frame with a small word, for when nothing is on the decks."""
+    """Solid black, for when nothing is on the decks. No title text."""
 
-    image = Image.new("RGB", size, (0, 0, 0))
-    draw = ImageDraw.Draw(image)
-    font = _font(max(16, size[1] // 9))
-    text = "djtube"
-    box = draw.textbbox((0, 0), text, font=font)
-    text_w = box[2] - box[0]
-    text_h = box[3] - box[1]
-    draw.text(
-        ((size[0] - text_w) // 2 - box[0], (size[1] - text_h) // 2 - box[1]),
-        text,
-        fill=(168, 168, 176),
-        font=font,
-    )
-    return image
+    return Image.new("RGB", size, (0, 0, 0))
 
 
 def deck_card(image: Image.Image, size: tuple[int, int] = (VIDEO_WIDTH, VIDEO_HEIGHT)) -> Image.Image:

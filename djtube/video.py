@@ -65,7 +65,8 @@ _PAT_TABLE = 0x00
 _PMT_TABLE = 0x02
 _SDT_TABLE = 0x42
 # A watchdog gap longer than this is the server process being paused, not a
-# muxer that stopped writing. Those gaps are not charged as silence.
+# muxer that stopped writing. Charge at most two watch periods of that gap,
+# so one hiccup is not the whole stall and a pause loop cannot hide a dead muxer.
 _WATCH_PERIOD = 0.2
 _WATCH_GAP = 1.0
 
@@ -376,12 +377,12 @@ class FfmpegRelay:
         self._audio_q: queue.Queue[bytes | None] = queue.Queue(maxsize=max(1, audio_queue_max))
         self._clock = time.monotonic
         self._last_output = self._clock()
-        self._last_frame = self._last_output
         self._backoff_until = 0.0
         self._holder = ""
         self._rgb = bytearray()
         self._init: bytes | None = None
-        self._primed_ids: set[int] = set()
+        # Strong refs. id() of a freed primer is reused by the next cluster.
+        self._primed: list[bytes] = []
         self._base: int | None = None
         self._timer: threading.Timer | None = None
         self._threads: list[threading.Thread] = []
@@ -394,7 +395,7 @@ class FfmpegRelay:
             return self._started
 
     def claim(self, address: str) -> None:
-        """Remember who started this encoder. Counted until the process is gone."""
+        """Remember who started this encoder. Cleared when the process exits."""
 
         if not address:
             return
@@ -442,7 +443,7 @@ class FfmpegRelay:
                 chunks = (bytes(recent),)
             else:
                 chunks = tuple(recent)
-            self._primed_ids = {id(item) for item in chunks}
+            self._primed = list(chunks)
             if init is not None:
                 self._init = init
             for item in chunks:
@@ -457,9 +458,13 @@ class FfmpegRelay:
         with self._lock:
             if not self._started:
                 return
-            if id(cluster) in self._primed_ids:
-                self._primed_ids.discard(id(cluster))
-                return
+            if self._primed:
+                if any(cluster is item for item in self._primed):
+                    self._primed = [item for item in self._primed if item is not cluster]
+                    return
+                # Primers are copied into the queue and never come back through
+                # feed(). A different cluster means those objects are done.
+                self._primed = []
             self._enqueue(cluster)
 
     def attach(self, listener) -> None:
@@ -513,6 +518,21 @@ class FfmpegRelay:
         self._finish(bundle)
         log.info("video %s stop", self.stream_id)
 
+    def stop_if_abandoned(self) -> bool:
+        """Stop when this process has no listeners. False if someone is attached.
+
+        The per-IP slot can move to another stream this address is starting.
+        A listener that arrived since the decision keeps the process.
+        """
+
+        with self._lock:
+            if self.listeners or not self._started:
+                return False
+            bundle = self._take_process_locked()
+        self._finish(bundle)
+        log.info("video %s stop", self.stream_id)
+        return True
+
     def _linger(self) -> None:
         # The emptiness check and the decision to stop share this lock. A
         # listener that arrives here is either counted, or starts a new
@@ -557,6 +577,7 @@ class FfmpegRelay:
         self._proc = None
         self._audio_w = None
         self._holder = ""
+        self._primed = []
         timer = self._timer
         self._timer = None
         threads = list(self._threads)
@@ -681,9 +702,10 @@ class FfmpegRelay:
         self._fail()
 
     def _watch_loop(self) -> None:
-        # Quiet time is the sum of ordinary ticks with no new output. A gap
-        # longer than a second means this process was paused (the wait itself
-        # did not return), so that gap is not silence from the muxer.
+        # Quiet time is ticks with no new output. A gap longer than a second
+        # is this process being paused. Count at most two watch periods of it:
+        # a single pause is not the whole stall, and repeating pause/resume
+        # cannot keep a dead muxer under the limit. New output clears the total.
         quiet = 0.0
         previous_output: float | None = None
         previous_tick: float | None = None
@@ -700,11 +722,12 @@ class FfmpegRelay:
                 return
             if previous_tick is not None:
                 elapsed = now - previous_tick
-                if elapsed <= _WATCH_GAP:
-                    if previous_output == last_output:
-                        quiet += elapsed
-                    else:
-                        quiet = 0.0
+                if previous_output != last_output:
+                    quiet = 0.0
+                elif elapsed <= _WATCH_GAP:
+                    quiet += elapsed
+                else:
+                    quiet += min(elapsed, 2 * _WATCH_PERIOD)
             previous_tick = now
             previous_output = last_output
             if quiet > self.output_stall:
@@ -764,7 +787,6 @@ class FfmpegRelay:
 
         for _copy in range(copies):
             stdin.write(frame)
-        self._last_frame = self._clock()
 
     def _frame(self) -> bytes:
         decks = self._decks()

@@ -28,8 +28,8 @@ MIN_HEIGHT = 180
 MAX_BYTES = 2 * 1024 * 1024
 # Header size is known before pixels are decoded. A huge declared frame is a
 # decompression bomb, so it is rejected without load().
-# YouTube thumbnails are at most 1280x720. A 4096-wide JPEG is not one of
-# those, and decoding it peaks around 100MB, so the cap sits near two 720p frames.
+# The limits are sized for 1280x720. Two of those frames are 1,843,200 pixels.
+# A 4096-wide JPEG is not a thumbnail, and decoding it peaks around 100MB.
 MAX_EDGE = 2048
 MAX_PIXELS = 1_843_200
 MAX_MISSING = 64
