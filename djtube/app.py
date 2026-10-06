@@ -10,6 +10,7 @@ from djtube.assets import DOCUMENT_CACHE, VersionedStaticFiles, asset_version, s
 from djtube.audio import AudioError, audio_needs_cookies, clear_audio_cache, open_audio
 from djtube.cookies import MAX_COOKIE_BYTES, CookieError, CookieStore, cookie_path, install_store
 from djtube.ids import is_video_id
+from djtube.live import LiveHub, mount_live
 from djtube.paths import INDEX_PATH, PUBLIC_PREFIX, STATIC_DIR
 from djtube.playlists import PlaylistError, PlaylistStore, playlist_path
 from djtube.search import SearchError, search_mode, search_tracks
@@ -58,11 +59,16 @@ class MoveTrackBody(BaseModel):
     to_index: int = Field(alias="to")
 
 
-def create_app(playlist_store: PlaylistStore | None = None, cookies: CookieStore | None = None) -> FastAPI:
+def create_app(
+    playlist_store: PlaylistStore | None = None,
+    cookies: CookieStore | None = None,
+    live: LiveHub | None = None,
+) -> FastAPI:
     app = FastAPI(title="djtube")
     store = playlist_store if playlist_store is not None else PlaylistStore(playlist_path())
     jar = cookies if cookies is not None else CookieStore(cookie_path())
     install_store(jar)
+    mount_live(app, live if live is not None else LiveHub())
 
     def raise_playlist(exc: PlaylistError) -> None:
         raise HTTPException(exc.status, str(exc)) from None

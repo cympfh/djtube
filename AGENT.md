@@ -40,6 +40,9 @@ nginx は `/djtube/` を外してコンテナへ渡す。コンテナはポー�
 | `/djtube/api/search` | `/api/search` |
 | `/djtube/api/playlists` | `/api/playlists` |
 | `/djtube/api/cookies` | `/api/cookies` |
+| `/djtube/stream/ABCD` | `/stream/ABCD` |
+| `/djtube/api/live/publish` | `/api/live/publish` |
+| `/djtube/api/live/ABCD` | `/api/live/ABCD` |
 
 フロントの基準パスは `/djtube/`。直に `http://127.0.0.1:8098/djtube/` を開いても、同じプレフィックスをコンテナ側で剥がすので動く。
 
@@ -161,6 +164,61 @@ Web MIDI は安全なページで、「MIDI を開く」を押したときだけ
 ## 音源のログ
 
 再生できないときは、サーバの標準エラーに出る `djtube.audio` を見る。
+
+## 配信
+
+DJ のミックスを、開いているブラウザから聴き手へ中継する。録音も保存もしない。配信ボタンと、マスター出力を `MediaRecorder` に渡す処理は、ここにはまだ無い。サーバと聴き手のページだけ。
+
+ID は英大文字 4 文字。配信の WebSocket を開くたびに、使っていない ID をサーバが振る。同じページを開き直して配信し直すと別の ID になる。クエリ `?id=ABCD` で空いている ID を取ることもできる。使われていれば close `4409`。4 文字の英大文字でなければ `4400`。同時の配信は 64 本までで、それ以上は `4429`。
+
+配信元は `ws(s)://<host>/djtube/api/live/publish`（コンテナでは `/api/live/publish`）。繋がるとサーバがテキストで `{"type":"id","id":"ABCD"}` を返す。そのあと任意で `{"type":"mime","mime":"audio/webm;codecs=opus"}`。省略時もこの MIME。`audio/webm` も同じものとして受ける。それ以外は close `1003`。バイナリは MediaRecorder の `dataavailable` を、そのまま 1 フレームずつ送る。`start(200)` 前後の短い塊を想定する。1 フレームが 1MB を超えると close `1009`。
+
+MediaRecorder の塊は Cluster の境界で切れない。SimpleBlock の途中で切れて、次の塊が続きになる。サーバはバイト列を足して、最初の Cluster より前を初期化セグメントとして覚えておく。既知サイズの Cluster は、そのバイトが揃った時点で聴き手へ送る。MediaRecorder の Cluster はサイズ不明なので、次の Cluster が始まるか、配信元が切れて最後の子要素まで揃ったときに完成とする。Cluster の中身は書き換えない。初期化セグメントと完成した Cluster 以外（途中の Cues など）は聴き手へ出さない。配信が続いているあいだサーバが持っているのは、初期化セグメントと、いま開いている Cluster と、直近に完成した Cluster 1 つと、聴き手ごとの短い待ち行列だけ。
+
+聴き手のページは `/djtube/stream/ABCD`（コンテナでは `/stream/ABCD`）。ログインは無い。ID の形が違うときは「ID の形式が違います」。その ID の配信が無いときは「この配信はありません」。ページは `Cache-Control: no-cache`。配信中なら「接続しています」から再生に入る。
+
+聴き手の WebSocket は `/djtube/api/live/ABCD`。
+
+- 無い ID は `{"type":"absent"}` のあと close `4404`
+- 聴き手が 200 人を超えると `{"type":"full"}` のあと close `4429`
+- 配信中は `{"type":"start","id":"ABCD","mime":"audio/webm;codecs=opus"}`、続けて初期化セグメント、直近に完成した Cluster 1 つ、それ以降に完成する Cluster。それより前の Cluster は送らない。途中から来た人は、その時点の音から聞こえる
+- 配信元が切れると `{"type":"end"}` のあと close `1000`。ページは「配信が終了しました」になり、先頭からは再生し直さない
+
+待ち行列は聴き手ごとに Cluster 8 つまで。あふれたら古い Cluster から捨てて、遅れを溜めない。送れていない状態が 2 秒続く聴き手は close `1013` で切る。ページ側は `SourceBuffer.mode = "sequence"` で、初期化セグメントのあとに Cluster を足す。バッファが再生位置より 1.5 秒以上進んだら、終わりの 0.3 秒手前へ飛ぶ。sequence にできないブラウザは、バッファの先頭が再生位置より先なら、同じようにいまの端へシークする。
+
+試験音は著作権のある音源を置かず、ffmpeg がその場で作る。
+
+```bash
+uv run python -m djtube.live_tone --base http://127.0.0.1:8098
+```
+
+440 Hz と 880 Hz を 2 秒ごとに交互に送る。標準出力に ID と聴く URL が出る。`--seconds`、`--id ABCD`、待たずに送る `--no-pace`。ffmpeg が要る。途中から聴くページを開くと、そのときの高さだけが聞こえる。
+
+公開の nginx はこのリポジトリに無い。`/djtube/` を外して 8098 へ渡している location に、WebSocket の Upgrade を足す。HTTP のリクエストまで `Connection` を `upgrade` に固定しない。`map` は `http` ブロックに置く。読み書きのタイムアウトが短いと、音が続いているのに切れる。
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ""      close;
+}
+
+location /djtube/ {
+    proxy_pass http://127.0.0.1:8098/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+    proxy_buffering off;
+}
+```
+
+すでに `/djtube/` を 8098 へ渡しているなら、その location に `Upgrade`、`Connection`、`proxy_http_version 1.1`、上のタイムアウトを足す。`map` が無ければ `http` に足す。
+
+切れた配信のログは標準エラーの `djtube.live`（`publish ABCD` と `end ABCD`）。塊の中身は出さない。
 
 ## 開発
 

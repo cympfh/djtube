@@ -1,0 +1,75 @@
+:root {
+  color-scheme: dark;
+  --bg: #100f0c;
+  --text: #f3efe6;
+  --muted: #b7b0a4;
+  --line: #322f28;
+  --a: #ffb000;
+  font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic UI", "YuGothic", Meiryo, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(900px 320px at 50% -10%, rgba(255, 176, 0, 0.1), transparent 55%),
+    var(--bg);
+  color: var(--text);
+}
+
+.listen {
+  width: min(28rem, calc(100% - 32px));
+  display: grid;
+  gap: 14px;
+  justify-items: start;
+  padding: 24px 0 40px;
+}
+
+.listen-mark {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  color: var(--muted);
+}
+
+.listen-id {
+  margin: 0;
+  font-size: 44px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+}
+
+.listen-id:empty { display: none; }
+
+.listen-status {
+  margin: 0;
+  min-height: 1.4em;
+  color: var(--muted);
+}
+
+audio {
+  width: 100%;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: #24221c;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+
+button:hover { border-color: #5c564b; }
+
+:focus-visible {
+  outline: 2px solid var(--a);
+  outline-offset: 2px;
+}
