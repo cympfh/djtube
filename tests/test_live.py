@@ -2,24 +2,24 @@ from __future__ import annotations
 
 import array
 import asyncio
+import contextlib
 import math
 import shutil
 import subprocess
 import time
 from pathlib import Path
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect, WebSocketState
+from starlette.websockets import WebSocketDisconnect
 
 from djtube.app import create_app
-from djtube.assets import asset_version
 from djtube.live import (
     CODE_BAD_ID,
     CODE_BAD_MEDIA,
     CODE_FULL,
     CODE_RATE,
-    CODE_SLOW,
     CODE_TAKEN,
     CODE_TIMEOUT,
     CODE_TOO_BIG,
@@ -32,6 +32,7 @@ from djtube.live import (
     MAX_PER_IP,
     MAX_STREAMS,
     LiveHub,
+    _AudioResponse,
     _Listener,
     is_stream_id,
 )
@@ -116,6 +117,80 @@ def _dominant(samples: array.array, skip: float, take: float = 0.35, rate: int =
     return 880.0 if high > low else 440.0
 
 
+class _Audio:
+    """One chunked GET, read while a publisher socket on the same TestClient stays open."""
+
+    def __init__(self, client: TestClient, path: str) -> None:
+        self._client = client
+        self._path = path
+        self.status_code = 0
+        self.headers: dict[str, str] = {}
+
+    def __enter__(self) -> _Audio:
+        portal = self._client.portal
+        assert portal is not None
+        self._portal = portal
+        self._requested = False
+        future, scope = portal.start_task(self._run)
+        self._future = future
+        self._cancel = scope
+        started = self._receive()
+        assert started["type"] == "http.response.start", started
+        self.status_code = int(started["status"])
+        self.headers = {key.decode().lower(): value.decode() for key, value in started.get("headers", [])}
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        with contextlib.suppress(Exception):
+            self._portal.call(self._receive_tx.send, {"type": "http.disconnect"})
+        self._portal.call(self._cancel.cancel)
+        self._future.result()
+
+    async def _run(self, *, task_status: anyio.abc.TaskStatus[anyio.CancelScope]) -> None:
+        send_tx, send_rx = anyio.create_memory_object_stream(math.inf)
+        receive_tx, receive_rx = anyio.create_memory_object_stream(math.inf)
+        self._receive_tx = receive_tx
+        self._send_rx = send_rx
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": self._path,
+            "raw_path": self._path.encode(),
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 50000),
+            "server": ("testserver", 80),
+            "root_path": "",
+            "state": {},
+        }
+        with send_tx, send_rx, receive_tx, receive_rx, anyio.CancelScope() as cancel:
+            task_status.started(cancel)
+
+            async def receive() -> dict:
+                if not self._requested:
+                    self._requested = True
+                    return {"type": "http.request", "body": b"", "more_body": False}
+                return await receive_rx.receive()
+
+            await self._client.app(scope, receive, send_tx.send)
+            await anyio.sleep_forever()
+
+    def _receive(self) -> dict:
+        return self._portal.call(self._send_rx.receive)
+
+    def read(self) -> bytes | None:
+        message = self._receive()
+        assert message["type"] == "http.response.body", message
+        if not message.get("more_body", False):
+            return None
+        body = message.get("body", b"")
+        assert isinstance(body, bytes)
+        return body
+
+
 def test_ids_are_four_uppercase_letters_and_collisions_are_rejected():
     app = create_app()
     with TestClient(app) as client:
@@ -147,52 +222,41 @@ def test_full_hub_and_full_listener_list_refuse_another_connection():
                 with client.websocket_connect("/api/live/publish") as extra:
                     extra.receive_json()
             assert full.value.code == CODE_FULL
-            with client.websocket_connect(f"/api/live/{stream_id}") as listener:
-                assert listener.receive_json()["type"] == "start"
-                with client.websocket_connect(f"/djtube/api/live/{stream_id}") as overflow:
-                    assert overflow.receive_json()["type"] == "full"
+            with _Audio(client, f"/stream/{stream_id}") as listener:
+                assert listener.status_code == 200
+                overflow = client.get(f"{PUBLIC_PREFIX}/stream/{stream_id}")
+                assert overflow.status_code == 429
+                assert overflow.headers["cache-control"] == "no-store"
 
 
-def test_absent_id_is_obvious_on_the_socket_and_the_page():
+def test_missing_and_invalid_ids_are_404_and_a_live_one_is_audio():
     with TestClient(create_app()) as client:
         missing = client.get("/stream/ABCD")
         prefixed = client.get(f"{PUBLIC_PREFIX}/stream/ABCD")
         invalid = client.get("/stream/nope")
-        assert missing.status_code == prefixed.status_code == 200
-        assert missing.headers["cache-control"] == "no-cache"
-        assert "この配信はありません" in missing.text
-        assert "この配信はありません" in prefixed.text
-        assert 'data-state="absent"' in missing.text
-        assert ">ABCD</h1>" in missing.text
-        assert "ID の形式が違います" in invalid.text
-        assert 'data-state="invalid"' in invalid.text
-        with client.websocket_connect("/api/live/ZZZZ") as socket:
-            assert socket.receive_json() == {"type": "absent"}
+        for response in (missing, prefixed, invalid):
+            assert response.status_code == 404
+            assert response.headers["cache-control"] == "no-store"
+            assert "audio/webm" not in response.headers.get("content-type", "")
+            assert response.content == b""
         with client.websocket_connect("/api/live/publish?id=LIVE") as publisher:
             assert publisher.receive_json()["id"] == "LIVE"
-            page = client.get("/stream/LIVE")
-        assert 'data-state="live"' in page.text
-        assert "接続しています" in page.text
-        assert ">LIVE</h1>" in page.text
-        version = asset_version()
-        assert f'/static/stream.js?v={version}"' in page.text
-        assert f'/static/stream.css?v={version}"' in page.text
-        script = client.get(f"/static/stream.js?v={version}")
-        assert script.status_code == 200
-        assert '"./prefix.js?v=' in script.text
-        assert "MediaSource" in script.text
-        assert "sequence" in script.text
+            with _Audio(client, "/stream/LIVE") as audio:
+                assert audio.status_code == 200
+                assert audio.headers["content-type"] == "audio/webm"
+                assert audio.headers["cache-control"] == "no-store"
+                assert audio.headers["x-accel-buffering"] == "no"
+                assert "content-length" not in audio.headers
         gone = client.get("/stream/LIVE")
-        assert "この配信はありません" in gone.text
+        assert gone.status_code == 404
 
 
-def test_listener_page_does_not_pull_in_the_dj_graph():
-    text = (STATIC_DIR / "stream.js").read_text(encoding="utf-8")
-    assert "player.js" not in text
-    assert "MediaRecorder" not in text
-    assert "createMediaElementSource" not in text
+def test_the_listener_url_is_not_an_html_page():
     html = (ROOT / "djtube" / "templates" / "index.html").read_text(encoding="utf-8")
     assert "stream.js" not in html
+    assert not (STATIC_DIR / "stream.js").exists()
+    assert not (STATIC_DIR / "stream.css").exists()
+    assert not (ROOT / "djtube" / "templates" / "stream.html").exists()
 
 
 def test_synthetic_relay_starts_late_at_the_newest_cluster_and_keeps_nothing(tmp_path, monkeypatch):
@@ -207,20 +271,17 @@ def test_synthetic_relay_starts_late_at_the_newest_cluster_and_keeps_nothing(tmp
         with client.websocket_connect("/api/live/publish?id=TONE") as publisher:
             assert publisher.receive_json()["id"] == "TONE"
             publisher.send_json({"type": "mime", "mime": "audio/webm; codecs=opus"})
-            with client.websocket_connect("/api/live/TONE") as early:
-                start = early.receive_json()
-                assert start == {"type": "start", "id": "TONE", "mime": "audio/webm;codecs=opus"}
+            with _Audio(client, "/stream/TONE") as early:
                 _send(publisher, prefix)
-                assert early.receive_bytes() == head
-                assert [early.receive_bytes() for _ in range(cut)] == clusters[:cut]
+                assert early.read() == head
+                assert [early.read() for _ in range(cut)] == clusters[:cut]
                 stream = hub.get("TONE")
                 assert stream is not None
                 assert stream.latest == clusters[cut - 1]
                 assert stream.splitter.buffered < len(data) / 2
-                with client.websocket_connect("/api/live/TONE") as late:
-                    assert late.receive_json()["type"] == "start"
-                    assert late.receive_bytes() == head
-                    assert late.receive_bytes() == clusters[cut - 1]
+                with _Audio(client, "/stream/TONE") as late:
+                    assert late.read() == head
+                    assert late.read() == clusters[cut - 1]
                     _send(publisher, rest)
             # publisher and early close as the blocks exit; late is still open until here
         assert hub.get("TONE") is None
@@ -232,16 +293,16 @@ def test_end_and_garbage(tmp_path, monkeypatch):
     with TestClient(create_app()) as client:
         with client.websocket_connect("/api/live/publish?id=ENDD") as publisher:
             publisher.receive_json()
-            with client.websocket_connect("/api/live/ENDD") as listener:
-                assert listener.receive_json()["type"] == "start"
+            with _Audio(client, "/stream/ENDD") as listener:
+                assert listener.status_code == 200
                 publisher.close()
-                assert listener.receive_json()["type"] == "end"
+                assert listener.read() is None
         with client.websocket_connect("/api/live/publish?id=BADM") as publisher:
             publisher.receive_json()
-            with client.websocket_connect("/api/live/BADM") as listener:
-                assert listener.receive_json()["type"] == "start"
+            with _Audio(client, "/stream/BADM") as listener:
+                assert listener.status_code == 200
                 publisher.send_bytes(b"this is not webm audio")
-                assert listener.receive_json()["type"] == "end"
+                assert listener.read() is None
             with pytest.raises(WebSocketDisconnect) as bad:
                 publisher.receive_json()
             assert bad.value.code == CODE_BAD_MEDIA
@@ -254,7 +315,7 @@ def test_end_and_garbage(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_a_slow_listener_is_disconnected_and_a_full_queue_drops_old_clusters():
+def test_a_slow_listener_is_dropped_and_a_full_queue_drops_old_clusters():
     async def scenario():
         listener = _Listener(limit=4)
         listener.offer_init(b"init")
@@ -263,35 +324,26 @@ def test_a_slow_listener_is_disconnected_and_a_full_queue_drops_old_clusters():
         assert listener.pending_media() == [bytes([index]) for index in range(6, 10)]
         assert listener.pending_kinds()[0] == "init"
 
-        class Slow:
-            application_state = WebSocketState.CONNECTED
-
-            def __init__(self) -> None:
-                self.code = None
-
-            async def send_bytes(self, _data: bytes) -> None:
-                await asyncio.sleep(5)
-
-            async def send_json(self, _data: dict) -> None:
-                return None
-
-            async def receive(self) -> dict:
-                await asyncio.sleep(5)
-                return {"type": "websocket.disconnect"}
-
-            async def close(self, code: int = 1000, reason: str | None = None) -> None:
-                self.code = code
-                self.application_state = WebSocketState.DISCONNECTED
-
-        hub = LiveHub(send_timeout=0.05)
+        hub = LiveHub(send_timeout=0.05, max_streams=2)
+        stream = hub._open("SLOW", "203.0.113.8")
         waiting = _Listener(limit=4)
+        stream.listeners.add(waiting)
         waiting.offer_init(b"i")
         waiting.offer_media(b"m")
-        socket = Slow()
-        with pytest.raises(WebSocketDisconnect) as exc:
-            await hub._pump(waiting, socket)  # type: ignore[arg-type]
-        assert exc.value.code == CODE_SLOW
-        assert socket.code == CODE_SLOW
+
+        async def send(message: dict) -> None:
+            if message["type"] == "http.response.body" and message.get("body"):
+                await asyncio.sleep(5)
+
+        async def receive() -> dict:
+            await asyncio.sleep(30)
+            return {"type": "http.disconnect"}
+
+        response = _AudioResponse(hub, waiting, stream)
+        await asyncio.wait_for(response({"type": "http"}, receive, send), timeout=1)
+        assert stream.listeners == set()
+        assert stream.closed is False
+        assert hub.get("SLOW") is stream
 
     asyncio.run(scenario())
 
@@ -342,14 +394,13 @@ def test_a_silent_publisher_loses_its_slot_and_a_quiet_one_does_too():
         with client.websocket_connect("/api/live/publish?id=STOP") as publisher:
             publisher.receive_json()
             publisher.send_bytes(head + cluster)
-            with client.websocket_connect("/api/live/STOP") as listener:
-                assert listener.receive_json()["type"] == "start"
-                assert listener.receive_bytes() == head
-                assert listener.receive_bytes() == cluster
+            with _Audio(client, "/stream/STOP") as listener:
+                assert listener.read() == head
+                assert listener.read() == cluster
                 with pytest.raises(WebSocketDisconnect) as quiet:
                     publisher.receive_json()
                 assert quiet.value.code == CODE_TIMEOUT
-                assert listener.receive_json() == {"type": "end"}
+                assert listener.read() is None
         assert stalled.get("STOP") is None
 
 
@@ -402,13 +453,12 @@ def test_small_garbage_a_large_frame_and_a_burst_close_for_different_reasons():
     with TestClient(create_app(live=huge)) as client:
         with client.websocket_connect("/api/live/publish?id=HUGE") as publisher:
             publisher.receive_json()
-            with client.websocket_connect("/api/live/HUGE") as listener:
-                assert listener.receive_json()["type"] == "start"
+            with _Audio(client, "/stream/HUGE") as listener:
                 publisher.send_bytes(b"x" * 128)
                 with pytest.raises(WebSocketDisconnect) as cluster:
                     publisher.receive_json()
                 assert cluster.value.code == CODE_TOO_BIG
-                assert listener.receive_json() == {"type": "end"}
+                assert listener.read() is None
         assert huge.get("HUGE") is None
 
 
@@ -440,15 +490,14 @@ def test_text_after_init_closes_as_bad_media():
             publisher.receive_json()
             publisher.send_json({"type": "mime", "mime": "audio/webm"})
             publisher.send_bytes(head + cluster)
-            with client.websocket_connect("/api/live/LATE") as listener:
-                assert listener.receive_json()["type"] == "start"
-                assert listener.receive_bytes() == head
-                assert listener.receive_bytes() == cluster
+            with _Audio(client, "/stream/LATE") as listener:
+                assert listener.read() == head
+                assert listener.read() == cluster
                 publisher.send_text("still here")
                 with pytest.raises(WebSocketDisconnect) as closed:
                     publisher.receive_json()
                 assert closed.value.code == CODE_BAD_MEDIA
-                assert listener.receive_json()["type"] == "end"
+                assert listener.read() is None
         assert hub.get("LATE") is None
 
 
@@ -485,9 +534,9 @@ def test_a_second_mime_is_ignored_and_the_first_one_sticks():
             publisher.send_json({"type": "mime", "mime": "audio/webm"})
             publisher.send_json({"type": "mime", "mime": "text/html"})
             publisher.send_bytes(head + cluster)
-            with client.websocket_connect("/api/live/ONCE") as listener:
-                assert listener.receive_json()["mime"] == "audio/webm;codecs=opus"
-                assert listener.receive_bytes() == head
+            with _Audio(client, "/stream/ONCE") as listener:
+                assert listener.headers["content-type"] == "audio/webm"
+                assert listener.read() == head
 
 
 def test_one_address_may_publish_twice_and_forwarded_for_does_not_count():
@@ -533,39 +582,38 @@ def test_a_listener_who_leaves_during_silence_is_dropped():
     with TestClient(create_app(live=hub)) as client:
         with client.websocket_connect("/api/live/publish?id=QUIE") as publisher:
             assert publisher.receive_json()["id"] == "QUIE"
-            with client.websocket_connect("/api/live/QUIE") as listener:
-                assert listener.receive_json()["type"] == "start"
+            with _Audio(client, "/stream/QUIE") as listener:
+                assert listener.status_code == 200
                 stream = hub.get("QUIE")
                 assert stream is not None
                 assert len(stream.listeners) == 1
             assert stream.listeners == set()
-            with client.websocket_connect("/api/live/QUIE") as again:
-                assert again.receive_json()["type"] == "start"
+            with _Audio(client, "/stream/QUIE") as again:
+                assert again.status_code == 200
                 assert len(stream.listeners) == 1
 
 
-def test_publisher_disconnect_tells_the_listener_and_clears_the_stream():
+def test_publisher_disconnect_closes_the_audio_and_clears_the_stream():
     cluster = cluster_known(0, b"wave")
     head, _data = document([cluster])
     hub = LiveHub()
     with TestClient(create_app(live=hub)) as client:
         with client.websocket_connect("/api/live/publish?id=HALF") as publisher:
             publisher.receive_json()
-            with client.websocket_connect("/api/live/HALF") as listener:
-                assert listener.receive_json()["type"] == "start"
+            with _Audio(client, "/stream/HALF") as listener:
                 publisher.send_bytes(head + cluster)
-                assert listener.receive_bytes() == head
-                assert listener.receive_bytes() == cluster
+                assert listener.read() == head
+                assert listener.read() == cluster
                 stream = hub.get("HALF")
                 assert stream is not None
                 assert len(stream.listeners) == 1
                 publisher.close()
-                assert listener.receive_json() == {"type": "end"}
+                assert listener.read() is None
                 assert hub.get("HALF") is None
                 assert stream.listeners == set()
                 assert stream.closed
         gone = client.get("/stream/HALF")
-        assert "この配信はありません" in gone.text
+        assert gone.status_code == 404
 
 
 def test_joined_tone_plays_from_the_current_moment_not_the_beginning():
@@ -578,30 +626,28 @@ def test_joined_tone_plays_from_the_current_moment_not_the_beginning():
     with TestClient(create_app()) as client:
         with client.websocket_connect("/api/live/publish?id=PLAY") as publisher:
             publisher.receive_json()
-            with client.websocket_connect("/api/live/PLAY") as early:
-                early.receive_json()
+            with _Audio(client, "/stream/PLAY") as early:
                 _send(publisher, prefix)
-                assert early.receive_bytes() == init
-                early_clusters = [early.receive_bytes() for _ in range(join_at + 1)]
+                assert early.read() == init
+                early_clusters = [early.read() for _ in range(join_at + 1)]
                 assert early_clusters == clusters[: join_at + 1]
                 assert cluster_timecode(early_clusters[0]) == 0
-                with client.websocket_connect("/api/live/PLAY") as late:
-                    late.receive_json()
-                    assert late.receive_bytes() == init
-                    first = late.receive_bytes()
+                with _Audio(client, "/stream/PLAY") as late:
+                    assert late.read() == init
+                    first = late.read()
                     assert first == clusters[join_at]
                     assert (cluster_timecode(first) or 0) >= 2500
                     _send(publisher, rest)
                     late_rest = []
                     early_rest = []
                     for cluster in clusters[join_at + 1 :]:
-                        assert late.receive_bytes() == cluster
+                        assert late.read() == cluster
                         late_rest.append(cluster)
-                        assert early.receive_bytes() == cluster
+                        assert early.read() == cluster
                         early_rest.append(cluster)
                     publisher.close()
-                    assert late.receive_json()["type"] == "end"
-                    assert early.receive_json()["type"] == "end"
+                    assert late.read() is None
+                    assert early.read() is None
     late_audio = init + first + b"".join(late_rest)
     early_audio = init + b"".join(early_clusters + early_rest)
     late_pcm = _decode(late_audio)

@@ -86,7 +86,7 @@ def alternating_tone(seconds: float, step: float = 2.0) -> list[tuple[float, flo
 
 
 def endpoints(base: str, stream_id: str | None = None) -> tuple[str, str]:
-    """Return (websocket publish URL, listener page URL without the id)."""
+    """Return (websocket publish URL, audio URL without the id)."""
 
     raw = base.strip().rstrip("/")
     suffix = PUBLIC_PREFIX

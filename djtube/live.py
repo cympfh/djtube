@@ -1,14 +1,16 @@
-"""Relay one browser's mix to whoever opens the listener page.
+"""Relay one browser's mix as a live audio response.
 
 The publisher sends MediaRecorder blobs on a WebSocket. Nothing is written to
 disk. Each stream keeps the WebM initialization segment and the newest complete
-Cluster. A listener who arrives later is given that pair and then only Clusters
-that complete after they join, so playback starts at the current moment.
+Cluster. ``GET /stream/{ID}`` writes that pair, then only Clusters that complete
+after the listener joins, as one endless chunked ``audio/webm`` body. A player
+that connects later starts at the current moment. When the publisher ends, the
+body ends.
 
-A listener that falls behind drops older queued Clusters. A listener whose
-socket does not accept a send within the timeout is disconnected. The listener
-socket is also read, so a listener who leaves while the publisher is quiet is
-removed immediately.
+A listener that falls behind drops older queued Clusters. A listener that does
+not accept a chunk within the timeout is dropped, and the publisher keeps
+going. Closing the HTTP response removes the listener even if the publisher is
+quiet.
 
 A publisher that does not produce an initialization segment, or that stops
 sending, is closed and its slot is released. Byte rate and Cluster size are
@@ -27,14 +29,11 @@ import string
 import threading
 import time
 from collections import deque
-from html import escape
+from collections.abc import Awaitable, Callable
 
-from fastapi import FastAPI, WebSocket
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Response, WebSocket
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 
-from djtube.assets import DOCUMENT_CACHE, asset_version, stamp_document
-from djtube.paths import PUBLIC_PREFIX, STREAM_PATH
 from djtube.webm import DEFAULT_MAX_BUFFER, WebmError, WebmSplitter, WebmTooBig
 
 log = logging.getLogger(__name__)
@@ -58,15 +57,16 @@ IDLE_TIMEOUT = 30.0
 
 # Close codes in the private-use range, plus the registered ones we mean.
 CODE_BAD_ID = 4400
-CODE_ABSENT = 4404
 CODE_TIMEOUT = 4408
 CODE_TAKEN = 4409
 CODE_FULL = 4429
 CODE_BAD_MEDIA = 1003
 CODE_RATE = 1008
 CODE_TOO_BIG = 1009
-CODE_SLOW = 1013
-CODE_OK = 1000
+
+# nginx in front of this app is assumed to set proxy_buffering off. This header
+# asks the same thing of a location that forgot it. Players must not reuse a body.
+_STREAM_HEADERS = {"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
 
 
 class LiveClose(Exception):
@@ -301,99 +301,31 @@ class LiveHub:
             self._end(stream)
             log.info("end %s", stream.id)
 
-    async def listen(self, websocket: WebSocket, stream_id: str) -> None:
-        _configure_log()
-        await websocket.accept()
+    async def attach_listener(self, stream_id: str) -> tuple[int, "_Listener | None", "_Stream | None"]:
+        """Join a live response. 404 when nothing is publishing. 429 when the listener cap is full."""
+
         if not is_stream_id(stream_id):
-            await _tell(websocket, {"type": "absent"}, CODE_ABSENT)
-            return
-        listener = _Listener(self.listener_queue)
+            return 404, None, None
         with self._lock:
             stream = self._streams.get(stream_id)
             if stream is None or stream.closed:
-                outcome = "absent"
-                mime = DEFAULT_MIME
-                init = None
-                latest = None
-            elif len(stream.listeners) >= self.max_listeners:
-                outcome = "full"
-                mime = stream.mime
-                init = None
-                latest = None
-            else:
-                outcome = "live"
-                stream.listeners.add(listener)
-                mime = stream.mime
-                init = stream.init
-                latest = stream.latest
-        if outcome == "absent":
-            await _tell(websocket, {"type": "absent"}, CODE_ABSENT)
-            return
-        if outcome == "full":
-            await _tell(websocket, {"type": "full"}, CODE_FULL)
-            return
-        if init is not None:
-            listener.offer_init(init)
-        if latest is not None:
-            listener.offer_media(latest)
-        try:
-            await websocket.send_json({"type": "start", "id": stream_id, "mime": mime})
-            await self._pump(listener, websocket)
-        except WebSocketDisconnect:
-            pass
-        finally:
-            listener.mark_closed()
-            with self._lock:
-                stream.listeners.discard(listener)
+                return 404, None, None
+            if len(stream.listeners) >= self.max_listeners:
+                return 429, None, None
+            listener = _Listener(self.listener_queue)
+            stream.listeners.add(listener)
+            init = stream.init
+            latest = stream.latest
+            if init is not None:
+                listener.offer_init(init)
+            if latest is not None:
+                listener.offer_media(latest)
+        return 200, listener, stream
 
-    async def _pump(self, listener: _Listener, websocket: WebSocket) -> None:
-        incoming = asyncio.create_task(self._until_disconnect(websocket))
-        sent_init = False
-        try:
-            while True:
-                item_task = asyncio.create_task(listener.get())
-                done, _pending = await asyncio.wait(
-                    {item_task, incoming},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if incoming in done:
-                    item_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await item_task
-                    incoming.result()
-                    return
-                item = item_task.result()
-                if item is None:
-                    return
-                kind, payload = item
-                if kind == "end":
-                    await _tell(websocket, {"type": "end"}, CODE_OK)
-                    return
-                if kind == "init":
-                    await self._send_bytes(websocket, payload)
-                    sent_init = True
-                    continue
-                if not sent_init:
-                    continue
-                await self._send_bytes(websocket, payload)
-        finally:
-            if not incoming.done():
-                incoming.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await incoming
-
-    async def _until_disconnect(self, websocket: WebSocket) -> None:
-        while True:
-            message = await websocket.receive()
-            if message["type"] == "websocket.disconnect":
-                return
-
-    async def _send_bytes(self, websocket: WebSocket, payload: bytes) -> None:
-        try:
-            await asyncio.wait_for(websocket.send_bytes(payload), self.send_timeout)
-        except asyncio.TimeoutError:
-            await _close(websocket, CODE_SLOW)
-            raise WebSocketDisconnect(code=CODE_SLOW) from None
+    def drop_listener(self, stream: _Stream, listener: _Listener) -> None:
+        listener.mark_closed()
+        with self._lock:
+            stream.listeners.discard(listener)
 
     async def _consume(self, websocket: WebSocket, stream: _Stream) -> None:
         opened = time.monotonic()
@@ -543,25 +475,56 @@ class LiveHub:
         stream.splitter.clear()
 
 
-def _stream_view(stream_id: str) -> tuple[str, str, str]:
-    if not is_stream_id(stream_id):
-        return "invalid", "", "ID の形式が違います"
-    return "absent", stream_id, "この配信はありません"
+class _AudioResponse(Response):
+    """Chunked audio/webm. No Content-Length, so the server frames it as chunked."""
 
+    media_type = "audio/webm"
 
-def render_stream(hub: LiveHub, stream_id: str) -> str:
-    state, shown, status = _stream_view(stream_id)
-    if state == "absent" and hub.active(stream_id):
-        state = "live"
-        status = "接続しています"
-    title = "DJTUBE" if not shown else f"DJTUBE {shown}"
-    html = STREAM_PATH.read_text(encoding="utf-8")
-    html = html.replace("__PUBLIC_PREFIX__", PUBLIC_PREFIX)
-    html = html.replace("__STREAM_TITLE__", escape(title))
-    html = html.replace("__STREAM_ID__", escape(shown))
-    html = html.replace("__STREAM_STATE__", state)
-    html = html.replace("__STREAM_STATUS__", escape(status))
-    return stamp_document(html, asset_version())
+    def __init__(self, hub: LiveHub, listener: _Listener, stream: _Stream) -> None:
+        self.status_code = 200
+        self.media_type = "audio/webm"
+        self.background = None
+        self.init_headers(_STREAM_HEADERS)
+        self.hub = hub
+        self.listener = listener
+        self.stream = stream
+
+    async def __call__(
+        self, scope: dict, receive: Callable[[], Awaitable[dict]], send: Callable[[dict], Awaitable[None]]
+    ) -> None:
+        try:
+            await send({"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers})
+            await self._body(receive, send)
+        finally:
+            self.hub.drop_listener(self.stream, self.listener)
+
+    async def _body(self, receive: Callable[[], Awaitable[dict]], send: Callable[[dict], Awaitable[None]]) -> None:
+        incoming = asyncio.create_task(_until_http_disconnect(receive))
+        try:
+            while True:
+                item_task = asyncio.create_task(self.listener.get())
+                done, _pending = await asyncio.wait({item_task, incoming}, return_when=asyncio.FIRST_COMPLETED)
+                if incoming in done:
+                    item_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await item_task
+                    return
+                item = item_task.result()
+                if item is None or item[0] == "end":
+                    await send({"type": "http.response.body", "body": b"", "more_body": False})
+                    return
+                try:
+                    await asyncio.wait_for(
+                        send({"type": "http.response.body", "body": item[1], "more_body": True}),
+                        self.hub.send_timeout,
+                    )
+                except TimeoutError:
+                    return
+        finally:
+            if not incoming.done():
+                incoming.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await incoming
 
 
 def mount_live(app: FastAPI, hub: LiveHub) -> None:
@@ -569,13 +532,19 @@ def mount_live(app: FastAPI, hub: LiveHub) -> None:
     async def publish(websocket: WebSocket) -> None:
         await hub.publish(websocket)
 
-    @app.websocket("/api/live/{stream_id}")
-    async def listen(websocket: WebSocket, stream_id: str) -> None:
-        await hub.listen(websocket, stream_id)
-
     @app.get("/stream/{stream_id}")
-    def stream_page(stream_id: str) -> HTMLResponse:
-        return HTMLResponse(render_stream(hub, stream_id), headers={"Cache-Control": DOCUMENT_CACHE})
+    async def stream_audio(stream_id: str) -> Response:
+        status, listener, stream = await hub.attach_listener(stream_id)
+        if listener is None or stream is None:
+            return Response(status_code=status, headers=_STREAM_HEADERS)
+        return _AudioResponse(hub, listener, stream)
+
+
+async def _until_http_disconnect(receive: Callable[[], Awaitable[dict]]) -> None:
+    while True:
+        message = await receive()
+        if message["type"] == "http.disconnect":
+            return
 
 
 async def _close(websocket: WebSocket, code: int) -> None:
@@ -583,9 +552,3 @@ async def _close(websocket: WebSocket, code: int) -> None:
         return
     with contextlib.suppress(RuntimeError, WebSocketDisconnect):
         await websocket.close(code=code)
-
-
-async def _tell(websocket: WebSocket, payload: dict[str, str], code: int) -> None:
-    with contextlib.suppress(RuntimeError, WebSocketDisconnect):
-        await websocket.send_json(payload)
-    await _close(websocket, code)
