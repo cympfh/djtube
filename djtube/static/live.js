@@ -239,14 +239,17 @@ export function createLiveControl(options) {
     const recorder = mine.recorder;
     const socket = mine.socket;
     const dest = mine.dest;
+    const silence = mine.silence;
     mine.recorder = null;
     mine.socket = null;
     mine.dest = null;
+    mine.silence = null;
     try {
       recorder?.stop();
     } catch {
       /* already stopped */
     }
+    stopSilence(silence);
     try {
       if (dest) bus?.master?.disconnect(dest);
     } catch {
@@ -267,6 +270,43 @@ export function createLiveControl(options) {
       if (socket && socket.readyState <= SOCKET_OPEN) socket.close(1000);
     } catch {
       /* already closing */
+    }
+  }
+
+  function startSilence(context, dest) {
+    // Chrome stops MediaRecorder clusters once the last playing source ends,
+    // even while AudioContext stays running. A gain of 0 is silence, and the
+    // source still keeps a cluster coming so the server's idle limit is not hit.
+    if (typeof context.createConstantSource !== "function" || typeof context.createGain !== "function") return null;
+    try {
+      const source = context.createConstantSource();
+      const gain = context.createGain();
+      gain.gain.value = 0;
+      source.connect(gain);
+      gain.connect(dest);
+      source.start();
+      return { source, gain };
+    } catch {
+      return null;
+    }
+  }
+
+  function stopSilence(silence) {
+    if (!silence) return;
+    try {
+      silence.source.stop();
+    } catch {
+      /* already stopped */
+    }
+    try {
+      silence.source.disconnect();
+    } catch {
+      /* already gone */
+    }
+    try {
+      silence.gain.disconnect();
+    } catch {
+      /* already gone */
     }
   }
 
@@ -439,6 +479,7 @@ export function createLiveControl(options) {
       const dest = context.createMediaStreamDestination();
       bus.master.connect(dest);
       mine.dest = dest;
+      mine.silence = startSilence(context, dest);
     } catch {
       finish(mine, { state: "error", reason: LIVE_CONNECT_FAILED });
       return;
