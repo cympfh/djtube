@@ -4,7 +4,9 @@ import test from "node:test";
 
 import {
   LIVE_BITRATE,
+  LIVE_BLOB_WATCH_MS,
   LIVE_BUFFER_LIMIT,
+  LIVE_OUTPUT_STALLED,
   LIVE_BUTTON_LABEL,
   LIVE_COPY_AUDIO,
   LIVE_COPY_FAILED,
@@ -730,6 +732,121 @@ test("silence keeps a zero-gain source on the stream until the broadcast stops",
   await flush();
   assert.equal(keep.stopped, true);
   assert.equal(harness.ui.painted().title, LIVE_IDLE);
+});
+
+function clockHarness(currentTime = 0.01) {
+  const clock = fakeClock();
+  const bus = openBus();
+  bus.context.currentTime = currentTime;
+  const harness = setup({ bus, setTimer: clock.schedule, clearTimer: clock.clear });
+  return { clock, bus, harness };
+}
+
+test("a frozen render clock stops the stream and names the output device", async () => {
+  const { clock, harness } = clockHarness();
+  await goLive(harness);
+  const url = "https://s.cympfh.cc/djtube/stream/ABCD";
+  clock.advance(LIVE_BLOB_WATCH_MS - 1);
+  assert.equal(harness.ui.painted().face, "on");
+  assert.equal(harness.ui.painted().title, "");
+  assert.equal(harness.recorders.length, 1);
+  clock.advance(1);
+  assert.equal(harness.ui.painted().title, LIVE_OUTPUT_STALLED);
+  assert.equal(harness.ui.painted().live, LIVE_OUTPUT_STALLED);
+  assert.equal(harness.ui.painted().face, "off");
+  assert.equal(harness.ui.painted().label, LIVE_BUTTON_LABEL);
+  assert.equal(harness.menu.head.textContent, "");
+  assert.equal(harness.recorders.length, 1);
+  assert.equal(harness.recorders[0].stopped, true);
+  assert.equal(harness.sockets.length, 1);
+  assert.equal(harness.sockets[0].closed, 1000);
+  assert.deepEqual(harness.sockets[0].sent, [openedClaim()]);
+  assert.deepEqual(harness.copies, [url]);
+  clock.advance(LIVE_BLOB_WATCH_MS);
+  assert.equal(harness.ui.painted().title, LIVE_OUTPUT_STALLED);
+  assert.equal(harness.recorders.length, 1);
+  assert.equal(harness.sockets.length, 1);
+});
+
+test("blobs keep the stream up even when the render clock is frozen", async () => {
+  const { clock, harness } = clockHarness();
+  await goLive(harness);
+  for (let i = 0; i < 3; i += 1) {
+    clock.advance(LIVE_BLOB_WATCH_MS - 1);
+    harness.recorders[0].emit(new Blob([Uint8Array.of(i + 1)]));
+    await flush();
+    assert.equal(harness.ui.painted().face, "on");
+    assert.equal(harness.ui.painted().title, "");
+  }
+  assert.equal(harness.recorders.length, 1);
+  assert.equal(harness.recorders[0].stopped, false);
+  assert.equal(harness.sockets[0].sent.length, 4);
+  assert.equal(harness.sockets.length, 1);
+});
+
+test("an advancing clock with no blobs leaves the server's 4408 text in place", async () => {
+  const { clock, bus, harness } = clockHarness(0.01);
+  await goLive(harness);
+  bus.context.currentTime = 3;
+  clock.advance(LIVE_BLOB_WATCH_MS);
+  assert.equal(harness.ui.painted().face, "on");
+  assert.equal(harness.ui.painted().title, "");
+  assert.equal(harness.menu.head.textContent, "配信中：https://s.cympfh.cc/djtube/stream/ABCD");
+  assert.equal(harness.recorders.length, 1);
+  assert.equal(harness.recorders[0].stopped, false);
+  assert.deepEqual(harness.sockets[0].sent, [openedClaim()]);
+  bus.context.currentTime = 6;
+  clock.advance(LIVE_BLOB_WATCH_MS);
+  assert.equal(harness.recorders.length, 1);
+  assert.equal(harness.sockets.length, 1);
+  assert.deepEqual(harness.sockets[0].sent, [openedClaim()]);
+  harness.sockets[0].serverClose(4408);
+  await flush();
+  assert.equal(harness.ui.painted().title, closeReason(4408));
+  assert.equal(harness.ui.painted().face, "off");
+  assert.equal(harness.recorders.length, 1);
+  clock.advance(LIVE_BLOB_WATCH_MS);
+  assert.equal(harness.ui.painted().title, closeReason(4408));
+  assert.equal(harness.sockets.length, 1);
+});
+
+test("stopping or a server close clears the output-clock check", async () => {
+  const endings = [
+    async (harness) => {
+      harness.ui.button.click();
+      await flush();
+      assert.equal(harness.ui.painted().title, LIVE_IDLE);
+    },
+    async (harness) => {
+      harness.sockets[0].serverClose(4408);
+      await flush();
+      assert.equal(harness.ui.painted().title, closeReason(4408));
+    },
+    async (harness) => {
+      harness.sockets[0].serverClose(4409);
+      await flush();
+      assert.equal(harness.ui.painted().title, closeReason(4409));
+    },
+    async (harness) => {
+      harness.sockets[0].serverClose(4429);
+      await flush();
+      assert.equal(harness.ui.painted().title, closeReason(4429));
+    },
+  ];
+  for (const end of endings) {
+    const { clock, harness } = clockHarness();
+    await goLive(harness);
+    await end(harness);
+    const title = harness.ui.painted().title;
+    const face = harness.ui.painted().face;
+    clock.advance(LIVE_BLOB_WATCH_MS * 2);
+    assert.equal(harness.ui.painted().title, title);
+    assert.equal(harness.ui.painted().face, face);
+    assert.notEqual(title, LIVE_OUTPUT_STALLED);
+    assert.equal(harness.recorders.length, 1);
+    assert.equal(harness.recorders[0].stopped, true);
+    assert.equal(harness.sockets.length, 1);
+  }
 });
 
 test("a context without a constant source still publishes", async () => {

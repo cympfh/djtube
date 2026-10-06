@@ -26,6 +26,9 @@ export const LIVE_COPY_VIDEO = "動画ストリーミングURLをコピー";
 export const LIVE_SEND_BACKLOG = "送信が追いつかないため、配信を止めました";
 export const LIVE_TAKEN = "この配信 ID は他の人が使っています。もう一度押すと新しい ID で配信します";
 export const LIVE_BUFFER_LIMIT = 1024 * 1024;
+export const LIVE_OUTPUT_STALLED = "音声出力が動いていません（出力デバイスを確認）";
+// A few seconds with no blob, and still inside the server's init wait.
+export const LIVE_BLOB_WATCH_MS = 3000;
 
 const CLOSE_TEXT = {
   4408: "音声が届かなくなったため、配信を止めました",
@@ -438,6 +441,7 @@ export function createLiveControl(options) {
   }
 
   function teardown(mine) {
+    clearWatch(mine);
     const recorder = mine.recorder;
     const socket = mine.socket;
     const dest = mine.dest;
@@ -538,6 +542,36 @@ export function createLiveControl(options) {
     };
   }
 
+  function clearWatch(mine) {
+    if (!mine || mine.watch == null) return;
+    clearTimer(mine.watch);
+    mine.watch = null;
+  }
+
+  function renderTime() {
+    const time = bus?.context?.currentTime;
+    return typeof time === "number" ? time : null;
+  }
+
+  function armWatch(mine) {
+    clearWatch(mine);
+    if (mine.ended || session !== mine) return;
+    const mark = renderTime();
+    mine.watch = setTimer(() => {
+      mine.watch = null;
+      if (mine.ended || session !== mine) return;
+      const now = renderTime();
+      // No blob in this window. A frozen render clock means the output
+      // device is not pulling audio. An advancing clock keeps the server's
+      // 4408 text for a stream that really sent nothing.
+      if (mark != null && now != null && now <= mark) {
+        finish(mine, { state: "error", reason: LIVE_OUTPUT_STALLED });
+        return;
+      }
+      armWatch(mine);
+    }, LIVE_BLOB_WATCH_MS);
+  }
+
   function begin(mine, id, token) {
     if (mine.ended || mine.recorder) return;
     if (pinnedId && id !== pinnedId) {
@@ -561,6 +595,7 @@ export function createLiveControl(options) {
     recorder.ondataavailable = (event) => {
       const blob = event?.data;
       if (!blob || !blob.size || mine.ended) return;
+      armWatch(mine);
       Promise.resolve(blob.arrayBuffer())
         .then((data) => {
           if (mine.ended || mine.socket?.readyState !== SOCKET_OPEN) return;
@@ -582,6 +617,7 @@ export function createLiveControl(options) {
       finish(mine, { state: "error", reason: LIVE_UNSUPPORTED });
       return;
     }
+    armWatch(mine);
     mine.url = url;
     paint(liveStatus(mine));
     deliverCopy(mine, url);
@@ -655,7 +691,7 @@ export function createLiveControl(options) {
     } catch {
       clip = null;
     }
-    const mine = { ended: false, socket: null, recorder: null, dest: null, url: "", clip };
+    const mine = { ended: false, socket: null, recorder: null, dest: null, url: "", clip, watch: null };
     session = mine;
     paint({ state: "starting" });
     let pending = null;
