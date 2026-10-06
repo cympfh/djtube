@@ -4,7 +4,6 @@ import test from "node:test";
 
 import {
   LIVE_BITRATE,
-  LIVE_RENDER_WATCH_MS,
   LIVE_BUFFER_LIMIT,
   LIVE_OUTPUT_STALLED,
   LIVE_BUTTON_LABEL,
@@ -368,6 +367,7 @@ function setup(extra = {}) {
     menu,
     setTimer: extra.setTimer,
     clearTimer: extra.clearTimer,
+    now: extra.now,
     document: extra.document,
     root: extra.root,
   });
@@ -741,22 +741,43 @@ test("silence keeps a zero-gain source on the stream until the broadcast stops",
   assert.equal(harness.ui.painted().title, LIVE_IDLE);
 });
 
-function clockHarness(currentTime = 0.01) {
-  const clock = fakeClock();
+const RENDER_TIME0 = 3.2;
+const RENDER_WALL0 = 12000;
+
+function renderHarness() {
+  let wall = RENDER_WALL0;
   const bus = openBus();
-  bus.context.currentTime = currentTime;
-  const harness = setup({ bus, setTimer: clock.schedule, clearTimer: clock.clear });
-  return { clock, bus, harness };
+  bus.context.currentTime = RENDER_TIME0;
+  const harness = setup({
+    bus,
+    now() {
+      return wall;
+    },
+  });
+  return {
+    bus,
+    harness,
+    setWall(ms) {
+      wall = ms;
+    },
+    blob() {
+      harness.recorders[0].emit(new Blob([Uint8Array.of(1)]));
+    },
+  };
 }
 
-test("a frozen clock and a 4408 names the output device", async () => {
-  const { clock, harness } = clockHarness();
-  await goLive(harness);
-  clock.advance(5000);
+function stillLive(harness) {
   assert.equal(harness.ui.painted().face, "on");
   assert.equal(harness.ui.painted().title, "");
   assert.equal(harness.recorders[0].stopped, false);
   assert.equal(harness.sockets[0].closed, null);
+}
+
+test("a frozen clock and a 4408 names the output device", async () => {
+  const { harness, setWall } = renderHarness();
+  await goLive(harness);
+  setWall(RENDER_WALL0 + 10000);
+  stillLive(harness);
   harness.sockets[0].serverClose(4408);
   await flush();
   assert.equal(harness.ui.painted().title, LIVE_OUTPUT_STALLED);
@@ -766,111 +787,225 @@ test("a frozen clock and a 4408 names the output device", async () => {
   assert.equal(harness.menu.head.textContent, "");
   assert.equal(harness.recorders.length, 1);
   assert.equal(harness.sockets.length, 1);
-  clock.advance(LIVE_RENDER_WATCH_MS * 2);
+});
+
+test("a clock that stalls mid-stream and a 4408 idle close names the output device", async () => {
+  const { bus, harness, setWall, blob } = renderHarness();
+  await goLive(harness);
+  bus.context.currentTime = RENDER_TIME0 + 12;
+  setWall(RENDER_WALL0 + 12000);
+  blob();
+  stillLive(harness);
+  setWall(RENDER_WALL0 + 42000);
+  harness.sockets[0].serverClose(4408);
+  await flush();
   assert.equal(harness.ui.painted().title, LIVE_OUTPUT_STALLED);
+  assert.equal(harness.ui.painted().live, LIVE_OUTPUT_STALLED);
   assert.equal(harness.ui.painted().face, "off");
+  assert.equal(harness.recorders[0].stopped, true);
   assert.equal(harness.sockets.length, 1);
 });
 
-test("a clock that starts at 5 seconds does not stop the stream", async () => {
-  const { clock, bus, harness } = clockHarness(0.01);
+test("a clock that keeps running keeps the 4408 wording", async () => {
+  const { bus, harness, setWall, blob } = renderHarness();
   await goLive(harness);
-  clock.advance(5000);
-  assert.equal(harness.ui.painted().face, "on");
-  assert.equal(harness.ui.painted().title, "");
-  assert.equal(harness.recorders[0].stopped, false);
-  assert.equal(harness.sockets[0].closed, null);
-  assert.equal(harness.sockets.length, 1);
-  bus.context.currentTime = 5;
-  clock.advance(LIVE_RENDER_WATCH_MS);
-  assert.equal(harness.ui.painted().face, "on");
-  assert.equal(harness.ui.painted().title, "");
-  assert.equal(harness.ui.painted().live.includes("配信中："), true);
-  assert.equal(harness.recorders.length, 1);
-  assert.equal(harness.recorders[0].stopped, false);
-  assert.equal(harness.sockets.length, 1);
-  assert.equal(harness.sockets[0].closed, null);
-});
-
-test("a moving clock keeps the 4408 wording", async () => {
-  const { clock, bus, harness } = clockHarness(0.01);
-  await goLive(harness);
-  bus.context.currentTime = 1;
-  clock.advance(LIVE_RENDER_WATCH_MS);
+  bus.context.currentTime = RENDER_TIME0 + 10;
+  setWall(RENDER_WALL0 + 10000);
+  blob();
   assert.equal(harness.ui.painted().face, "on");
   harness.sockets[0].serverClose(4408);
   await flush();
   assert.equal(harness.ui.painted().title, closeReason(4408));
   assert.equal(harness.ui.painted().live, closeReason(4408));
   assert.equal(harness.ui.painted().face, "off");
-  clock.advance(LIVE_RENDER_WATCH_MS * 2);
-  assert.equal(harness.ui.painted().title, closeReason(4408));
   assert.equal(harness.sockets.length, 1);
   assert.equal(harness.recorders.length, 1);
 });
 
-test("the render-clock timer is cleared on every end path", async () => {
-  const endings = [
-    {
-      move: false,
-      title: LIVE_IDLE,
-      end(harness) {
-        harness.ui.button.click();
-      },
-    },
-    {
-      move: false,
-      title: LIVE_OUTPUT_STALLED,
-      end(harness) {
-        harness.sockets[0].serverClose(4408);
-      },
-    },
-    {
-      move: true,
-      title: closeReason(4408),
-      end(harness) {
-        harness.sockets[0].serverClose(4408);
-      },
-    },
-    {
-      move: false,
-      title: closeReason(4409),
-      end(harness) {
-        harness.sockets[0].serverClose(4409);
-      },
-    },
-    {
-      move: false,
-      title: closeReason(4429),
-      end(harness) {
-        harness.sockets[0].serverClose(4429);
-      },
-    },
-    {
-      move: false,
-      title: closeReason(1006),
-      end(harness) {
-        harness.sockets[0].serverClose(1006);
-      },
-    },
-  ];
-  for (const ending of endings) {
-    const { clock, bus, harness } = clockHarness(0.01);
-    await goLive(harness);
-    if (ending.move) bus.context.currentTime = 2;
-    clock.advance(LIVE_RENDER_WATCH_MS);
-    ending.end(harness);
-    await flush();
-    assert.equal(harness.ui.painted().title, ending.title);
-    assert.equal(harness.ui.painted().face, "off");
-    const title = harness.ui.painted().title;
-    clock.advance(LIVE_RENDER_WATCH_MS * 3);
-    assert.equal(harness.ui.painted().title, title);
-    assert.equal(harness.ui.painted().face, "off");
-    assert.equal(harness.recorders.length, 1);
-    assert.equal(harness.recorders[0].stopped, true);
-    assert.equal(harness.sockets.length, 1);
-  }
+test("a late start at 9.9 seconds and a 4408 names the output device", async () => {
+  const { bus, harness, setWall, blob } = renderHarness();
+  await goLive(harness);
+  stillLive(harness);
+  bus.context.currentTime = RENDER_TIME0 + 0.1;
+  setWall(RENDER_WALL0 + 9900);
+  blob();
+  harness.sockets[0].serverClose(4408);
+  await flush();
+  assert.equal(harness.ui.painted().title, LIVE_OUTPUT_STALLED);
+  assert.equal(harness.ui.painted().live, LIVE_OUTPUT_STALLED);
+  assert.equal(harness.ui.painted().face, "off");
+  assert.equal(harness.sockets.length, 1);
+});
+
+test("a normal stream shows nothing about the output device", async () => {
+  const { bus, harness, setWall, blob } = renderHarness();
+  await goLive(harness);
+  bus.context.currentTime = RENDER_TIME0 + 8;
+  setWall(RENDER_WALL0 + 8000);
+  blob();
+  assert.equal(harness.ui.painted().face, "on");
+  assert.equal(harness.ui.painted().title, "");
+  assert.equal(harness.ui.painted().live.includes("配信中"), true);
+  assert.equal(harness.ui.painted().live.includes(LIVE_OUTPUT_STALLED), false);
+  assert.equal(harness.recorders[0].stopped, false);
+  assert.equal(harness.sockets[0].closed, null);
+  assert.equal(harness.sockets.length, 1);
+});
+
+test("a 4.9 second start gap keeps the 4408 wording", async () => {
+  const { harness, setWall, blob } = renderHarness();
+  await goLive(harness);
+  setWall(RENDER_WALL0 + 4900);
+  blob();
+  harness.sockets[0].serverClose(4408);
+  await flush();
+  assert.equal(harness.ui.painted().title, closeReason(4408));
+  assert.equal(harness.ui.painted().live, closeReason(4408));
+});
+
+test("a 5 second start gap names the output device", async () => {
+  const { harness, setWall, blob } = renderHarness();
+  await goLive(harness);
+  setWall(RENDER_WALL0 + 5000);
+  blob();
+  harness.sockets[0].serverClose(4408);
+  await flush();
+  assert.equal(harness.ui.painted().title, LIVE_OUTPUT_STALLED);
+  assert.equal(harness.ui.painted().live, LIVE_OUTPUT_STALLED);
+});
+
+test("a blob 4.9 seconds ago keeps the 4408 wording", async () => {
+  const { bus, harness, setWall, blob } = renderHarness();
+  await goLive(harness);
+  setWall(RENDER_WALL0 + 5100);
+  blob();
+  bus.context.currentTime = RENDER_TIME0 + 10;
+  setWall(RENDER_WALL0 + 10000);
+  harness.sockets[0].serverClose(4408);
+  await flush();
+  assert.equal(harness.ui.painted().title, closeReason(4408));
+  assert.equal(harness.ui.painted().live, closeReason(4408));
+});
+
+test("a blob 5 seconds ago names the output device", async () => {
+  const { bus, harness, setWall, blob } = renderHarness();
+  await goLive(harness);
+  setWall(RENDER_WALL0 + 5000);
+  blob();
+  bus.context.currentTime = RENDER_TIME0 + 10;
+  setWall(RENDER_WALL0 + 10000);
+  harness.sockets[0].serverClose(4408);
+  await flush();
+  assert.equal(harness.ui.painted().title, LIVE_OUTPUT_STALLED);
+  assert.equal(harness.ui.painted().live, LIVE_OUTPUT_STALLED);
+});
+
+test("an empty blob does not count as arrived output", async () => {
+  const { bus, harness, setWall, blob } = renderHarness();
+  await goLive(harness);
+  blob();
+  bus.context.currentTime = RENDER_TIME0 + 5;
+  setWall(RENDER_WALL0 + 5000);
+  harness.recorders[0].emit(new Blob([]));
+  harness.sockets[0].serverClose(4408);
+  await flush();
+  assert.equal(harness.ui.painted().title, LIVE_OUTPUT_STALLED);
+  assert.equal(harness.ui.painted().live, LIVE_OUTPUT_STALLED);
+});
+
+test("an init 4408 at 15 seconds still names the output device", async () => {
+  // A proxied init 4408 arrived at 12.0 s, so a 10 s window would miss it.
+  const { harness, setWall, blob } = renderHarness();
+  await goLive(harness);
+  setWall(RENDER_WALL0 + 15000);
+  blob();
+  stillLive(harness);
+  harness.sockets[0].serverClose(4408);
+  await flush();
+  assert.equal(harness.ui.painted().title, LIVE_OUTPUT_STALLED);
+  assert.equal(harness.ui.painted().live, LIVE_OUTPUT_STALLED);
+});
+
+test("a start gap at 20 seconds still names the output device", async () => {
+  const { harness, setWall, blob } = renderHarness();
+  await goLive(harness);
+  setWall(RENDER_WALL0 + 20000);
+  blob();
+  harness.sockets[0].serverClose(4408);
+  await flush();
+  assert.equal(harness.ui.painted().title, LIVE_OUTPUT_STALLED);
+  assert.equal(harness.ui.painted().live, LIVE_OUTPUT_STALLED);
+});
+
+test("a 4408 at 21 seconds keeps the existing wording", async () => {
+  const { harness, setWall, blob } = renderHarness();
+  await goLive(harness);
+  setWall(RENDER_WALL0 + 21000);
+  blob();
+  harness.sockets[0].serverClose(4408);
+  await flush();
+  assert.equal(harness.ui.painted().title, closeReason(4408));
+  assert.equal(harness.ui.painted().live, closeReason(4408));
+});
+
+test("a late start at 6 seconds then a network choke keeps the 4408 wording", async () => {
+  const { bus, harness, setWall, blob } = renderHarness();
+  await goLive(harness);
+  setWall(RENDER_WALL0 + 6000);
+  stillLive(harness);
+  bus.context.currentTime = RENDER_TIME0 + (40.13 - 5.89);
+  setWall(RENDER_WALL0 + 40130);
+  blob();
+  stillLive(harness);
+  harness.sockets[0].serverClose(4408);
+  await flush();
+  assert.equal(harness.ui.painted().title, closeReason(4408));
+  assert.equal(harness.ui.painted().live, closeReason(4408));
+  assert.equal(harness.ui.painted().face, "off");
+});
+
+test("a temporary dropout then a network choke keeps the 4408 wording", async () => {
+  const { bus, harness, setWall, blob } = renderHarness();
+  await goLive(harness);
+  bus.context.currentTime = RENDER_TIME0 + 4;
+  setWall(RENDER_WALL0 + 4000);
+  blob();
+  stillLive(harness);
+  setWall(RENDER_WALL0 + 10000);
+  stillLive(harness);
+  bus.context.currentTime = RENDER_TIME0 + (40.65 - 7.27);
+  setWall(RENDER_WALL0 + 40650);
+  blob();
+  stillLive(harness);
+  harness.sockets[0].serverClose(4408);
+  await flush();
+  assert.equal(harness.ui.painted().title, closeReason(4408));
+  assert.equal(harness.ui.painted().live, closeReason(4408));
+  assert.equal(harness.ui.painted().face, "off");
+});
+
+test("a 4408 without a numeric currentTime keeps the 4408 wording", async () => {
+  const { bus, harness, setWall } = renderHarness();
+  await goLive(harness);
+  bus.context.currentTime = undefined;
+  setWall(RENDER_WALL0 + 10000);
+  harness.sockets[0].serverClose(4408);
+  await flush();
+  assert.equal(harness.ui.painted().title, closeReason(4408));
+  assert.equal(harness.ui.painted().live, closeReason(4408));
+  assert.equal(harness.ui.painted().face, "off");
+});
+
+test("a non-4408 close does not name the output device", async () => {
+  const { harness, setWall } = renderHarness();
+  await goLive(harness);
+  setWall(RENDER_WALL0 + 10000);
+  harness.sockets[0].serverClose(4409);
+  await flush();
+  assert.equal(harness.ui.painted().title, closeReason(4409));
+  assert.equal(harness.ui.painted().live, closeReason(4409));
+  assert.equal(harness.ui.painted().face, "off");
+  assert.equal(harness.ui.painted().title.includes(LIVE_OUTPUT_STALLED), false);
 });
 
 test("a context without a constant source still publishes", async () => {
