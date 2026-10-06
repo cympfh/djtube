@@ -8,7 +8,9 @@ import {
   LIVE_BUTTON_LABEL,
   LIVE_COPY_FAILED,
   LIVE_DROPPED,
+  LIVE_RECLAIM_TRIES,
   LIVE_SEND_BACKLOG,
+  LIVE_TAKEN,
   LIVE_IDLE,
   LIVE_MIME,
   LIVE_STARTING,
@@ -206,6 +208,7 @@ function setup(extra = {}) {
         copies.push(url);
       }),
     armCopy: extra.armCopy,
+    sleep: extra.sleep,
   });
   return { ui, sockets, recorders, copies, bus, control };
 }
@@ -222,9 +225,13 @@ test("listener and publish URLs use the public prefix", () => {
   assert.equal(listenerUrl("/djtube", "ABCD", "https://s.cympfh.cc"), "https://s.cympfh.cc/djtube/stream/ABCD");
   assert.equal(livePublishUrl("/djtube", "https://s.cympfh.cc"), "wss://s.cympfh.cc/djtube/api/live/publish");
   assert.equal(livePublishUrl("/djtube", "http://127.0.0.1:8098"), "ws://127.0.0.1:8098/djtube/api/live/publish");
+  assert.equal(
+    livePublishUrl("/djtube", "https://s.cympfh.cc", "ABCD"),
+    "wss://s.cympfh.cc/djtube/api/live/publish?id=ABCD",
+  );
   assert.equal(mimeMessage(), JSON.stringify({ type: "mime", mime: LIVE_MIME }));
   assert.equal(closeReason(4408), "音声が届かなくなったため、配信を止めました");
-  assert.equal(closeReason(4409), "その ID は使われています");
+  assert.equal(closeReason(4409), LIVE_TAKEN);
   assert.equal(closeReason(4429), "配信の上限に達しました");
   assert.equal(closeReason(1003), "配信の形式が受け付けられませんでした");
   assert.equal(closeReason(1008), "送信の上限に達しました");
@@ -559,6 +566,114 @@ test("stopping before the socket opens closes it and sends nothing after it open
   assert.equal(harness.sockets.length, 1);
 });
 
+test("starting again reuses the id and copies the same listener URL", async () => {
+  const harness = setup();
+  await goLive(harness, "ABCD");
+  const url = "https://s.cympfh.cc/djtube/stream/ABCD";
+  harness.ui.button.click();
+  await flush();
+  assert.equal(harness.ui.painted().title, LIVE_IDLE);
+  harness.ui.button.click();
+  await flush();
+  assert.equal(harness.sockets.length, 2);
+  assert.equal(harness.sockets[0].url, "wss://s.cympfh.cc/djtube/api/live/publish");
+  assert.equal(harness.sockets[1].url, "wss://s.cympfh.cc/djtube/api/live/publish?id=ABCD");
+  harness.sockets[1].receive(JSON.stringify({ type: "id", id: "ABCD" }));
+  await flush();
+  assert.equal(harness.ui.painted().title, `配信中：${url}`);
+  assert.equal(harness.ui.painted().live, `配信中：${url}`);
+  assert.equal(harness.ui.painted().face, "on");
+  assert.deepEqual(harness.copies, [url, url]);
+  assert.equal(harness.sockets[1].sent[0], mimeMessage());
+});
+
+test("an immediate restart waits for our close and does not lose the id to 4409", async () => {
+  let releaseClose = null;
+  const harness = setup({
+    makeSocket(url) {
+      return {
+        url,
+        readyState: 1,
+        sent: [],
+        closed: null,
+        onmessage: null,
+        onclose: null,
+        send(data) {
+          this.sent.push(data);
+        },
+        receive(text) {
+          this.onmessage?.({ data: text });
+        },
+        close(code) {
+          this.closed = code ?? 1000;
+          this.readyState = 2;
+          releaseClose = () => {
+            if (this.readyState === 3) return;
+            this.readyState = 3;
+            this.onclose?.({ code: this.closed });
+          };
+        },
+        serverClose(code) {
+          this.readyState = 3;
+          this.onclose?.({ code });
+        },
+      };
+    },
+  });
+  await goLive(harness, "ABCD");
+  harness.ui.button.click();
+  await flush();
+  assert.equal(harness.ui.painted().title, LIVE_IDLE);
+  assert.equal(harness.sockets[0].readyState, 2);
+  harness.ui.button.click();
+  await flush();
+  assert.equal(harness.sockets.length, 1);
+  releaseClose();
+  await flush();
+  assert.equal(harness.sockets.length, 2);
+  assert.equal(harness.sockets[1].url, "wss://s.cympfh.cc/djtube/api/live/publish?id=ABCD");
+  assert.equal(harness.sockets[1].closed, null);
+  harness.sockets[1].receive(JSON.stringify({ type: "id", id: "ABCD" }));
+  await flush();
+  assert.equal(harness.ui.painted().face, "on");
+  assert.equal(harness.ui.painted().title, "配信中：https://s.cympfh.cc/djtube/stream/ABCD");
+  assert.equal(harness.sockets[1].sent[0], mimeMessage());
+});
+
+test("a real 4409 keeps the id, says someone else has it, and stops", async () => {
+  let taken = false;
+  const harness = setup({
+    sleep() {
+      return Promise.resolve();
+    },
+    makeSocket(url) {
+      const socket = fakeSocket(url);
+      if (taken) queueMicrotask(() => socket.serverClose(4409));
+      return socket;
+    },
+  });
+  await goLive(harness, "ABCD");
+  harness.ui.button.click();
+  await flush();
+  taken = true;
+  harness.ui.button.click();
+  await flush();
+  const again = harness.sockets.slice(1);
+  assert.equal(again.length, 1 + LIVE_RECLAIM_TRIES);
+  assert.deepEqual(
+    again.map((socket) => socket.url),
+    Array(again.length).fill("wss://s.cympfh.cc/djtube/api/live/publish?id=ABCD"),
+  );
+  assert.equal(harness.ui.painted().face, "off");
+  assert.equal(harness.ui.painted().title, LIVE_TAKEN);
+  assert.equal(harness.ui.painted().live, LIVE_TAKEN);
+  assert.equal(harness.recorders.length, 1);
+  assert.deepEqual(harness.copies, ["https://s.cympfh.cc/djtube/stream/ABCD"]);
+  const opened = harness.sockets.length;
+  await flush();
+  assert.equal(harness.sockets.length, opened);
+});
+
 test("cancelling before the id arrives does not copy or open another socket", async () => {
   const harness = setup();
   const pending = harness.ui.button.click();
@@ -632,7 +747,7 @@ test("a server close stops the broadcast, shows the reason, and does not reconne
   const cases = [
     [4429, "配信の上限に達しました"],
     [4408, "音声が届かなくなったため、配信を止めました"],
-    [4409, "その ID は使われています"],
+    [4409, LIVE_TAKEN],
     [1003, "配信の形式が受け付けられませんでした"],
     [1008, "送信の上限に達しました"],
     [1009, "データが大きすぎるため、配信を止めました"],

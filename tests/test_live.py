@@ -216,6 +216,12 @@ def test_ids_are_four_uppercase_letters_and_collisions_are_rejected():
                 with client.websocket_connect("/api/live/publish?id=ABCD") as other:
                     other.receive_json()
             assert taken.value.code == CODE_TAKEN
+        with client.websocket_connect("/api/live/publish?id=ABCD") as again:
+            assert again.receive_json() == {"type": "id", "id": "ABCD"}
+        with pytest.raises(WebSocketDisconnect) as lower:
+            with client.websocket_connect("/api/live/publish?id=abcd") as socket:
+                socket.receive_json()
+        assert lower.value.code == CODE_BAD_ID
 
 
 def test_full_hub_and_full_listener_list_refuse_another_connection():

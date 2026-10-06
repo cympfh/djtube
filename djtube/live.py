@@ -459,7 +459,8 @@ class LiveHub:
             if requested is not None:
                 if not is_stream_id(requested):
                     raise LiveClose(CODE_BAD_ID)
-                if requested in self._streams:
+                current = self._streams.get(requested)
+                if current is not None and not current.closed:
                     raise LiveClose(CODE_TAKEN)
                 stream_id = requested
             else:

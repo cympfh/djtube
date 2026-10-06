@@ -15,11 +15,14 @@ export const LIVE_CONNECT_FAILED = "音声を配信に接続できませんで�
 export const LIVE_DROPPED = "配信が切れました";
 export const LIVE_COPY_FAILED = "URL をコピーできませんでした";
 export const LIVE_SEND_BACKLOG = "送信が追いつかないため、配信を止めました";
+export const LIVE_TAKEN = "この配信 ID は他の人が使っています。ページを開き直すと新しい ID で配信できます";
 export const LIVE_BUFFER_LIMIT = 1024 * 1024;
+export const LIVE_RECLAIM_TRIES = 3;
+export const LIVE_RECLAIM_WAIT_MS = 50;
 
 const CLOSE_TEXT = {
   4408: "音声が届かなくなったため、配信を止めました",
-  4409: "その ID は使われています",
+  4409: LIVE_TAKEN,
   4429: "配信の上限に達しました",
   1003: "配信の形式が受け付けられませんでした",
   1008: "送信の上限に達しました",
@@ -43,12 +46,13 @@ export function liveSupported(scope = globalThis) {
   }
 }
 
-export function livePublishUrl(prefix, origin) {
+export function livePublishUrl(prefix, origin, id) {
   const path = `${prefix}/api/live/publish`;
+  const query = typeof id === "string" && id ? `?id=${encodeURIComponent(id)}` : "";
   const base = String(origin || "").replace(/\/$/, "");
-  if (base.startsWith("https:")) return `wss:${base.slice("https:".length)}${path}`;
-  if (base.startsWith("http:")) return `ws:${base.slice("http:".length)}${path}`;
-  return path;
+  if (base.startsWith("https:")) return `wss:${base.slice("https:".length)}${path}${query}`;
+  if (base.startsWith("http:")) return `ws:${base.slice("http:".length)}${path}${query}`;
+  return `${path}${query}`;
 }
 
 export function listenerUrl(prefix, id, origin) {
@@ -179,7 +183,10 @@ export function createLiveControl(options) {
   const createRecorder = options.createRecorder;
   const copyText = options.copyText;
   const armCopy = options.armCopy;
+  const sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   let session = null;
+  let pinnedId = "";
+  let slotFree = Promise.resolve();
 
   function markCopyFailed(mine) {
     if (mine.ended || mine.copyFailed) return;
@@ -258,6 +265,23 @@ export function createLiveControl(options) {
     }
   }
 
+  function armSlotRelease(socket) {
+    if (!socket || socket.readyState === 3) return Promise.resolve();
+    return new Promise((resolve) => {
+      const previous = socket.onclose;
+      let done = false;
+      socket.onclose = (event) => {
+        if (done) return;
+        done = true;
+        try {
+          if (typeof previous === "function") previous(event);
+        } finally {
+          resolve();
+        }
+      };
+    });
+  }
+
   function finish(mine, status) {
     if (mine.ended) return;
     mine.ended = true;
@@ -271,6 +295,7 @@ export function createLiveControl(options) {
         /* nothing was copied */
       }
     }
+    slotFree = armSlotRelease(mine.socket);
     teardown(mine);
     paint(status);
   }
@@ -286,6 +311,11 @@ export function createLiveControl(options) {
 
   function begin(mine, id) {
     if (mine.ended || mine.recorder) return;
+    if (pinnedId && id !== pinnedId) {
+      finish(mine, { state: "error", reason: LIVE_TAKEN });
+      return;
+    }
+    if (!pinnedId) pinnedId = id;
     const url = listenerUrl(prefix, id, origin);
     try {
       mine.socket.send(mimeMessage());
@@ -348,8 +378,34 @@ export function createLiveControl(options) {
     };
     socket.onclose = (event) => {
       if (mine.ended) return;
-      finish(mine, { state: "error", reason: closeReason(event?.code) });
+      const code = event?.code;
+      if (code === 4409 && pinnedId && !mine.url && mine.reclaim < LIVE_RECLAIM_TRIES) {
+        mine.reclaim += 1;
+        mine.socket = null;
+        Promise.resolve(sleep(LIVE_RECLAIM_WAIT_MS)).then(() => {
+          if (mine.ended || session !== mine) return;
+          openPublish(mine);
+        });
+        return;
+      }
+      finish(mine, { state: "error", reason: closeReason(code) });
     };
+  }
+
+  function openPublish(mine) {
+    let socket = null;
+    try {
+      socket = connectSocket(livePublishUrl(prefix, origin, pinnedId));
+    } catch {
+      finish(mine, { state: "error", reason: LIVE_DROPPED });
+      return;
+    }
+    if (mine.ended) {
+      slotFree = armSlotRelease(socket);
+      closeSocket(socket);
+      return;
+    }
+    bindSocket(mine, socket);
   }
 
   async function start() {
@@ -364,7 +420,7 @@ export function createLiveControl(options) {
     } catch {
       clip = null;
     }
-    const mine = { ended: false, socket: null, recorder: null, dest: null, url: "", clip };
+    const mine = { ended: false, socket: null, recorder: null, dest: null, url: "", clip, reclaim: 0 };
     session = mine;
     paint({ state: "starting" });
     let pending = null;
@@ -395,18 +451,13 @@ export function createLiveControl(options) {
       return;
     }
     if (mine.ended) return;
-    let socket = null;
     try {
-      socket = connectSocket(livePublishUrl(prefix, origin));
+      await slotFree;
     } catch {
-      finish(mine, { state: "error", reason: LIVE_DROPPED });
-      return;
+      /* the previous socket is already gone */
     }
-    if (mine.ended) {
-      closeSocket(socket);
-      return;
-    }
-    bindSocket(mine, socket);
+    if (mine.ended) return;
+    openPublish(mine);
   }
 
   function onClick() {
