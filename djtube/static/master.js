@@ -1,5 +1,5 @@
 // One AudioContext for both decks and the scratch voices.
-// `master` is the mix that reaches the speakers. A later stream can connect
+// `master` is the mix that reaches the speakers. The live control connects
 // a MediaStreamAudioDestinationNode to this same gain.
 
 export function createAudioBus() {

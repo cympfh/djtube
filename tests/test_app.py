@@ -98,6 +98,20 @@ def test_index_uses_public_asset_prefix():
     assert 'aria-label="MIDI を開く"' in html
     assert 'aria-label="MIDI未接続"' not in html
     assert 'class="sr-only" id="midi-live" role="status"></p>' in html
+    assert 'id="live-button"' in html
+    assert 'class="live-button"' in html
+    assert 'data-live="off"' in html
+    assert 'title="配信を始める"' in html
+    assert 'aria-label="配信"' in html
+    live_button = html.split('id="live-button"', 1)[1].split("</button>", 1)[0]
+    assert "<svg" in live_button
+    assert "配信を始める" not in live_button.split(">", 1)[1]
+    assert 'class="sr-only" id="live-status" role="status"></p>' in html
+    assert 'id="live-status"' not in html.split('id="live-button"', 1)[0]
+    live_js = client.get("/djtube/static/live.js")
+    assert live_js.status_code == 200
+    assert "audio/webm;codecs=opus" in live_js.text
+    assert "128000" in live_js.text
     assert "T で切り替え" not in html
     assert "次のロード先" not in html
     assert 'id="target-A"' not in html

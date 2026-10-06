@@ -42,6 +42,8 @@ export function createDeckPlayer(deck, elementId, bus = createAudioBus()) {
     _filters: null,
     _color: null,
     _graphFailed: false,
+    _direct: false,
+    _onMaster: false,
     _attached: false,
     _reportedTime() {
       try {
@@ -155,8 +157,13 @@ export function createDeckPlayer(deck, elementId, bus = createAudioBus()) {
         /* the element applies the rate once media is ready */
       }
     },
+    // True when this deck's audio cannot reach the mix. Scratch can still.
+    offMaster() {
+      return this._graphFailed === true && !this._level;
+    },
     _ensureGraph() {
       if (this._graphFailed || !this.audio) return false;
+      if (this._direct) return false;
       if (!openAudioBus(this._bus)) {
         this._graphFailed = true;
         return false;
@@ -169,19 +176,47 @@ export function createDeckPlayer(deck, elementId, bus = createAudioBus()) {
           // The element stays at unity so the deck gain is the only level.
           // Leave LOW unconnected so the filter is the next node, not a second graph.
           this.audio.volume = 1;
-          this._filters = connectEqGraph(source, this._context, null);
-          const level = this._context.createGain();
-          level.gain.value = this._volume;
-          this._level = level;
-          this._color = connectDeckFilter(this._filters.low, this._context, level);
-          level.connect(this._bus.master);
-          for (const band of EQ_BANDS) this._filters[band].gain.value = this._eqDb[band] || 0;
-          applyFilter(this._color, this._filterUnit);
+          try {
+            this._attachGraph(source);
+          } catch {
+            // createMediaElementSource already took the element. A throw after
+            // that leaves the deck silent unless the source still reaches master.
+            if (this._onMaster) return false;
+            if (!this._routeSourceToMaster(source)) {
+              this._graphFailed = true;
+              return false;
+            }
+            return false;
+          }
         }
         return true;
       } catch {
         this._graphFailed = true;
         if (!this._level) this._applyLevel();
+        return false;
+      }
+    },
+    _attachGraph(source) {
+      this._filters = connectEqGraph(source, this._context, null);
+      const level = this._context.createGain();
+      level.gain.value = this._volume;
+      this._level = level;
+      this._color = connectDeckFilter(this._filters.low, this._context, level);
+      level.connect(this._bus.master);
+      this._onMaster = true;
+      for (const band of EQ_BANDS) this._filters[band].gain.value = this._eqDb[band] || 0;
+      applyFilter(this._color, this._filterUnit);
+    },
+    _routeSourceToMaster(source) {
+      try {
+        const level = this._context.createGain();
+        level.gain.value = this._volume;
+        source.connect(level);
+        level.connect(this._bus.master);
+        this._level = level;
+        this._direct = true;
+        return true;
+      } catch {
         return false;
       }
     },
