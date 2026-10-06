@@ -19,6 +19,7 @@ import {
   livePublishUrl,
   liveStatusText,
   liveSupported,
+  armClipboard,
   masterGapNote,
   mimeMessage,
 } from "../../djtube/static/live.js";
@@ -187,6 +188,7 @@ function setup(extra = {}) {
       (async (url) => {
         copies.push(url);
       }),
+    armCopy: extra.armCopy,
   });
   return { ui, sockets, recorders, copies, bus, control };
 }
@@ -337,6 +339,79 @@ test("the first click publishes the master, copies the listener URL, and sends m
   assert.ok(harness.sockets[0].sent[2] instanceof ArrayBuffer);
   assert.equal(harness.sockets[0].sent.filter((item) => typeof item === "string").length, 1);
   assert.deepEqual(new Uint8Array(harness.sockets[0].sent[1]), Uint8Array.of(1, 2, 3));
+});
+
+test("the click arms the clipboard and the id fills it in", async () => {
+  const writes = [];
+  let resolveText = null;
+  const Item = class ClipboardItem {
+    constructor(items) {
+      this.items = items;
+    }
+  };
+  const previousItem = globalThis.ClipboardItem;
+  globalThis.ClipboardItem = Item;
+  const nav = {
+    clipboard: {
+      write(items) {
+        writes.push(items);
+        return Promise.resolve();
+      },
+    },
+  };
+  try {
+    const armed = armClipboard(nav);
+    assert.equal(writes.length, 1);
+    await armed.provide("https://s.cympfh.cc/djtube/stream/ABCD");
+    const blob = await writes[0][0].items["text/plain"];
+    assert.equal(await blob.text(), "https://s.cympfh.cc/djtube/stream/ABCD");
+  } finally {
+    if (previousItem === undefined) delete globalThis.ClipboardItem;
+    else globalThis.ClipboardItem = previousItem;
+  }
+
+  const events = [];
+  const harness = setup({
+    armCopy() {
+      resolveText = (url) => events.push(["provide", url]);
+      return {
+        provide(url) {
+          resolveText(url);
+        },
+        cancel() {
+          events.push(["cancel"]);
+        },
+      };
+    },
+  });
+  await goLive(harness, "QRST");
+  assert.deepEqual(events, [["provide", "https://s.cympfh.cc/djtube/stream/QRST"]]);
+  assert.deepEqual(harness.copies, []);
+  assert.equal(harness.ui.painted().face, "on");
+});
+
+test("stopping before the id arrives cancels the armed copy", async () => {
+  const events = [];
+  const harness = setup({
+    armCopy() {
+      return {
+        provide(url) {
+          events.push(["provide", url]);
+        },
+        cancel() {
+          events.push(["cancel"]);
+        },
+      };
+    },
+  });
+  const pending = harness.ui.button.click();
+  await flush();
+  harness.ui.button.click();
+  await pending;
+  await flush();
+  assert.deepEqual(events, [["cancel"]]);
+  assert.deepEqual(harness.copies, []);
+  assert.equal(harness.ui.painted().title, LIVE_IDLE);
 });
 
 test("a failed copy still starts, and the URL stays on the hover", async () => {

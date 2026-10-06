@@ -116,6 +116,41 @@ export async function copyLiveUrl(url, doc = globalThis.document, nav = globalTh
   if (!ok) throw new Error("clipboard");
 }
 
+/**
+ * Start a clipboard write during the click. The URL arrives later, after the
+ * server assigns an id, and a late writeText no longer counts as a user gesture.
+ */
+export function armClipboard(nav = globalThis.navigator) {
+  const Item = globalThis.ClipboardItem;
+  if (!nav?.clipboard?.write || typeof Item !== "function") return null;
+  let resolveText = null;
+  let rejectText = null;
+  const text = new Promise((resolve, reject) => {
+    resolveText = resolve;
+    rejectText = reject;
+  });
+  const blob = text.then((value) => new Blob([value], { type: "text/plain" }));
+  blob.catch(() => {});
+  let writing = null;
+  try {
+    writing = nav.clipboard.write([new Item({ "text/plain": blob })]);
+  } catch {
+    rejectText(new Error("clipboard"));
+    return null;
+  }
+  const settled = Promise.resolve(writing).catch(() => {});
+  return {
+    provide(value) {
+      resolveText(String(value));
+      return settled;
+    },
+    cancel() {
+      rejectText(new Error("cancel"));
+      return settled;
+    },
+  };
+}
+
 export function createLiveControl(options) {
   const button = options.button;
   const live = options.live;
@@ -127,7 +162,28 @@ export function createLiveControl(options) {
   const connectSocket = options.connectSocket;
   const createRecorder = options.createRecorder;
   const copyText = options.copyText;
+  const armCopy = options.armCopy;
   let session = null;
+
+  function deliverCopy(mine, url) {
+    if (mine.clip) {
+      try {
+        Promise.resolve(mine.clip.provide(url)).catch(() => {
+          if (typeof copyText !== "function") return;
+          Promise.resolve(copyText(url)).catch(() => {});
+        });
+        return;
+      } catch {
+        /* the late copy is the fallback */
+      }
+    }
+    if (typeof copyText !== "function") return;
+    try {
+      Promise.resolve(copyText(url)).catch(() => {});
+    } catch {
+      /* the URL stays on the hover */
+    }
+  }
 
   function paint(status) {
     applyLiveStatus(button, live, status);
@@ -161,6 +217,15 @@ export function createLiveControl(options) {
     if (mine.ended) return;
     mine.ended = true;
     if (session === mine) session = null;
+    if (!mine.url && mine.clip) {
+      const clip = mine.clip;
+      mine.clip = null;
+      try {
+        clip.cancel();
+      } catch {
+        /* nothing was copied */
+      }
+    }
     teardown(mine);
     paint(status);
   }
@@ -172,7 +237,6 @@ export function createLiveControl(options) {
   function begin(mine, id) {
     if (mine.ended || mine.recorder) return;
     const url = listenerUrl(prefix, id, origin);
-    mine.url = url;
     try {
       mine.socket.send(mimeMessage());
     } catch {
@@ -210,13 +274,9 @@ export function createLiveControl(options) {
       finish(mine, { state: "error", reason: LIVE_UNSUPPORTED });
       return;
     }
+    mine.url = url;
     paint(liveStatus(mine));
-    if (typeof copyText !== "function") return;
-    try {
-      Promise.resolve(copyText(url)).catch(() => {});
-    } catch {
-      /* the URL stays on the hover */
-    }
+    deliverCopy(mine, url);
   }
 
   function bindSocket(mine, socket) {
@@ -244,7 +304,13 @@ export function createLiveControl(options) {
       return;
     }
     const context = bus.context;
-    const mine = { ended: false, socket: null, recorder: null, dest: null, url: "" };
+    let clip = null;
+    try {
+      clip = typeof armCopy === "function" ? armCopy() : null;
+    } catch {
+      clip = null;
+    }
+    const mine = { ended: false, socket: null, recorder: null, dest: null, url: "", clip };
     session = mine;
     paint({ state: "starting" });
     let pending = null;
@@ -329,6 +395,7 @@ export function bindLive(options) {
     prefix: options.prefix,
     origin,
     supported: options.supported ?? liveSupported(),
+    armCopy: options.armCopy ?? (() => armClipboard()),
     connectSocket: options.connectSocket || ((url) => new WebSocket(url)),
     createRecorder: options.createRecorder || ((stream, recorderOptions) => new MediaRecorder(stream, recorderOptions)),
     copyText: options.copyText || ((url) => copyLiveUrl(url)),
