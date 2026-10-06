@@ -650,6 +650,25 @@ class LiveHub:
         for relay, bundle in bundles:
             relay.finish_bundle(bundle)
 
+    def video_listeners_may_leave(self, stream_id: str, address: str) -> bool:
+        """True when this address is the only viewer of some other encoder.
+
+        ``drop_video`` for the picture it just closed may not have run yet.
+        A GET can wait briefly and count again. HEAD does not.
+        """
+
+        if not address:
+            return False
+        with self._lock:
+            target = self._streams.get(stream_id)
+            for item in self._streams.values():
+                if item is target or not self._encoder_busy(item):
+                    continue
+                viewers = item.video_listeners
+                if viewers and all(viewer.address == address for viewer in viewers):
+                    return True
+        return False
+
     def _prepare_video_locked(
         self, stream_id: str, address: str, *, handover: bool
     ) -> tuple[int, "_Listener | None", "_Stream | None", tuple | None] | list[FfmpegRelay]:
@@ -1407,12 +1426,7 @@ def mount_live(app: FastAPI, hub: LiveHub) -> None:
                 return Response(status_code=status, headers=headers)
             return _HeaderOnly(status, mime)
         if video:
-            planned = hub.prepare_video(stream_id, address)
-            if isinstance(planned, list):
-                await asyncio.to_thread(hub.stop_handover, planned)
-                planned = hub.prepare_video(stream_id, address, handover=False)
-            if isinstance(planned, list):
-                planned = (429, None, None, None)
+            planned = await _prepare_video_soon(hub, stream_id, address)
             status, listener, stream, opener = planned
             if listener is None or stream is None or opener is None:
                 retry = None
@@ -1435,6 +1449,39 @@ def mount_live(app: FastAPI, hub: LiveHub) -> None:
         if listener is None or stream is None:
             return Response(status_code=status, headers=_status_headers(status, None))
         return _AudioResponse(hub, listener, stream)
+
+
+# The previous picture's detach can land a few milliseconds after the next GET.
+_HANDOVER_DRAIN = 0.3
+
+
+async def _prepare_video_soon(hub: LiveHub, stream_id: str, address: str):
+    """Reserve a video listener, waiting briefly if this address's other viewer is closing."""
+
+    planned = await _handover(hub, stream_id, address, hub.prepare_video(stream_id, address))
+    if _planned_status(planned) == 429 and hub.video_listeners_may_leave(stream_id, address):
+        deadline = time.monotonic() + _HANDOVER_DRAIN
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+            planned = await _handover(hub, stream_id, address, hub.prepare_video(stream_id, address))
+            if _planned_status(planned) != 429:
+                break
+    return planned
+
+
+async def _handover(hub: LiveHub, stream_id: str, address: str, planned):
+    if isinstance(planned, list):
+        await asyncio.to_thread(hub.stop_handover, planned)
+        planned = hub.prepare_video(stream_id, address, handover=False)
+    if isinstance(planned, list):
+        return (429, None, None, None)
+    return planned
+
+
+def _planned_status(planned) -> int | None:
+    if isinstance(planned, list):
+        return None
+    return planned[0]
 
 
 def _status_headers(status: int, retry: int | None, *, video: bool = False) -> dict[str, str]:

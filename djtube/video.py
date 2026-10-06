@@ -352,6 +352,21 @@ def pace_frames(next_at: float, now: float, interval: float, max_burst: int) -> 
     return copies, next_at + copies * interval
 
 
+class _Mux:
+    """One ffmpeg process and the stop flag belonging to its threads.
+
+    The flag is set when that process is taken and is never cleared. The next
+    start builds another ``_Mux``, so a loop still exiting cannot treat the
+    new process as its own and kill it.
+    """
+
+    def __init__(self) -> None:
+        self.stop = threading.Event()
+        self.proc: subprocess.Popen | None = None
+        self.audio_w = None
+        self.threads: list[threading.Thread] = []
+
+
 class FfmpegRelay:
     """Encode one stream and fan the MPEG-TS out to its video listeners."""
 
@@ -383,7 +398,9 @@ class FfmpegRelay:
         self.output_stall = output_stall
         self.restart_backoff = restart_backoff
         self._lock = threading.Lock()
-        self._stop = threading.Event()
+        self._mux = _Mux()
+        # Aliases of the current mux, so a test can set them before a loop runs.
+        self._stop = self._mux.stop
         self._started = False
         self._proc: subprocess.Popen | None = None
         self._audio_w = None
@@ -398,7 +415,7 @@ class FfmpegRelay:
         self._primed: list[bytes] = []
         self._base: int | None = None
         self._timer: threading.Timer | None = None
-        self._threads: list[threading.Thread] = []
+        self._threads: list[threading.Thread] = self._mux.threads
         self.listeners: set = set()
         self.sync = TsSyncBuffer()
         self.composer = Composer((width, height))
@@ -611,6 +628,11 @@ class FfmpegRelay:
 
     def _take_process_locked(self) -> tuple:
         self._started = False
+        mux = self._mux
+        # Set this generation's flag. Do not clear it later: the next start
+        # has its own event, and a loop blocked in read must not resume on it.
+        if mux is not None:
+            mux.stop.set()
         self._stop.set()
         proc = self._proc
         audio_w = self._audio_w
@@ -620,8 +642,9 @@ class FfmpegRelay:
         self._primed = []
         timer = self._timer
         self._timer = None
-        threads = list(self._threads)
+        threads = list(mux.threads) if mux is not None else list(self._threads)
         self._threads = []
+        self._mux = None
         return proc, audio_w, timer, threads
 
     def _finish(self, bundle: tuple) -> None:
@@ -660,8 +683,12 @@ class FfmpegRelay:
             self._close_pipe(proc.stdout)
             self._close_pipe(proc.stderr)
 
-    def _fail(self) -> None:
+    def _fail(self, proc=None) -> None:
         with self._lock:
+            # The previous read or watch loop is still exiting. The process
+            # now installed belongs to the next viewer.
+            if proc is not None and self._proc is not proc:
+                return
             if not self._started:
                 return
             listeners = list(self.listeners)
@@ -675,7 +702,9 @@ class FfmpegRelay:
         log.info("video %s encoder failed", self.stream_id)
 
     def _start_locked(self) -> None:
-        self._stop.clear()
+        mux = _Mux()
+        self._mux = mux
+        self._stop = mux.stop
         self.sync = TsSyncBuffer()
         self.composer = Composer((self.width, self.height))
         audio_r, audio_w = os.pipe()
@@ -695,25 +724,41 @@ class FfmpegRelay:
             os.close(audio_w)
             raise
         os.close(audio_r)
+        wrapped = os.fdopen(audio_w, "wb", buffering=0)
+        mux.proc = proc
+        mux.audio_w = wrapped
         self._proc = proc
-        self._audio_w = os.fdopen(audio_w, "wb", buffering=0)
+        self._audio_w = wrapped
         self._last_output = time.monotonic()
         self._started = True
         self._threads = [
-            threading.Thread(target=self._read_loop, name=f"djtube-video-read-{self.stream_id}", daemon=True),
-            threading.Thread(target=self._audio_loop, name=f"djtube-video-audio-{self.stream_id}", daemon=True),
-            threading.Thread(target=self._frame_loop, name=f"djtube-video-frame-{self.stream_id}", daemon=True),
-            threading.Thread(target=self._stderr_loop, name=f"djtube-video-err-{self.stream_id}", daemon=True),
-            threading.Thread(target=self._watch_loop, name=f"djtube-video-watch-{self.stream_id}", daemon=True),
+            threading.Thread(
+                target=self._read_loop, args=(mux,), name=f"djtube-video-read-{self.stream_id}", daemon=True
+            ),
+            threading.Thread(
+                target=self._audio_loop, args=(mux,), name=f"djtube-video-audio-{self.stream_id}", daemon=True
+            ),
+            threading.Thread(
+                target=self._frame_loop, args=(mux,), name=f"djtube-video-frame-{self.stream_id}", daemon=True
+            ),
+            threading.Thread(
+                target=self._stderr_loop, args=(mux,), name=f"djtube-video-err-{self.stream_id}", daemon=True
+            ),
+            threading.Thread(
+                target=self._watch_loop, args=(mux,), name=f"djtube-video-watch-{self.stream_id}", daemon=True
+            ),
         ]
+        mux.threads = self._threads
         for thread in self._threads:
             thread.start()
         log.info("video %s start", self.stream_id)
 
-    def _emit(self, chunk: bytes) -> None:
+    def _emit(self, chunk: bytes, proc=None) -> bool:
         with self._lock:
+            if proc is not None and self._proc is not proc:
+                return False
             if not self._started:
-                return
+                return False
             self._last_output = time.monotonic()
             self.sync.append(chunk)
             for listener in self.listeners:
@@ -721,9 +766,17 @@ class FfmpegRelay:
                     listener.offer_media(chunk)
                 else:
                     listener.offer_init(chunk)
+        return True
 
-    def _read_loop(self) -> None:
-        proc = self._proc
+    def _bound(self, mux: _Mux | None) -> tuple:
+        """Process and stop flag this loop belongs to. Tests call the loops with no mux."""
+
+        if mux is None:
+            return self._proc, self._stop
+        return mux.proc, mux.stop
+
+    def _read_loop(self, mux: _Mux | None = None) -> None:
+        proc, stop = self._bound(mux)
         if proc is None or proc.stdout is None:
             return
         # BufferedReader.read(n) waits until n bytes or EOF. A pipe is not
@@ -731,34 +784,35 @@ class FfmpegRelay:
         # returns whatever the muxer has already written.
         fd = proc.stdout.fileno()
         try:
-            while not self._stop.is_set():
+            while not stop.is_set():
                 chunk = os.read(fd, _READ)
                 if not chunk:
                     break
-                self._emit(chunk)
+                if not self._emit(chunk, proc):
+                    return
         except (OSError, ValueError):
-            self._fail()
+            self._fail(proc)
             return
-        self._fail()
+        self._fail(proc)
 
-    def _watch_loop(self) -> None:
+    def _watch_loop(self, mux: _Mux | None = None) -> None:
         # Quiet time is ticks with no new output. A gap longer than a second
         # is this process being paused. Count at most two watch periods of it:
         # a single pause is not the whole stall, and repeating pause/resume
         # cannot keep a dead muxer under the limit. New output clears the total.
+        proc, stop = self._bound(mux)
         quiet = 0.0
         previous_output: float | None = None
         previous_tick: float | None = None
-        while not self._stop.wait(_WATCH_PERIOD):
+        while not stop.wait(_WATCH_PERIOD):
             now = self._clock()
             with self._lock:
-                proc = self._proc
-                started = self._started
+                current = self._proc is proc and self._started
                 last_output = self._last_output
-            if not started or proc is None:
+            if not current or proc is None:
                 return
             if proc.poll() is not None:
-                self._fail()
+                self._fail(proc)
                 return
             if previous_tick is not None:
                 elapsed = now - previous_tick
@@ -771,22 +825,26 @@ class FfmpegRelay:
             previous_tick = now
             previous_output = last_output
             if quiet > self.output_stall:
-                self._fail()
+                self._fail(proc)
                 return
 
-    def _audio_loop(self) -> None:
+    def _audio_loop(self, mux: _Mux | None = None) -> None:
+        _proc, stop = self._bound(mux)
         init = None
-        while init is None and not self._stop.is_set():
+        audio_w = None
+        while init is None and not stop.is_set():
             with self._lock:
+                if mux is not None and self._mux is not mux:
+                    return
                 init = self._init
-                audio_w = self._audio_w
+                audio_w = self._audio_w if mux is None else mux.audio_w
             if init is None:
-                self._stop.wait(0.05)
-        if init is None or self._stop.is_set() or audio_w is None:
+                stop.wait(0.05)
+        if init is None or stop.is_set() or audio_w is None:
             return
         try:
             audio_w.write(init)
-            while not self._stop.is_set():
+            while not stop.is_set():
                 try:
                     item = self._audio_q.get(timeout=0.2)
                 except queue.Empty:
@@ -795,6 +853,8 @@ class FfmpegRelay:
                     break
                 tc = cluster_timecode(item)
                 with self._lock:
+                    if mux is not None and self._mux is not mux:
+                        return
                     if tc is not None:
                         if self._base is None:
                             self._base = tc
@@ -803,15 +863,17 @@ class FfmpegRelay:
         except (BrokenPipeError, OSError, ValueError):
             return
 
-    def _frame_loop(self) -> None:
-        proc = self._proc
+    def _frame_loop(self, mux: _Mux | None = None) -> None:
+        proc, stop = self._bound(mux)
         if proc is None or proc.stdin is None:
             return
         interval = 1.0 / self.fps
         next_at = self._clock()
         # At most two seconds of duplicates per wake, then look at the picture again.
         max_burst = max(1, self.fps * 2)
-        while not self._stop.is_set():
+        while not stop.is_set():
+            if mux is not None and self._mux is not mux:
+                return
             frame = self._frame()
             copies, next_at = pace_frames(next_at, self._clock(), interval, max_burst)
             try:
@@ -819,7 +881,7 @@ class FfmpegRelay:
             except (BrokenPipeError, OSError, ValueError):
                 return
             delay = next_at - self._clock()
-            if delay > 0 and self._stop.wait(delay):
+            if delay > 0 and stop.wait(delay):
                 return
 
     def _write_copies(self, stdin, frame: bytes, copies: int) -> None:
@@ -845,8 +907,8 @@ class FfmpegRelay:
         self._rgb[:] = raw
         return self._rgb
 
-    def _stderr_loop(self) -> None:
-        proc = self._proc
+    def _stderr_loop(self, mux: _Mux | None = None) -> None:
+        proc, _stop = self._bound(mux)
         if proc is None or proc.stderr is None:
             return
         try:

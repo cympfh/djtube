@@ -48,6 +48,7 @@ from djtube.video import (
     VIDEO_MIME,
     FfmpegRelay,
     TsSyncBuffer,
+    _Mux,
     ffmpeg_command,
     pace_frames,
     packet_pid_and_nals,
@@ -1426,7 +1427,7 @@ def _watch_until(relay: FfmpegRelay, sequence: tuple[float, ...], mutate=None) -
             return sequence[-1]
         return sequence[index]
 
-    def fail() -> None:
+    def fail(_proc=None) -> None:
         failed.append(calls["n"])
         relay._started = False
         relay._stop.set()
@@ -2226,3 +2227,374 @@ def test_handover_joins_off_the_event_loop(tmp_path: Path):
                         assert moved_video.status_code == 200
                         assert moved_video.read()[:1] == b"\x47"
     assert moved == [True]
+
+
+class _QuietProc:
+    """A process stand-in. poll() is already finished, so a mistaken reap does not signal anyone."""
+
+    def __init__(self, stdout=None) -> None:
+        self.stdout = stdout
+        self.stdin = None
+        self.stderr = None
+        self.pid = 1
+        self.returncode = 0
+
+    def poll(self):
+        return 0
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def _point_at(relay: FfmpegRelay, proc) -> _Mux:
+    mux = _Mux()
+    mux.proc = proc
+    relay._mux = mux
+    relay._proc = proc
+    relay._stop = mux.stop
+    relay._started = True
+    relay._backoff_until = 0.0
+    return mux
+
+
+def _read_past_a_swap(monkeypatch, payload: bytes) -> tuple[FfmpegRelay, _QuietProc]:
+    """Block the old read loop, install the next process, then let the old read return."""
+
+    relay = FfmpegRelay("RACE", lambda: (), ThumbCache(lambda _video: None), restart_backoff=1.0)
+    read_fd, write_fd = os.pipe()
+    stdout = os.fdopen(read_fd, "rb", buffering=0)
+    old = _QuietProc(stdout)
+    mux = _point_at(relay, old)
+    entered = threading.Event()
+    release = threading.Event()
+    real_read = os.read
+
+    def gated(fd, size):
+        if fd == stdout.fileno():
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("the old read was not released")
+            return payload
+        return real_read(fd, size)
+
+    monkeypatch.setattr(os, "read", gated)
+    thread = threading.Thread(target=relay._read_loop, args=(mux,), daemon=True)
+    newer = _QuietProc()
+    try:
+        thread.start()
+        assert entered.wait(2)
+        # The handover has set this generation's flag. It is not cleared.
+        # The next viewer already owns a different process.
+        mux.stop.set()
+        _point_at(relay, newer)
+        release.set()
+        thread.join(2)
+        assert thread.is_alive() is False
+    finally:
+        release.set()
+        thread.join(2)
+        stdout.close()
+        os.close(write_fd)
+    return relay, newer
+
+
+def test_a_departing_read_loop_does_not_fail_the_next_encoder(monkeypatch):
+    """EOF from the process just stopped must not set backoff on the one that replaced it.
+
+    The old loop used to call ``_fail()`` with no process of its own. That killed
+    the ffmpeg the next viewer had just started, and the body came back empty.
+    """
+
+    relay, newer = _read_past_a_swap(monkeypatch, b"")
+    assert relay._proc is newer
+    assert relay._started is True
+    assert relay._backoff_until == 0.0
+
+
+def test_a_departing_read_loop_does_not_emit_into_the_next_encoder(monkeypatch):
+    packet = b"\x47" + b"\x00" * 187
+    relay, newer = _read_past_a_swap(monkeypatch, packet)
+    assert relay._proc is newer
+    assert relay._started is True
+    assert relay._backoff_until == 0.0
+    assert relay.sync.packets == []
+
+
+def test_a_departing_watch_loop_does_not_fail_the_next_encoder():
+    """The old watch period can elapse after the next process is installed.
+
+    The captured process has already exited. Failing it must leave the new one running.
+    """
+
+    relay = FfmpegRelay("WATC", lambda: (), ThumbCache(lambda _video: None), restart_backoff=1.0)
+    relay._clock = lambda: 0.0
+    relay._last_output = 0.0
+
+    class _Dead:
+        def poll(self):
+            return 1
+
+        def wait(self, timeout=None):
+            return 1
+
+    old = _Dead()
+    newer = _QuietProc()
+    mux = _point_at(relay, old)
+
+    def wait(timeout=None):
+        _point_at(relay, newer)
+        mux.stop.wait = lambda timeout=None: True
+        return False
+
+    mux.stop.wait = wait
+    relay._watch_loop(mux)
+    assert relay._proc is newer
+    assert relay._started is True
+    assert relay._backoff_until == 0.0
+
+
+class _Held:
+    def __init__(self, address: str) -> None:
+        self.address = address
+
+    def offer_end(self) -> None:
+        return
+
+    def mark_closed(self) -> None:
+        return
+
+
+def test_a_switch_waits_until_the_previous_viewer_detaches(tmp_path: Path):
+    """The old response's drop_video can land a few milliseconds after the next GET.
+
+    Recounting for that long lets the switch through. HEAD does not wait.
+    """
+
+    script = _write_script(tmp_path, _CONTINUOUS_FFMPEG)
+    hub = _hub(
+        tmp_path,
+        ffmpeg=script,
+        max_video_encoders=1,
+        max_video_per_ip=1,
+        video_linger=30,
+        output_stall=30,
+    )
+    held = {"x-real-ip": "198.51.100.41"}
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=DRNA", headers={"x-real-ip": "192.0.2.41"}) as first:
+            _publish_ready(first)
+            with _ws(client, "/api/live/publish?id=DRNB", headers={"x-real-ip": "192.0.2.42"}) as second:
+                _publish_ready(second)
+                with _Audio(client, "/stream/DRNA", query="thumbnail=1", headers=held) as video:
+                    assert video.read()[:1] == b"\x47"
+                    stream = hub.get("DRNA")
+                    relay = stream.relay
+                    listener = next(iter(stream.video_listeners))
+                    started = time.monotonic()
+                    denied = client.head("/stream/DRNB?thumbnail=1", headers=held)
+                    elapsed = time.monotonic() - started
+                    assert denied.status_code == 429
+                    assert elapsed < 0.2
+                    errors: list[BaseException] = []
+
+                    def leave() -> None:
+                        try:
+                            time.sleep(0.05)
+                            hub.drop_video(stream, listener, relay)
+                        except BaseException as exc:
+                            errors.append(exc)
+
+                    leaver = threading.Thread(target=leave)
+                    leaver.start()
+                    try:
+                        with _deadline(5):
+                            with _Audio(client, "/stream/DRNB", query="thumbnail=1", headers=held) as moved:
+                                assert moved.status_code == 200
+                                assert moved.read()[:1] == b"\x47"
+                                assert relay.occupies() is False
+                                assert hub.get("DRNB").relay is not relay
+                                assert hub.get("DRNB").relay.occupies()
+                    finally:
+                        leaver.join(2)
+                    assert errors == []
+
+
+def test_rejoin_clears_video_listeners_before_the_id_is_sent(tmp_path: Path):
+    """V20: reclaim empties the hub set before offer_end, and the same address can watch the new relay."""
+
+    script = _write_script(tmp_path, _CONTINUOUS_FFMPEG)
+    hub = _hub(
+        tmp_path,
+        ffmpeg=script,
+        max_listeners_per_ip=1,
+        video_linger=30,
+        output_stall=30,
+    )
+    viewer = {"x-real-ip": "198.51.100.43"}
+    found: dict[str, object] = {}
+    original = hub._open
+
+    def wrapped(requested, token, address, seq=None):
+        result = original(requested, token, address, seq)
+        stream = result[0]
+        video_ended = result[5]
+        if video_ended:
+            found["empty"] = len(stream.video_listeners) == 0
+            found["ended"] = len(video_ended)
+        return result
+
+    hub._open = wrapped
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=VLNA", headers={"x-real-ip": "192.0.2.43"}) as old:
+            token = _id_token(old.receive_json(), "VLNA")
+            old.send_json({"type": "mime", "mime": "audio/webm"})
+            cluster = cluster_known(0, b"wave")
+            head, _data = document([cluster])
+            old.send_bytes(head + cluster)
+            with _Audio(client, "/stream/VLNA", query="thumbnail=1", headers=viewer) as video:
+                assert video.read()[:1] == b"\x47"
+                relay = hub.get("VLNA").relay
+                assert relay is not None and relay.occupies()
+                with _ws(client, _with_token("VLNA", token), seq=2) as new:
+                    assert _id_token(new.receive_json(), "VLNA") == token
+                    assert found == {"empty": True, "ended": 1}
+                    deadline = time.monotonic() + 2
+                    while time.monotonic() < deadline:
+                        if video.read() is None:
+                            break
+                    else:
+                        raise AssertionError("the old viewer was not ended")
+                    with _Audio(client, "/stream/VLNA", query="thumbnail=1", headers=viewer) as again:
+                        assert again.status_code == 200
+                        assert again.read()[:1] == b"\x47"
+                        fresh = hub.get("VLNA").relay
+                        assert fresh is not None and fresh is not relay and fresh.occupies()
+
+
+def test_drop_video_detaches_the_relay_the_response_opened(tmp_path: Path):
+    """V28: a late close detaches the relay it opened, not whatever the stream points at now."""
+
+    hub = _hub(tmp_path)
+
+    class _Relay:
+        def __init__(self) -> None:
+            self.detached: list[object] = []
+
+        def detach(self, listener) -> None:
+            self.detached.append(listener)
+
+    class _Stream:
+        def __init__(self) -> None:
+            self.video_listeners: set = set()
+            self.relay = None
+
+    listener = object()
+    opened = _Relay()
+    current = _Relay()
+    stream = _Stream()
+    stream.video_listeners.add(listener)
+    stream.relay = current
+    hub.drop_video(stream, listener, relay=opened)
+    assert opened.detached == [listener]
+    assert current.detached == []
+    assert listener not in stream.video_listeners
+
+
+def test_a_viewer_arriving_before_the_stop_keeps_the_encoder(tmp_path: Path):
+    """Q5: the victim is chosen, then someone is listening. The stop is skipped and the new open is 429."""
+
+    script = _write_script(tmp_path, _CONTINUOUS_FFMPEG)
+    hub = _hub(
+        tmp_path,
+        ffmpeg=script,
+        max_video_encoders=1,
+        max_video_per_ip=1,
+        video_linger=30,
+        output_stall=30,
+    )
+    held = {"x-real-ip": "198.51.100.45"}
+    original = hub.stop_handover
+
+    def wrapped(relays):
+        victim = next(item for item in hub._streams.values() if item.relay in relays)
+        victim.video_listeners.add(_Held("203.0.113.45"))
+        return original(relays)
+
+    hub.stop_handover = wrapped
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=QAAA", headers={"x-real-ip": "192.0.2.45"}) as first:
+            _publish_ready(first)
+            with _ws(client, "/api/live/publish?id=QAAB", headers={"x-real-ip": "192.0.2.46"}) as second:
+                _publish_ready(second)
+                with _Audio(client, "/stream/QAAA", query="thumbnail=1", headers=held) as video:
+                    assert video.read()[:1] == b"\x47"
+                lingering = hub.get("QAAA").relay
+                assert lingering.occupies()
+                with _deadline(5):
+                    denied = client.get("/stream/QAAB?thumbnail=1", headers=held)
+                assert denied.status_code == 429
+                assert lingering.occupies()
+
+
+def test_handover_is_not_offered_when_another_hold_keeps_the_global_cap(tmp_path: Path):
+    """H6: stopping this linger would still leave the global cap full, so it is not a victim."""
+
+    script = _write_script(tmp_path, _CONTINUOUS_FFMPEG)
+    hub = _hub(
+        tmp_path,
+        ffmpeg=script,
+        max_video_encoders=1,
+        max_video_per_ip=1,
+        video_linger=30,
+        output_stall=30,
+    )
+    held = "198.51.100.47"
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=HPAA", headers={"x-real-ip": "192.0.2.47"}) as first:
+            _publish_ready(first)
+            with _ws(client, "/api/live/publish?id=HPAB", headers={"x-real-ip": "192.0.2.48"}) as second:
+                _publish_ready(second)
+                with _ws(client, "/api/live/publish?id=HPAC", headers={"x-real-ip": "192.0.2.49"}) as third:
+                    _publish_ready(third)
+                    with _Audio(client, "/stream/HPAA", query="thumbnail=1", headers={"x-real-ip": held}) as video:
+                        assert video.read()[:1] == b"\x47"
+                    lingering = hub.get("HPAA").relay
+                    assert lingering.occupies()
+                    hub.get("HPAC").video_hold = True
+                    planned = hub.prepare_video("HPAB", held)
+                    assert isinstance(planned, tuple)
+                    assert planned[0] == 429
+                    assert lingering.occupies()
+
+
+def test_handover_is_not_offered_when_another_listener_keeps_the_per_ip_cap(tmp_path: Path):
+    """H6b: stopping this linger would still leave this address at its per-IP cap."""
+
+    script = _write_script(tmp_path, _CONTINUOUS_FFMPEG)
+    hub = _hub(
+        tmp_path,
+        ffmpeg=script,
+        max_video_encoders=3,
+        max_video_per_ip=1,
+        video_linger=30,
+        output_stall=30,
+    )
+    held = "198.51.100.51"
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=HBAA", headers={"x-real-ip": "192.0.2.51"}) as first:
+            _publish_ready(first)
+            with _ws(client, "/api/live/publish?id=HBAB", headers={"x-real-ip": "192.0.2.52"}) as second:
+                _publish_ready(second)
+                with _ws(client, "/api/live/publish?id=HBAC", headers={"x-real-ip": "192.0.2.53"}) as third:
+                    _publish_ready(third)
+                    with _Audio(client, "/stream/HBAA", query="thumbnail=1", headers={"x-real-ip": held}) as video:
+                        assert video.read()[:1] == b"\x47"
+                    lingering = hub.get("HBAA").relay
+                    assert lingering.occupies()
+                    other = hub.get("HBAC")
+                    other.video_hold = True
+                    other.video_listeners.add(_Held(held))
+                    planned = hub.prepare_video("HBAB", held)
+                    assert isinstance(planned, tuple)
+                    assert planned[0] == 429
+                    assert lingering.occupies()
