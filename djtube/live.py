@@ -651,10 +651,12 @@ class LiveHub:
             relay.finish_bundle(bundle)
 
     def video_listeners_may_leave(self, stream_id: str, address: str) -> bool:
-        """True when this address is the only viewer of some other encoder.
+        """True when exactly one viewer, with this address, holds some other encoder.
 
-        ``drop_video`` for the picture it just closed may not have run yet.
-        A GET can wait briefly and count again. HEAD does not.
+        That is the connection that just closed and whose ``drop_video`` has not
+        run yet. A GET can wait briefly and count again. Two viewers who share an
+        address are still watching, so recounting will not free the slot. HEAD
+        does not wait. The check runs under the hub lock.
         """
 
         if not address:
@@ -665,7 +667,7 @@ class LiveHub:
                 if item is target or not self._encoder_busy(item):
                     continue
                 viewers = item.video_listeners
-                if viewers and all(viewer.address == address for viewer in viewers):
+                if len(viewers) == 1 and next(iter(viewers)).address == address:
                     return True
         return False
 
