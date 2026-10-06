@@ -2439,8 +2439,8 @@ def test_rejoin_clears_video_listeners_before_the_id_is_sent(tmp_path: Path):
     found: dict[str, object] = {}
     original = hub._open
 
-    def wrapped(requested, token, address, seq=None):
-        result = original(requested, token, address, seq)
+    def wrapped(requested, token, address, seq=None, wait_key=None):
+        result = original(requested, token, address, seq, wait_key)
         stream = result[0]
         video_ended = result[5]
         if video_ended:
