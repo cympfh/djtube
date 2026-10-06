@@ -287,7 +287,10 @@ def test_readme_and_docker_contract():
     assert "ffmpeg" not in dockerfile
     assert "/app/data" in dockerfile
     compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
-    assert "8098:8098" in compose
+    assert "127.0.0.1:8098:8098" in compose
+    assert "127.0.0.1:8098:8098" in agent
+    assert "8098 には nginx からだけ届くようにする。X-Real-IP を信じる前提" in agent
+    assert "既存の location すべてに X-Real-IP を付ける" in agent
     assert "YOUTUBE_API_KEY" in compose
     assert "djtube-data:/app/data" in compose
     assert "DJTUBE_COOKIES=/app/data/cookies.txt" in dockerfile

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import json
 import logging
 import secrets
@@ -78,18 +79,38 @@ def is_stream_id(value: str) -> bool:
     return len(value) == STREAM_ID_LENGTH and all(char in STREAM_ALPHABET for char in value)
 
 
+def _address_key(value: str) -> str:
+    """Bucket a peer. IPv4 stays one host. IPv6 counts as its /64."""
+
+    text = value.strip()
+    if text.startswith("[") and "]" in text:
+        text = text[1 : text.index("]")]
+    try:
+        parsed = ipaddress.ip_address(text)
+    except ValueError:
+        return text
+    if isinstance(parsed, ipaddress.IPv4Address):
+        return str(parsed)
+    mapped = parsed.ipv4_mapped
+    if mapped is not None:
+        return str(mapped)
+    network = ipaddress.IPv6Network((parsed, 64), strict=False)
+    return network.network_address.compressed
+
+
 def _publisher_address(websocket: WebSocket) -> str:
     """The address nginx put in X-Real-IP, or the socket peer when that header is absent.
 
-    X-Forwarded-For is not read. A client can put anything there.
+    X-Forwarded-For is not read. A client can put anything there. 8098 is meant
+    to be reachable only from that nginx, which is what makes X-Real-IP true.
     """
 
     raw = websocket.headers.get("x-real-ip")
     if isinstance(raw, str) and raw.strip():
-        return raw.strip()
+        return _address_key(raw)
     client = websocket.client
     if client is not None and client.host:
-        return client.host
+        return _address_key(client.host)
     return ""
 
 
@@ -212,7 +233,6 @@ class _Stream:
         self.address = address
         self.mime = DEFAULT_MIME
         self.mime_announced = False
-        self.mime_locked = False
         self.init: bytes | None = None
         self.latest: bytes | None = None
         self.closed = False
@@ -401,7 +421,11 @@ class LiveHub:
 
     def _on_text(self, stream: _Stream, text: str) -> None:
         with self._lock:
-            if stream.closed or stream.init is not None or stream.mime_announced:
+            if stream.closed:
+                return
+            if stream.init is not None:
+                raise LiveClose(CODE_BAD_MEDIA)
+            if stream.mime_announced:
                 return
         if len(text.encode("utf-8")) > MAX_TEXT:
             raise LiveClose(CODE_TOO_BIG)
@@ -419,7 +443,11 @@ class LiveHub:
         if mime is None:
             raise LiveClose(CODE_BAD_MEDIA)
         with self._lock:
-            if stream.closed or stream.init is not None or stream.mime_announced:
+            if stream.closed:
+                return
+            if stream.init is not None:
+                raise LiveClose(CODE_BAD_MEDIA)
+            if stream.mime_announced:
                 return
             stream.mime = mime
             stream.mime_announced = True
@@ -438,7 +466,6 @@ class LiveHub:
         with self._lock:
             if stream.closed:
                 return bool(clusters)
-            stream.mime_locked = True
             fresh_init = None
             listeners: list[_Listener] = []
             if stream.init is None and stream.splitter.init is not None:

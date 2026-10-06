@@ -412,7 +412,7 @@ def test_small_garbage_a_large_frame_and_a_burst_close_for_different_reasons():
         assert huge.get("HUGE") is None
 
 
-def test_text_after_a_cluster_does_not_refresh_the_idle_timer():
+def test_an_unfinished_cluster_does_not_refresh_the_idle_timer():
     cluster = cluster_known(0, b"wave")
     head, _data = document([cluster])
     hub = LiveHub(init_timeout=2, idle_timeout=0.4)
@@ -423,14 +423,57 @@ def test_text_after_a_cluster_does_not_refresh_the_idle_timer():
             publisher.send_bytes(head + cluster)
             sent = time.monotonic()
             time.sleep(0.25)
-            publisher.send_json({"type": "mime", "mime": "audio/webm"})
-            publisher.send_text("still here")
             publisher.send_bytes(cluster[:2])
             with pytest.raises(WebSocketDisconnect) as quiet:
                 publisher.receive_json()
             assert quiet.value.code == CODE_TIMEOUT
             assert time.monotonic() - sent < 0.58
         assert hub.get("KEEP") is None
+
+
+def test_text_after_init_closes_as_bad_media():
+    cluster = cluster_known(0, b"wave")
+    head, _data = document([cluster])
+    hub = LiveHub(init_timeout=2, idle_timeout=5)
+    with TestClient(create_app(live=hub)) as client:
+        with client.websocket_connect("/api/live/publish?id=LATE") as publisher:
+            publisher.receive_json()
+            publisher.send_json({"type": "mime", "mime": "audio/webm"})
+            publisher.send_bytes(head + cluster)
+            with client.websocket_connect("/api/live/LATE") as listener:
+                assert listener.receive_json()["type"] == "start"
+                assert listener.receive_bytes() == head
+                assert listener.receive_bytes() == cluster
+                publisher.send_text("still here")
+                with pytest.raises(WebSocketDisconnect) as closed:
+                    publisher.receive_json()
+                assert closed.value.code == CODE_BAD_MEDIA
+                assert listener.receive_json()["type"] == "end"
+        assert hub.get("LATE") is None
+
+
+def test_ipv6_publishers_share_a_64():
+    hub = LiveHub()
+    with TestClient(create_app(live=hub)) as client:
+        same = (
+            "2001:db8:1:2::1",
+            "2001:0db8:0001:0002:0000:0000:0000:abcd",
+            "2001:db8:1:2:ffff::1",
+        )
+        with client.websocket_connect("/api/live/publish?id=VAAA", headers={"x-real-ip": same[0]}) as first:
+            assert first.receive_json()["id"] == "VAAA"
+            with client.websocket_connect("/api/live/publish?id=VAAB", headers={"x-real-ip": same[1]}) as second:
+                assert second.receive_json()["id"] == "VAAB"
+                with pytest.raises(WebSocketDisconnect) as full:
+                    with client.websocket_connect("/api/live/publish?id=VAAC", headers={"x-real-ip": same[2]}) as third:
+                        third.receive_json()
+                assert full.value.code == CODE_FULL
+                with client.websocket_connect(
+                    "/api/live/publish?id=VBAA",
+                    headers={"x-real-ip": "2001:db8:1:3::1"},
+                ) as other:
+                    assert other.receive_json()["id"] == "VBAA"
+        assert hub.get("VAAA") is None
 
 
 def test_a_second_mime_is_ignored_and_the_first_one_sticks():
