@@ -2131,7 +2131,7 @@ def test_the_per_ip_cap_is_rechecked_after_a_handover(tmp_path: Path, monkeypatc
 
 
 def test_rejoining_during_linger_does_not_count_as_a_new_encoder(tmp_path: Path):
-    """H7: the linger already fills the only slot. The same address comes back anyway."""
+    """Rejoining the linger that already fills the only slot is not a new encoder."""
 
     script = _write_script(tmp_path, _CONTINUOUS_FFMPEG)
     hub = _hub(
@@ -2598,3 +2598,370 @@ def test_handover_is_not_offered_when_another_listener_keeps_the_per_ip_cap(tmp_
                     assert isinstance(planned, tuple)
                     assert planned[0] == 429
                     assert lingering.occupies()
+
+
+class _CountedStdin:
+    def __init__(self, raw, writers: list[int]) -> None:
+        self._raw = raw
+        self._writers = writers
+
+    def write(self, data: bytes) -> None:
+        self._writers.append(threading.get_ident())
+        self._raw.write(data)
+
+    def close(self) -> None:
+        self._raw.close()
+
+    def fileno(self) -> int:
+        return self._raw.fileno()
+
+
+class _PipeProc:
+    """A stand-in for ffmpeg. poll() stays empty so the watch loop does not reap the test."""
+
+    def __init__(self) -> None:
+        self._sleeper = subprocess.Popen(["sleep", "60"])
+        in_r, in_w = os.pipe()
+        out_r, out_w = os.pipe()
+        err_r, err_w = os.pipe()
+        self.writers: list[int] = []
+        self.stdin = _CountedStdin(os.fdopen(in_w, "wb", buffering=0), self.writers)
+        self.stdout = os.fdopen(out_r, "rb", buffering=0)
+        self.stderr = os.fdopen(err_r, "rb", buffering=0)
+        self._out_w = out_w
+        self._err_w = err_w
+        self.pid = self._sleeper.pid
+        self.returncode = None
+        self._dead = False
+        threading.Thread(target=_drain_fd, args=(in_r,), daemon=True).start()
+
+    def poll(self):
+        return 0 if self._dead else None
+
+    def wait(self, timeout=None):
+        self.returncode = 0
+        return 0
+
+    def close_writes(self) -> None:
+        for fd in (self._out_w, self._err_w):
+            if fd is None or fd < 0:
+                continue
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if self._out_w is not None:
+            self._out_w = -1
+        if self._err_w is not None:
+            self._err_w = -1
+
+    def kill(self) -> None:
+        if self._sleeper.poll() is None:
+            self._sleeper.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            self._sleeper.wait(timeout=1)
+
+
+def _drain_fd(fd: int) -> None:
+    try:
+        while os.read(fd, 65536):
+            pass
+    except OSError:
+        pass
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
+class _Seen:
+    def __init__(self) -> None:
+        self.saw_init = False
+        self.chunks: list[bytes] = []
+        self.address = "198.51.100.1"
+
+    def offer_init(self, payload: bytes) -> None:
+        self.saw_init = True
+        self.chunks.append(payload)
+
+    def offer_media(self, payload: bytes) -> None:
+        self.chunks.append(payload)
+
+    def offer_end(self) -> None:
+        return
+
+    def mark_closed(self) -> None:
+        return
+
+
+def _ts(marker: bytes) -> bytes:
+    packet = bytearray(188)
+    packet[0] = 0x47
+    packet[4 : 4 + len(marker)] = marker
+    return bytes(packet)
+
+
+def test_two_generations_overlap_on_the_threads_the_relay_started():
+    """The threads _start_locked creates keep the process and stop flag they were given.
+
+    A later generation must not clear that flag. A read still leaving the first
+    process must not append into the next one or fail it. The watch loop, awake
+    after that replacement, must not fail the process it did not capture. The
+    audio loop, already holding a cluster, must not publish that cluster's base
+    onto the generation that replaced it.
+    """
+
+    import djtube.video as video_mod
+
+    procs: list[_PipeProc] = []
+    fails: list[tuple[str, object]] = []
+    release = threading.Event()
+    watch_release = threading.Event()
+    watch_entered = threading.Event()
+    audio_release = threading.Event()
+    audio_entered = threading.Event()
+    original_event = video_mod.threading.Event
+    original_tc = video_mod.cluster_timecode
+
+    class _Event(threading.Event):
+        def wait(self, timeout=None):
+            # The first watch period ends only after the next generation exists,
+            # so the loop has to notice that its captured process is gone.
+            if threading.current_thread().name.startswith("djtube-video-watch-") and not watch_entered.is_set():
+                watch_entered.set()
+                assert watch_release.wait(3)
+                return False
+            return super().wait(timeout)
+
+    video_mod.threading.Event = _Event
+
+    def popen(*_args, **kwargs) -> _PipeProc:
+        proc = _PipeProc()
+        # The parent closes this fd after Popen returns. Keep a copy so the
+        # audio loop can write the generation it captured.
+        passed = kwargs.get("pass_fds") or ()
+        if passed:
+            duped = os.dup(passed[0])
+            threading.Thread(target=_drain_fd, args=(duped,), daemon=True).start()
+        procs.append(proc)
+        return proc
+
+    relay = FfmpegRelay(
+        "GENR",
+        lambda: (),
+        ThumbCache(lambda _video: None),
+        width=16,
+        height=16,
+        fps=5,
+        output_stall=30,
+        restart_backoff=1,
+        popen=popen,
+    )
+    real_fail = relay._fail
+
+    def spy_fail(proc=None):
+        fails.append((threading.current_thread().name, proc))
+        return real_fail(proc)
+
+    relay._fail = spy_fail
+
+    def blocked_tc(item: bytes):
+        # Past the stop check, before the mux identity check. The swap happens
+        # while this cluster is still in the first generation's hands.
+        if not audio_entered.is_set():
+            audio_entered.set()
+            assert audio_release.wait(3)
+        return original_tc(item)
+
+    video_mod.cluster_timecode = blocked_tc
+    listener = _Seen()
+    entered = threading.Event()
+    calls = {"n": 0}
+    original = relay._frame
+
+    def blocked_frame() -> bytes:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            entered.set()
+            assert release.wait(2)
+        return original()
+
+    relay._frame = blocked_frame
+    first = _ts(b"FIRST")
+    stale = _ts(b"STALE")
+    # Timecode 5. The departing audio loop must not store it on the next generation.
+    cluster = bytes.fromhex("1F43B67583E78105")
+    try:
+        relay.prime(b"INIT", cluster)
+        relay.attach(listener)
+        assert entered.wait(2)
+        assert watch_entered.wait(2)
+        assert audio_entered.wait(2)
+        assert len(procs) == 1
+        gen1 = procs[0]
+        gen1_mux = relay._mux
+        gen1_stop = relay._stop
+        gen1_threads = list(relay._threads)
+        gen1_frame = next(thread for thread in gen1_threads if "-frame-" in thread.name)
+        assert gen1_frame.ident is not None
+        assert [thread._args for thread in gen1_threads] == [(gen1_mux,)] * 5
+        assert all(thread.is_alive() for thread in gen1_threads)
+        os.write(gen1._out_w, first)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not any(b"FIRST" in chunk for chunk in listener.chunks):
+            time.sleep(0.01)
+        assert any(b"FIRST" in chunk for chunk in listener.chunks)
+        with relay._lock:
+            bundle = relay._take_process_locked()
+            assert len(bundle[3]) == 5
+            relay._start_locked()
+        gen2 = procs[1]
+        assert relay._proc is gen2
+        assert relay._mux is not gen1_mux
+        assert relay._stop is not gen1_stop
+        assert gen1_stop.is_set()
+        assert relay._stop.is_set() is False
+        assert [thread._args for thread in relay._threads] == [(relay._mux,)] * 5
+        gen1._dead = True
+        watch_release.set()
+        audio_release.set()
+        os.write(gen1._out_w, stale)
+        gen1.close_writes()
+        read = next(thread for thread in gen1_threads if "-read-" in thread.name)
+        read.join(2)
+        assert read.is_alive() is False
+        assert b"STALE" not in relay.sync.snapshot()
+        release.set()
+        for role in ("-audio-", "-frame-", "-watch-", "-err-"):
+            thread = next(item for item in gen1_threads if role in item.name)
+            thread.join(2)
+            assert thread.is_alive() is False, role
+        assert relay._base is None
+        assert not any(name.startswith("djtube-video-watch") for name, _proc in fails)
+        assert gen1_frame.ident not in gen2.writers
+        assert relay._proc is gen2
+        assert relay._started is True
+        assert relay._backoff_until == 0.0
+    finally:
+        watch_release.set()
+        audio_release.set()
+        release.set()
+        video_mod.threading.Event = original_event
+        video_mod.cluster_timecode = original_tc
+        for proc in procs:
+            proc.close_writes()
+        with contextlib.suppress(Exception):
+            relay.stop()
+        for thread in list(relay._threads):
+            thread.join(timeout=1)
+        for proc in procs:
+            proc.kill()
+
+
+def _video_get_time(client, stream_id: str, headers: dict[str, str]) -> tuple[int, float]:
+    started = time.monotonic()
+    response = client.get(f"/stream/{stream_id}?thumbnail=1", headers=headers)
+    return response.status_code, time.monotonic() - started
+
+
+def test_an_unrelated_address_is_refused_without_waiting(tmp_path: Path):
+    script = _write_script(tmp_path, _CONTINUOUS_FFMPEG)
+    hub = _hub(tmp_path, ffmpeg=script, max_video_encoders=1, max_video_per_ip=1, video_linger=30, output_stall=30)
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=WAAA", headers={"x-real-ip": "192.0.2.11"}) as first:
+            _publish_ready(first)
+            with _ws(client, "/api/live/publish?id=WAAB", headers={"x-real-ip": "192.0.2.12"}) as second:
+                _publish_ready(second)
+                with _Audio(
+                    client, "/stream/WAAA", query="thumbnail=1", headers={"x-real-ip": "198.51.100.11"}
+                ) as video:
+                    assert video.read()[:1] == b"\x47"
+                    status, elapsed = _video_get_time(client, "WAAB", {"x-real-ip": "198.51.100.12"})
+                    assert status == 429
+                    assert elapsed < 0.2
+
+
+def test_a_sole_viewer_who_stays_is_refused_after_the_drain(tmp_path: Path):
+    script = _write_script(tmp_path, _CONTINUOUS_FFMPEG)
+    hub = _hub(tmp_path, ffmpeg=script, max_video_encoders=1, max_video_per_ip=1, video_linger=30, output_stall=30)
+    held = {"x-real-ip": "198.51.100.13"}
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=WABA", headers={"x-real-ip": "192.0.2.13"}) as first:
+            _publish_ready(first)
+            with _ws(client, "/api/live/publish?id=WABB", headers={"x-real-ip": "192.0.2.14"}) as second:
+                _publish_ready(second)
+                with _Audio(client, "/stream/WABA", query="thumbnail=1", headers=held) as video:
+                    assert video.read()[:1] == b"\x47"
+                    started = time.monotonic()
+                    preview = client.head("/stream/WABB?thumbnail=1", headers=held)
+                    assert preview.status_code == 429
+                    assert time.monotonic() - started < 0.2
+                    with _deadline(5):
+                        status, elapsed = _video_get_time(client, "WABB", held)
+                    assert status == 429
+                    assert 0.25 <= elapsed < 0.8
+
+
+def test_two_viewers_on_one_address_are_refused_without_waiting(tmp_path: Path):
+    """The other connection behind this NAT address is still watching. Recounting cannot help."""
+
+    script = _write_script(tmp_path, _CONTINUOUS_FFMPEG)
+    hub = _hub(tmp_path, ffmpeg=script, max_video_encoders=3, max_video_per_ip=1, video_linger=30, output_stall=30)
+    nat = {"x-real-ip": "198.51.100.15"}
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=NTAA", headers={"x-real-ip": "192.0.2.15"}) as first:
+            _publish_ready(first)
+            with _ws(client, "/api/live/publish?id=NTAB", headers={"x-real-ip": "192.0.2.16"}) as second:
+                _publish_ready(second)
+                with _Audio(client, "/stream/NTAA", query="thumbnail=1", headers=nat) as one:
+                    assert one.read()[:1] == b"\x47"
+                    with _Audio(client, "/stream/NTAA", query="thumbnail=1", headers=nat) as two:
+                        assert two.read()[:1] == b"\x47"
+                        assert len(hub.get("NTAA").video_listeners) == 2
+                        status, elapsed = _video_get_time(client, "NTAB", nat)
+                        assert status == 429
+                        assert elapsed < 0.2
+
+
+def test_a_second_viewer_from_another_address_is_refused_without_waiting(tmp_path: Path):
+    script = _write_script(tmp_path, _CONTINUOUS_FFMPEG)
+    hub = _hub(tmp_path, ffmpeg=script, max_video_encoders=3, max_video_per_ip=1, video_linger=30, output_stall=30)
+    held = {"x-real-ip": "198.51.100.17"}
+    other = {"x-real-ip": "198.51.100.18"}
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=WACA", headers={"x-real-ip": "192.0.2.17"}) as first:
+            _publish_ready(first)
+            with _ws(client, "/api/live/publish?id=WACB", headers={"x-real-ip": "192.0.2.18"}) as second:
+                _publish_ready(second)
+                with _Audio(client, "/stream/WACA", query="thumbnail=1", headers=held) as one:
+                    assert one.read()[:1] == b"\x47"
+                    with _Audio(client, "/stream/WACA", query="thumbnail=1", headers=other) as two:
+                        assert two.read()[:1] == b"\x47"
+                        status, elapsed = _video_get_time(client, "WACB", held)
+                        assert status == 429
+                        assert elapsed < 0.2
+
+
+def test_reopening_while_someone_else_watches_waits_then_refuses(tmp_path: Path):
+    """H7: A leaves S1, B watches it, A watches S2, then A opens S1 again."""
+
+    script = _write_script(tmp_path, _CONTINUOUS_FFMPEG)
+    hub = _hub(tmp_path, ffmpeg=script, max_video_encoders=3, max_video_per_ip=1, video_linger=30, output_stall=30)
+    starter = {"x-real-ip": "198.51.100.19"}
+    guest = {"x-real-ip": "198.51.100.20"}
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=HSAA", headers={"x-real-ip": "192.0.2.19"}) as first:
+            _publish_ready(first)
+            with _ws(client, "/api/live/publish?id=HSAB", headers={"x-real-ip": "192.0.2.20"}) as second:
+                _publish_ready(second)
+                with _Audio(client, "/stream/HSAA", query="thumbnail=1", headers=starter) as started_video:
+                    assert started_video.read()[:1] == b"\x47"
+                assert hub.get("HSAA").relay.occupies()
+                with _Audio(client, "/stream/HSAA", query="thumbnail=1", headers=guest) as watching:
+                    assert watching.read()[:1] == b"\x47"
+                    with _Audio(client, "/stream/HSAB", query="thumbnail=1", headers=starter) as other:
+                        assert other.status_code == 200
+                        assert other.read()[:1] == b"\x47"
+                        with _deadline(5):
+                            status, elapsed = _video_get_time(client, "HSAA", starter)
+                        assert status == 429
+                        assert 0.25 <= elapsed < 0.8
