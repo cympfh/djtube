@@ -24,6 +24,7 @@ import {
   liveStatusText,
   liveSupported,
   armClipboard,
+  claimMessage,
   masterGapNote,
   mimeMessage,
 } from "../../djtube/static/live.js";
@@ -218,8 +219,10 @@ function idMessage(id = "ABCD", token = LIVE_TOKEN) {
   return JSON.stringify({ type: "id", id, token });
 }
 
-function pinnedPublishUrl(id = "ABCD", token = LIVE_TOKEN) {
-  return `wss://s.cympfh.cc/djtube/api/live/publish?id=${id}&token=${token}`;
+const PUBLISH_URL = "wss://s.cympfh.cc/djtube/api/live/publish";
+
+function openedClaim(seq = 1, id = "", token = "") {
+  return claimMessage(id, token, seq);
 }
 
 async function goLive(harness, id = "ABCD", token = LIVE_TOKEN) {
@@ -232,17 +235,15 @@ async function goLive(harness, id = "ABCD", token = LIVE_TOKEN) {
 
 test("listener and publish URLs use the public prefix", () => {
   assert.equal(listenerUrl("/djtube", "ABCD", "https://s.cympfh.cc"), "https://s.cympfh.cc/djtube/stream/ABCD");
-  assert.equal(livePublishUrl("/djtube", "https://s.cympfh.cc"), "wss://s.cympfh.cc/djtube/api/live/publish");
+  assert.equal(livePublishUrl("/djtube", "https://s.cympfh.cc"), PUBLISH_URL);
   assert.equal(livePublishUrl("/djtube", "http://127.0.0.1:8098"), "ws://127.0.0.1:8098/djtube/api/live/publish");
-  assert.equal(
-    livePublishUrl("/djtube", "https://s.cympfh.cc", "ABCD"),
-    "wss://s.cympfh.cc/djtube/api/live/publish?id=ABCD",
-  );
-  assert.equal(
-    livePublishUrl("/djtube", "https://s.cympfh.cc", "ABCD", LIVE_TOKEN),
-    pinnedPublishUrl(),
-  );
+  assert.equal(livePublishUrl("/djtube", "https://s.cympfh.cc", "ABCD", LIVE_TOKEN), PUBLISH_URL);
+  assert.equal(PUBLISH_URL.includes("token"), false);
   assert.equal(mimeMessage(), JSON.stringify({ type: "mime", mime: LIVE_MIME }));
+  assert.equal(
+    claimMessage("ABCD", LIVE_TOKEN, 2),
+    JSON.stringify({ type: "mime", mime: LIVE_MIME, seq: 2, id: "ABCD", token: LIVE_TOKEN }),
+  );
   assert.equal(closeReason(4408), "音声が届かなくなったため、配信を止めました");
   assert.equal(closeReason(4409), LIVE_TAKEN);
   assert.equal(closeReason(4429), "配信の上限に達しました");
@@ -373,14 +374,14 @@ test("the first click publishes the master, copies the listener URL, and sends m
   assert.equal(harness.recorders[0].options.mimeType, LIVE_MIME);
   assert.equal(harness.recorders[0].options.audioBitsPerSecond, LIVE_BITRATE);
   assert.equal(harness.recorders[0].timeslice, LIVE_TIMESLICE_MS);
-  assert.deepEqual(harness.sockets[0].sent, [mimeMessage()]);
+  assert.deepEqual(harness.sockets[0].sent, [openedClaim()]);
 
   harness.recorders[0].emit(new Blob([Uint8Array.of(1, 2, 3)]));
   harness.recorders[0].emit(new Blob([]));
   harness.recorders[0].emit(new Blob([Uint8Array.of(4)]));
   await flush();
   assert.equal(harness.sockets[0].sent.length, 3);
-  assert.equal(harness.sockets[0].sent[0], mimeMessage());
+  assert.equal(harness.sockets[0].sent[0], openedClaim());
   assert.ok(harness.sockets[0].sent[1] instanceof ArrayBuffer);
   assert.ok(harness.sockets[0].sent[2] instanceof ArrayBuffer);
   assert.equal(harness.sockets[0].sent.filter((item) => typeof item === "string").length, 1);
@@ -480,7 +481,7 @@ test("a failed copy still starts, and the URL stays on the hover", async () => {
   assert.equal(harness.ui.painted().face, "on");
   assert.equal(harness.ui.painted().title, `配信中：${url}`);
   assert.equal(harness.ui.painted().live, `配信中：${url}。${LIVE_COPY_FAILED}`);
-  assert.equal(harness.sockets[0].sent[0], mimeMessage());
+  assert.equal(harness.sockets[0].sent[0], openedClaim());
 });
 
 test("a rejected clipboard reservation falls back, and a failed fallback stays on the air", async () => {
@@ -519,7 +520,7 @@ test("a rejected clipboard reservation falls back, and a failed fallback stays o
   assert.equal(failed.ui.painted().face, "on");
   assert.equal(failed.ui.painted().title, `配信中：${failedUrl}`);
   assert.equal(failed.ui.painted().live, `配信中：${failedUrl}。${LIVE_COPY_FAILED}`);
-  assert.equal(failed.sockets[0].sent[0], mimeMessage());
+  assert.equal(failed.sockets[0].sent[0], openedClaim());
   assert.equal(failed.sockets.length, 1);
 });
 
@@ -591,14 +592,14 @@ test("starting again reuses the id and copies the same listener URL", async () =
   await flush();
   assert.equal(harness.sockets.length, 2);
   assert.equal(harness.sockets[0].url, "wss://s.cympfh.cc/djtube/api/live/publish");
-  assert.equal(harness.sockets[1].url, pinnedPublishUrl());
+  assert.equal(harness.sockets[1].url, PUBLISH_URL);
+  assert.equal(harness.sockets[1].sent[0], claimMessage("ABCD", LIVE_TOKEN, 2));
   harness.sockets[1].receive(idMessage());
   await flush();
   assert.equal(harness.ui.painted().title, `配信中：${url}`);
   assert.equal(harness.ui.painted().live, `配信中：${url}`);
   assert.equal(harness.ui.painted().face, "on");
   assert.deepEqual(harness.copies, [url, url]);
-  assert.equal(harness.sockets[1].sent[0], mimeMessage());
 });
 
 test("an immediate restart reuses the id and token without waiting for the old close", async () => {
@@ -642,14 +643,14 @@ test("an immediate restart reuses the id and token without waiting for the old c
   harness.ui.button.click();
   await flush();
   assert.equal(harness.sockets.length, 2);
-  assert.equal(harness.sockets[1].url, pinnedPublishUrl());
+  assert.equal(harness.sockets[1].url, PUBLISH_URL);
   assert.equal(harness.sockets[1].closed, null);
   assert.equal(typeof releaseClose, "function");
+  assert.equal(harness.sockets[1].sent[0], claimMessage("ABCD", LIVE_TOKEN, 2));
   harness.sockets[1].receive(idMessage());
   await flush();
   assert.equal(harness.ui.painted().face, "on");
   assert.equal(harness.ui.painted().title, "配信中：https://s.cympfh.cc/djtube/stream/ABCD");
-  assert.equal(harness.sockets[1].sent[0], mimeMessage());
   releaseClose();
   await flush();
   assert.equal(harness.ui.painted().face, "on");
@@ -672,7 +673,9 @@ test("a 4409 drops the id and the next click takes a new one", async () => {
   harness.ui.button.click();
   await flush();
   assert.equal(harness.sockets.length, 2);
-  assert.equal(harness.sockets[1].url, pinnedPublishUrl());
+  assert.equal(harness.sockets[1].url, PUBLISH_URL);
+  assert.equal(JSON.parse(harness.sockets[1].sent[0]).id, "ABCD");
+  assert.equal(JSON.parse(harness.sockets[1].sent[0]).token, LIVE_TOKEN);
   assert.equal(harness.ui.painted().face, "off");
   assert.equal(harness.ui.painted().title, LIVE_TAKEN);
   assert.equal(harness.ui.painted().live, LIVE_TAKEN);
@@ -689,6 +692,28 @@ test("a 4409 drops the id and the next click takes a new one", async () => {
   await flush();
   assert.equal(harness.ui.painted().title, "配信中：https://s.cympfh.cc/djtube/stream/EFGH");
   assert.equal(harness.ui.painted().face, "on");
+  assert.equal(JSON.parse(harness.sockets[2].sent[0]).seq, 3);
+});
+
+test("a new token from the server is what the next claim sends", async () => {
+  const harness = setup();
+  await goLive(harness, "ABCD", "first-token");
+  harness.ui.button.click();
+  await flush();
+  harness.ui.button.click();
+  await flush();
+  assert.equal(JSON.parse(harness.sockets[1].sent[0]).token, "first-token");
+  harness.sockets[1].receive(idMessage("ABCD", "second-token"));
+  await flush();
+  harness.ui.button.click();
+  await flush();
+  harness.ui.button.click();
+  await flush();
+  const claim = JSON.parse(harness.sockets[2].sent[0]);
+  assert.equal(claim.id, "ABCD");
+  assert.equal(claim.token, "second-token");
+  assert.equal(claim.seq, 3);
+  assert.equal(harness.sockets[2].url.includes("?"), false);
 });
 
 test("cancelling before the id arrives does not copy or open another socket", async () => {
@@ -790,11 +815,14 @@ test("a server close stops the broadcast, shows the reason, and does not reconne
     if (code === 4409 || code === 1006) {
       harness.ui.button.click();
       await flush();
-      const next = harness.sockets.at(-1).url;
+      const next = JSON.parse(harness.sockets.at(-1).sent[0]);
+      assert.equal(harness.sockets.at(-1).url, PUBLISH_URL);
       if (code === 4409) {
-        assert.equal(next, "wss://s.cympfh.cc/djtube/api/live/publish");
+        assert.equal(next.id, undefined);
+        assert.equal(next.token, undefined);
       } else {
-        assert.equal(next, pinnedPublishUrl());
+        assert.equal(next.id, "ABCD");
+        assert.equal(next.token, LIVE_TOKEN);
       }
       harness.ui.button.click();
       await flush();

@@ -33,6 +33,14 @@ export function mimeMessage() {
   return JSON.stringify({ type: "mime", mime: LIVE_MIME });
 }
 
+/** First text frame. The id and token stay out of the URL nginx logs. */
+export function claimMessage(id, token, seq) {
+  const payload = { type: "mime", mime: LIVE_MIME, seq };
+  if (typeof id === "string" && id) payload.id = id;
+  if (typeof token === "string" && token) payload.token = token;
+  return JSON.stringify(payload);
+}
+
 export function liveSupported(scope = globalThis) {
   const Recorder = scope?.MediaRecorder;
   if (typeof Recorder !== "function") return false;
@@ -44,16 +52,12 @@ export function liveSupported(scope = globalThis) {
   }
 }
 
-export function livePublishUrl(prefix, origin, id, token) {
+export function livePublishUrl(prefix, origin) {
   const path = `${prefix}/api/live/publish`;
-  const parts = [];
-  if (typeof id === "string" && id) parts.push(`id=${encodeURIComponent(id)}`);
-  if (typeof token === "string" && token) parts.push(`token=${encodeURIComponent(token)}`);
-  const query = parts.length ? `?${parts.join("&")}` : "";
   const base = String(origin || "").replace(/\/$/, "");
-  if (base.startsWith("https:")) return `wss:${base.slice("https:".length)}${path}${query}`;
-  if (base.startsWith("http:")) return `ws:${base.slice("http:".length)}${path}${query}`;
-  return `${path}${query}`;
+  if (base.startsWith("https:")) return `wss:${base.slice("https:".length)}${path}`;
+  if (base.startsWith("http:")) return `ws:${base.slice("http:".length)}${path}`;
+  return path;
 }
 
 export function listenerUrl(prefix, id, origin) {
@@ -187,6 +191,7 @@ export function createLiveControl(options) {
   let session = null;
   let pinnedId = "";
   let pinnedToken = "";
+  let claimSeq = 0;
 
   function markCopyFailed(mine) {
     if (mine.ended || mine.copyFailed) return;
@@ -300,12 +305,6 @@ export function createLiveControl(options) {
     if (!pinnedId) pinnedId = id;
     if (typeof token === "string" && token) pinnedToken = token;
     const url = listenerUrl(prefix, id, origin);
-    try {
-      mine.socket.send(mimeMessage());
-    } catch {
-      finish(mine, { state: "error", reason: LIVE_DROPPED });
-      return;
-    }
     let recorder = null;
     try {
       recorder = createRecorder(mine.dest.stream, {
@@ -346,8 +345,24 @@ export function createLiveControl(options) {
     deliverCopy(mine, url);
   }
 
+  function sendClaim(socket) {
+    claimSeq += 1;
+    socket.send(claimMessage(pinnedId, pinnedToken, claimSeq));
+  }
+
   function bindSocket(mine, socket) {
     mine.socket = socket;
+    const deliver = () => {
+      if (mine.ended || mine.claimed) return;
+      mine.claimed = true;
+      try {
+        sendClaim(socket);
+      } catch {
+        finish(mine, { state: "error", reason: LIVE_DROPPED });
+      }
+    };
+    socket.onopen = deliver;
+    if (socket.readyState === SOCKET_OPEN) deliver();
     socket.onmessage = (event) => {
       if (mine.ended || mine.recorder || typeof event?.data !== "string") return;
       let payload = null;
@@ -374,7 +389,7 @@ export function createLiveControl(options) {
   function openPublish(mine) {
     let socket = null;
     try {
-      socket = connectSocket(livePublishUrl(prefix, origin, pinnedId, pinnedToken));
+      socket = connectSocket(livePublishUrl(prefix, origin));
     } catch {
       finish(mine, { state: "error", reason: LIVE_DROPPED });
       return;

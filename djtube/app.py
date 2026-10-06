@@ -10,7 +10,7 @@ from djtube.assets import DOCUMENT_CACHE, VersionedStaticFiles, asset_version, s
 from djtube.audio import AudioError, audio_needs_cookies, clear_audio_cache, open_audio
 from djtube.cookies import MAX_COOKIE_BYTES, CookieError, CookieStore, cookie_path, install_store
 from djtube.ids import is_video_id
-from djtube.live import LiveHub, _hide_token, mount_live
+from djtube.live import LiveHub, mount_live
 from djtube.paths import INDEX_PATH, PUBLIC_PREFIX, STATIC_DIR
 from djtube.playlists import PlaylistError, PlaylistStore, playlist_path
 from djtube.search import SearchError, search_mode, search_tracks
@@ -31,8 +31,6 @@ class StripPrefixMiddleware:
         self.prefix = prefix.rstrip("/")
 
     async def __call__(self, scope, receive, send):
-        # Uvicorn logs this object. A later copy is what the route reads.
-        outer = scope
         if scope["type"] in ("http", "websocket") and self.prefix:
             path = scope.get("path") or ""
             if path == self.prefix or path.startswith(self.prefix + "/"):
@@ -42,11 +40,6 @@ class StripPrefixMiddleware:
                     stripped = "/" + stripped
                 scope["path"] = stripped
                 scope["raw_path"] = stripped.encode("ascii", "ignore")
-        raw = outer.get("query_string") or b""
-        if isinstance(raw, (bytes, bytearray)) and b"token=" in raw:
-            if scope is outer:
-                scope = dict(outer)
-            _hide_token(outer)
         await self.app(scope, receive, send)
 
 

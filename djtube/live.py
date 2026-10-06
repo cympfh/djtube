@@ -262,6 +262,9 @@ class _Hold:
         self.token = token
         self.address = address
         self.at = at
+        # The page increases this on every attempt. A delayed older attempt
+        # must not replace the attempt that already won.
+        self.seq: int | None = None
 
 
 class _Stream:
@@ -345,21 +348,33 @@ class LiveHub:
 
     async def publish(self, websocket: WebSocket) -> None:
         _configure_log()
-        requested = websocket.query_params.get("id")
-        token = websocket.query_params.get("token")
-        # Uvicorn logs the path at accept, including the query. Drop the secret first.
-        _hide_token(websocket.scope)
+        # The id and token arrive in the first text frame, never the URL.
+        # nginx logs $request, which is the path and query, not the frame.
         await websocket.accept()
         try:
+            claim = await self._read_claim(websocket)
+            normalized = None
+            if claim.mime_present:
+                normalized = normalize_mime(claim.mime)
+                if normalized is None:
+                    raise LiveClose(CODE_BAD_MEDIA)
             stream, generation, token, replaced, ended = self._open(
-                requested,
-                token,
+                claim.requested,
+                claim.token,
                 _publisher_address(websocket),
+                claim.seq,
             )
         except LiveClose as exc:
             await _close(websocket, exc.code)
             return
+        except WebSocketDisconnect:
+            return
         stream.websocket = websocket
+        if normalized is not None:
+            with self._lock:
+                if stream.generation == generation and not stream.closed:
+                    stream.mime = normalized
+                    stream.mime_announced = True
         for listener in ended:
             listener.offer_end()
         if replaced is not None:
@@ -371,6 +386,8 @@ class LiveHub:
         log.info("publish %s", stream.id)
         try:
             await websocket.send_json({"type": "id", "id": stream.id, "token": token})
+            if claim.leading:
+                self._on_bytes(stream, claim.leading, generation)
             await self._consume(websocket, stream, generation)
         except LiveClose as exc:
             await _close(websocket, exc.code)
@@ -379,6 +396,22 @@ class LiveHub:
         finally:
             if self._end(stream, generation):
                 log.info("end %s", stream.id)
+
+    async def _read_claim(self, websocket: WebSocket) -> "_Claim":
+        try:
+            message = await asyncio.wait_for(websocket.receive(), self.init_timeout)
+        except TimeoutError:
+            raise LiveClose(CODE_TIMEOUT) from None
+        if message["type"] == "websocket.disconnect":
+            raise WebSocketDisconnect()
+        text = message.get("text")
+        if isinstance(text, str):
+            return _parse_claim(text)
+        claim = _Claim()
+        data = message.get("bytes")
+        if isinstance(data, (bytes, bytearray)) and data:
+            claim.leading = bytes(data)
+        return claim
 
     async def attach_listener(self, stream_id: str, address: str) -> tuple[int, "_Listener | None", "_Stream | None"]:
         """Join a live response. 404 when nothing is publishing. 429 when a listener cap is full."""
@@ -515,7 +548,7 @@ class LiveHub:
             listener.offer_media(cluster)
 
     def _open(
-        self, requested: str | None, token: str | None, address: str
+        self, requested: str | None, token: str | None, address: str, seq: int | None = None
     ) -> tuple[_Stream, int, str, WebSocket | None, list[_Listener]]:
         if requested is not None and requested.strip() == "":
             requested = None
@@ -530,9 +563,12 @@ class LiveHub:
                     raise LiveClose(CODE_BAD_ID)
                 hold = self._reservations.get(requested)
                 current = self._streams.get(requested)
-                if token is not None:
-                    if hold is None or not _token_ok(hold.token, token):
-                        raise LiveClose(CODE_TAKEN)
+                matched = hold is not None and token is not None and _token_ok(hold.token, token)
+                if matched:
+                    assert hold is not None
+                    if not _seq_allows(hold.seq, seq):
+                        # The newer attempt is already recorded. Do not touch it.
+                        raise LiveClose(CODE_REPLACED)
                     if current is not None:
                         self._ensure_room_locked(address, current)
                         replaced, ended = self._displace_locked(current, address)
@@ -540,19 +576,21 @@ class LiveHub:
                     else:
                         self._ensure_room_locked(address, None)
                         stream = self._start_locked(requested, address)
-                    self._touch_locked(hold, address)
+                    self._touch_locked(hold, address, seq)
                     issued = hold.token
                 elif hold is not None or current is not None:
                     raise LiveClose(CODE_TAKEN)
                 else:
+                    # Restart, or the hold was evicted. The id is free, so keep
+                    # the listener URL and mint a new token.
                     self._ensure_room_locked(address, None)
                     stream = self._start_locked(requested, address)
-                    issued = self._remember_locked(requested, address)
+                    issued = self._remember_locked(requested, address, seq)
             else:
                 self._ensure_room_locked(address, None)
                 stream_id = self._fresh_id_locked()
                 stream = self._start_locked(stream_id, address)
-                issued = self._remember_locked(stream_id, address)
+                issued = self._remember_locked(stream_id, address, seq)
             return stream, stream.generation, issued, replaced, ended
 
     def _start_locked(self, stream_id: str, address: str) -> _Stream:
@@ -595,15 +633,19 @@ class LiveHub:
         for stream_id in stale:
             del self._reservations[stream_id]
 
-    def _remember_locked(self, stream_id: str, address: str) -> str:
+    def _remember_locked(self, stream_id: str, address: str, seq: int | None = None) -> str:
         self._make_room_locked(address)
         token = secrets.token_urlsafe(32)
-        self._reservations[stream_id] = _Hold(token, address, self._clock())
+        hold = _Hold(token, address, self._clock())
+        hold.seq = seq
+        self._reservations[stream_id] = hold
         return token
 
-    def _touch_locked(self, hold: _Hold, address: str) -> None:
+    def _touch_locked(self, hold: _Hold, address: str, seq: int | None = None) -> None:
         hold.address = address
         hold.at = self._clock()
+        if seq is not None:
+            hold.seq = seq
 
     def _make_room_locked(self, address: str) -> None:
         """Drop oldest idle holds. A hold whose stream is still publishing stays."""
@@ -672,22 +714,52 @@ class LiveHub:
         return True
 
 
-def _hide_token(scope: dict) -> None:
-    raw = scope.get("query_string") or b""
-    if not isinstance(raw, (bytes, bytearray)) or b"token=" not in raw:
-        return
+class _Claim:
+    def __init__(self) -> None:
+        self.requested: str | None = None
+        self.token: str | None = None
+        self.seq: int | None = None
+        self.mime: object = None
+        self.mime_present = False
+        self.leading: bytes | None = None
+
+
+def _parse_claim(text: str) -> _Claim:
+    claim = _Claim()
+    if len(text.encode("utf-8")) > MAX_TEXT:
+        raise LiveClose(CODE_TOO_BIG)
     try:
-        text = bytes(raw).decode("ascii")
-    except UnicodeDecodeError:
-        scope["query_string"] = b""
-        return
-    kept: list[str] = []
-    for part in text.split("&"):
-        name, _sep, _value = part.partition("=")
-        if name == "token" or not part:
-            continue
-        kept.append(part)
-    scope["query_string"] = "&".join(kept).encode("ascii")
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return claim
+    if not isinstance(payload, dict):
+        return claim
+    raw_id = payload.get("id")
+    if isinstance(raw_id, str):
+        claim.requested = raw_id
+    raw_token = payload.get("token")
+    if isinstance(raw_token, str):
+        claim.token = raw_token
+    raw_seq = payload.get("seq")
+    if isinstance(raw_seq, int) and not isinstance(raw_seq, bool) and raw_seq >= 1:
+        claim.seq = raw_seq
+    if "mime" in payload and payload.get("type") in {None, "mime"}:
+        claim.mime_present = True
+        claim.mime = payload.get("mime")
+    return claim
+
+
+def _seq_allows(recorded: int | None, seq: int | None) -> bool:
+    """True when this claim may take an id that already has a matching token.
+
+    A missing seq still replaces a hold that also has no seq. After any seq is
+    stored, only a greater seq may replace it, so a delayed older socket cannot
+    close the newer one with 4410.
+    """
+
+    if recorded is None:
+        return True
+    return seq is not None and seq > recorded
 
 
 def _token_ok(expected: str, presented: str) -> bool:
