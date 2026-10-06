@@ -295,7 +295,13 @@ def test_readme_and_docker_contract():
 
 def test_client_unit_tests():
     subprocess.run(
-        ["node", "--test", "tests/client/player.test.mjs", "tests/client/sync.test.mjs"],
+        [
+            "node",
+            "--test",
+            "tests/client/player.test.mjs",
+            "tests/client/sync.test.mjs",
+            "tests/client/master.test.mjs",
+        ],
         cwd=ROOT,
         check=True,
     )

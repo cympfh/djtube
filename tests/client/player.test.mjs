@@ -2831,7 +2831,7 @@ test("each deck filter is a bypass at center and stacks with the rest of the dec
   assert.equal(audios.A.color.gain.value, 0);
 });
 
-test("the filter node is the only path from the EQ tail to the speakers", () => {
+test("the EQ tail reaches the speakers through the filter, the deck gain, and the master", () => {
   function node() {
     return {
       type: "",
@@ -2861,6 +2861,11 @@ test("the filter node is the only path from the EQ tail to the speakers", () => 
         made.push(source);
         return source;
       };
+      this.createGain = function createGain() {
+        const gain = node();
+        made.push(gain);
+        return gain;
+      };
       this.createBiquadFilter = function createBiquadFilter() {
         const filter = node();
         made.push(filter);
@@ -2872,13 +2877,20 @@ test("the filter node is the only path from the EQ tail to the speakers", () => 
     const player = createDeckPlayer("A", "player-A");
     player.audio = { volume: 1 };
     assert.equal(player.setFilter(0), true);
-    assert.equal(made.length, 5);
-    const [source, high, mid, low, color] = made;
+    assert.equal(made.length, 7);
+    const [master, source, high, mid, low, level, color] = made;
+    assert.equal(master, player._bus.master);
+    assert.equal(master.gain.value, 1);
+    assert.deepEqual(master.connections, [destination]);
     assert.deepEqual(source.connections, [high]);
     assert.deepEqual(high.connections, [mid]);
     assert.deepEqual(mid.connections, [low]);
     assert.deepEqual(low.connections, [color]);
-    assert.deepEqual(color.connections, [destination]);
+    assert.equal(low.connections.includes(destination), false);
+    assert.deepEqual(color.connections, [level]);
+    assert.deepEqual(level.connections, [master]);
+    assert.equal(level.gain.value, 1);
+    assert.equal(player._level, level);
     assert.equal(player._color, color);
     assert.equal(color.type, "lowpass");
     assert.equal(color.frequency.value, FILTER_LPF_MIN_HZ);
@@ -2890,7 +2902,7 @@ test("the filter node is the only path from the EQ tail to the speakers", () => 
     assert.equal(color.type, "peaking");
     assert.equal(color.gain.value, 0);
     assert.equal(color.frequency.value, 1000);
-    assert.equal(made.length, 5);
+    assert.equal(made.length, 7);
 
     assert.equal(player.setFilter(100 / 100), true);
     assert.equal(color.type, "highpass");
@@ -2917,10 +2929,12 @@ test("the filter node is the only path from the EQ tail to the speakers", () => 
     assert.equal(state.decks.A.filter, 0);
     actions.setVolume("A", 0.4);
     actions.setCrossfader(0);
-    assert.equal(player.audio.volume, 0.4);
+    assert.equal(player.volume, 0.4);
+    assert.equal(player.audio.volume, 1);
+    assert.equal(level.gain.value, 0.4);
     assert.equal(color.type, "lowpass");
     assert.equal(color.frequency.value, FILTER_LPF_MIN_HZ);
-    assert.equal(made.length, 5);
+    assert.equal(made.length, 7);
 
     const appJs = readFileSync(new URL("../../djtube/static/app.js", import.meta.url), "utf8");
     assert.match(appJs, /volume\.addEventListener\("input", \(\) => \{\s*actions\.setVolume\(deck, Number\(volume\.value\) \/ 100\);/);
