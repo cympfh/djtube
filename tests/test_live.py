@@ -5,6 +5,7 @@ import asyncio
 import math
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -17,8 +18,16 @@ from djtube.live import (
     CODE_BAD_ID,
     CODE_BAD_MEDIA,
     CODE_FULL,
+    CODE_RATE,
     CODE_SLOW,
     CODE_TAKEN,
+    CODE_TIMEOUT,
+    CODE_TOO_BIG,
+    IDLE_TIMEOUT,
+    INIT_TIMEOUT,
+    MAX_BYTES_PER_SECOND,
+    MAX_CLUSTER,
+    MAX_STREAMS,
     LiveHub,
     _Listener,
     is_stream_id,
@@ -263,6 +272,10 @@ def test_a_slow_listener_is_disconnected_and_a_full_queue_drops_old_clusters():
             async def send_json(self, _data: dict) -> None:
                 return None
 
+            async def receive(self) -> dict:
+                await asyncio.sleep(5)
+                return {"type": "websocket.disconnect"}
+
             async def close(self, code: int = 1000, reason: str | None = None) -> None:
                 self.code = code
                 self.application_state = WebSocketState.DISCONNECTED
@@ -278,6 +291,136 @@ def test_a_slow_listener_is_disconnected_and_a_full_queue_drops_old_clusters():
         assert socket.code == CODE_SLOW
 
     asyncio.run(scenario())
+
+
+def test_relay_caps_match_the_publisher_budget():
+    hub = LiveHub()
+    assert hub.max_streams == MAX_STREAMS == 8
+    assert hub.max_bytes_per_second == MAX_BYTES_PER_SECOND == 64 * 1024
+    assert hub.max_cluster == MAX_CLUSTER == 256 * 1024
+    assert hub.init_timeout == INIT_TIMEOUT == 10
+    assert hub.idle_timeout == IDLE_TIMEOUT == 30
+
+
+def test_a_silent_publisher_loses_its_slot_and_a_quiet_one_does_too():
+    silent = LiveHub(max_streams=2, init_timeout=0.25, idle_timeout=5)
+    with TestClient(create_app(live=silent)) as client:
+        started = time.monotonic()
+        with client.websocket_connect("/api/live/publish?id=AAAA") as first:
+            first.receive_json()
+            with client.websocket_connect("/api/live/publish?id=AAAB") as second:
+                second.receive_json()
+                with pytest.raises(WebSocketDisconnect) as full:
+                    with client.websocket_connect("/api/live/publish?id=AAAC") as third:
+                        third.receive_json()
+                assert full.value.code == CODE_FULL
+                with pytest.raises(WebSocketDisconnect) as quiet:
+                    second.receive_json()
+                assert quiet.value.code == CODE_TIMEOUT
+            with pytest.raises(WebSocketDisconnect) as quiet_first:
+                first.receive_json()
+            assert quiet_first.value.code == CODE_TIMEOUT
+        assert time.monotonic() - started < 2
+        assert silent.get("AAAA") is None
+        assert silent.get("AAAB") is None
+        with client.websocket_connect("/api/live/publish?id=AAAC") as again:
+            assert again.receive_json() == {"type": "id", "id": "AAAC"}
+
+    cluster = cluster_known(0, b"wave")
+    head, _data = document([cluster])
+    stalled = LiveHub(init_timeout=2, idle_timeout=0.3)
+    with TestClient(create_app(live=stalled)) as client:
+        with client.websocket_connect("/api/live/publish?id=STOP") as publisher:
+            publisher.receive_json()
+            publisher.send_bytes(head + cluster)
+            with client.websocket_connect("/api/live/STOP") as listener:
+                assert listener.receive_json()["type"] == "start"
+                assert listener.receive_bytes() == head
+                assert listener.receive_bytes() == cluster
+                with pytest.raises(WebSocketDisconnect) as quiet:
+                    publisher.receive_json()
+                assert quiet.value.code == CODE_TIMEOUT
+                assert listener.receive_json() == {"type": "end"}
+        assert stalled.get("STOP") is None
+
+
+def test_mime_alone_does_not_postpone_the_init_deadline():
+    hub = LiveHub(init_timeout=0.3, idle_timeout=5)
+    with TestClient(create_app(live=hub)) as client:
+        started = time.monotonic()
+        with client.websocket_connect("/api/live/publish?id=MIME") as publisher:
+            publisher.receive_json()
+            publisher.send_json({"type": "mime", "mime": "audio/webm"})
+            with pytest.raises(WebSocketDisconnect) as quiet:
+                publisher.receive_json()
+            assert quiet.value.code == CODE_TIMEOUT
+        assert time.monotonic() - started < 2
+        assert hub.get("MIME") is None
+
+
+def test_rate_and_cluster_limits_close_with_their_own_reasons():
+    rate = LiveHub(max_bytes_per_second=1024)
+    with TestClient(create_app(live=rate)) as client:
+        with client.websocket_connect("/api/live/publish?id=RATE") as publisher:
+            publisher.receive_json()
+            publisher.send_bytes(b"x" * 2048)
+            with pytest.raises(WebSocketDisconnect) as too_fast:
+                publisher.receive_json()
+            assert too_fast.value.code == CODE_RATE
+        assert rate.get("RATE") is None
+
+    huge = LiveHub(max_cluster=64)
+    with TestClient(create_app(live=huge)) as client:
+        with client.websocket_connect("/api/live/publish?id=HUGE") as publisher:
+            publisher.receive_json()
+            with client.websocket_connect("/api/live/HUGE") as listener:
+                assert listener.receive_json()["type"] == "start"
+                publisher.send_bytes(b"x" * 128)
+                with pytest.raises(WebSocketDisconnect) as too_big:
+                    publisher.receive_json()
+                assert too_big.value.code == CODE_TOO_BIG
+                assert listener.receive_json() == {"type": "end"}
+        assert huge.get("HUGE") is None
+
+
+def test_a_listener_who_leaves_during_silence_is_dropped():
+    hub = LiveHub(max_listeners=1, init_timeout=5, idle_timeout=5)
+    with TestClient(create_app(live=hub)) as client:
+        with client.websocket_connect("/api/live/publish?id=QUIE") as publisher:
+            assert publisher.receive_json()["id"] == "QUIE"
+            with client.websocket_connect("/api/live/QUIE") as listener:
+                assert listener.receive_json()["type"] == "start"
+                stream = hub.get("QUIE")
+                assert stream is not None
+                assert len(stream.listeners) == 1
+            assert stream.listeners == set()
+            with client.websocket_connect("/api/live/QUIE") as again:
+                assert again.receive_json()["type"] == "start"
+                assert len(stream.listeners) == 1
+
+
+def test_publisher_disconnect_tells_the_listener_and_clears_the_stream():
+    cluster = cluster_known(0, b"wave")
+    head, _data = document([cluster])
+    hub = LiveHub()
+    with TestClient(create_app(live=hub)) as client:
+        with client.websocket_connect("/api/live/publish?id=HALF") as publisher:
+            publisher.receive_json()
+            with client.websocket_connect("/api/live/HALF") as listener:
+                assert listener.receive_json()["type"] == "start"
+                publisher.send_bytes(head + cluster)
+                assert listener.receive_bytes() == head
+                assert listener.receive_bytes() == cluster
+                stream = hub.get("HALF")
+                assert stream is not None
+                assert len(stream.listeners) == 1
+                publisher.close()
+                assert listener.receive_json() == {"type": "end"}
+                assert hub.get("HALF") is None
+                assert stream.listeners == set()
+                assert stream.closed
+        gone = client.get("/stream/HALF")
+        assert "この配信はありません" in gone.text
 
 
 def test_joined_tone_plays_from_the_current_moment_not_the_beginning():

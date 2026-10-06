@@ -6,7 +6,13 @@ Cluster. A listener who arrives later is given that pair and then only Clusters
 that complete after they join, so playback starts at the current moment.
 
 A listener that falls behind drops older queued Clusters. A listener whose
-socket does not accept a send within the timeout is disconnected.
+socket does not accept a send within the timeout is disconnected. The listener
+socket is also read, so a listener who leaves while the publisher is quiet is
+removed immediately.
+
+A publisher that does not produce an initialization segment, or that stops
+sending, is closed and its slot is released. Byte rate and Cluster size are
+capped the same way.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ import logging
 import secrets
 import string
 import threading
+import time
 from collections import deque
 from html import escape
 
@@ -27,7 +34,7 @@ from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 from djtube.assets import DOCUMENT_CACHE, asset_version, stamp_document
 from djtube.paths import PUBLIC_PREFIX, STREAM_PATH
-from djtube.webm import WebmError, WebmSplitter
+from djtube.webm import DEFAULT_MAX_BUFFER, WebmError, WebmSplitter, WebmTooBig
 
 log = logging.getLogger(__name__)
 _LOG_HANDLER = "djtube-live"
@@ -37,17 +44,23 @@ STREAM_ALPHABET = string.ascii_uppercase
 DEFAULT_MIME = "audio/webm;codecs=opus"
 MAX_FRAME = 1024 * 1024
 MAX_TEXT = 1024
-MAX_STREAMS = 64
+MAX_STREAMS = 8
 MAX_LISTENERS = 200
+MAX_CLUSTER = DEFAULT_MAX_BUFFER
+MAX_BYTES_PER_SECOND = 64 * 1024
 LISTENER_QUEUE = 8
 SEND_TIMEOUT = 2.0
+INIT_TIMEOUT = 10.0
+IDLE_TIMEOUT = 30.0
 
 # Close codes in the private-use range, plus the registered ones we mean.
 CODE_BAD_ID = 4400
 CODE_ABSENT = 4404
+CODE_TIMEOUT = 4408
 CODE_TAKEN = 4409
 CODE_FULL = 4429
 CODE_BAD_MEDIA = 1003
+CODE_RATE = 1008
 CODE_TOO_BIG = 1009
 CODE_SLOW = 1013
 CODE_OK = 1000
@@ -154,8 +167,27 @@ class _Listener:
             return
 
 
+class _Meter:
+    """One-second burst, then a steady byte rate. Over the cap, the publisher is closed."""
+
+    def __init__(self, per_second: int) -> None:
+        self.per_second = per_second
+        self.tokens = float(per_second)
+        self.at = time.monotonic()
+
+    def take(self, amount: int) -> bool:
+        now = time.monotonic()
+        elapsed = now - self.at
+        self.at = now
+        self.tokens = min(float(self.per_second), self.tokens + elapsed * self.per_second)
+        if amount > self.tokens:
+            return False
+        self.tokens -= amount
+        return True
+
+
 class _Stream:
-    def __init__(self, stream_id: str) -> None:
+    def __init__(self, stream_id: str, max_cluster: int, bytes_per_second: int) -> None:
         self.id = stream_id
         self.mime = DEFAULT_MIME
         self.mime_locked = False
@@ -163,7 +195,8 @@ class _Stream:
         self.latest: bytes | None = None
         self.closed = False
         self.listeners: set[_Listener] = set()
-        self.splitter = WebmSplitter()
+        self.splitter = WebmSplitter(max_cluster)
+        self.meter = _Meter(bytes_per_second)
 
 
 class LiveHub:
@@ -175,12 +208,20 @@ class LiveHub:
         max_streams: int = MAX_STREAMS,
         max_listeners: int = MAX_LISTENERS,
         max_frame: int = MAX_FRAME,
+        max_cluster: int = MAX_CLUSTER,
+        max_bytes_per_second: int = MAX_BYTES_PER_SECOND,
+        init_timeout: float = INIT_TIMEOUT,
+        idle_timeout: float = IDLE_TIMEOUT,
     ) -> None:
         self.send_timeout = send_timeout
         self.listener_queue = listener_queue
         self.max_streams = max_streams
         self.max_listeners = max_listeners
         self.max_frame = max_frame
+        self.max_cluster = max_cluster
+        self.max_bytes_per_second = max_bytes_per_second
+        self.init_timeout = init_timeout
+        self.idle_timeout = idle_timeout
         self._lock = threading.Lock()
         self._streams: dict[str, _Stream] = {}
 
@@ -260,22 +301,46 @@ class LiveHub:
                 stream.listeners.discard(listener)
 
     async def _pump(self, listener: _Listener, websocket: WebSocket) -> None:
+        incoming = asyncio.create_task(self._until_disconnect(websocket))
         sent_init = False
-        while True:
-            item = await listener.get()
-            if item is None:
-                return
-            kind, payload = item
-            if kind == "end":
-                await _tell(websocket, {"type": "end"}, CODE_OK)
-                return
-            if kind == "init":
+        try:
+            while True:
+                item_task = asyncio.create_task(listener.get())
+                done, _pending = await asyncio.wait(
+                    {item_task, incoming},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if incoming in done:
+                    item_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await item_task
+                    incoming.result()
+                    return
+                item = item_task.result()
+                if item is None:
+                    return
+                kind, payload = item
+                if kind == "end":
+                    await _tell(websocket, {"type": "end"}, CODE_OK)
+                    return
+                if kind == "init":
+                    await self._send_bytes(websocket, payload)
+                    sent_init = True
+                    continue
+                if not sent_init:
+                    continue
                 await self._send_bytes(websocket, payload)
-                sent_init = True
-                continue
-            if not sent_init:
-                continue
-            await self._send_bytes(websocket, payload)
+        finally:
+            if not incoming.done():
+                incoming.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await incoming
+
+    async def _until_disconnect(self, websocket: WebSocket) -> None:
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                return
 
     async def _send_bytes(self, websocket: WebSocket, payload: bytes) -> None:
         try:
@@ -285,8 +350,21 @@ class LiveHub:
             raise WebSocketDisconnect(code=CODE_SLOW) from None
 
     async def _consume(self, websocket: WebSocket, stream: _Stream) -> None:
+        opened = time.monotonic()
+        last = opened
         while True:
-            message = await websocket.receive()
+            now = time.monotonic()
+            if stream.init is None:
+                remaining = self.init_timeout - (now - opened)
+            else:
+                remaining = self.idle_timeout - (now - last)
+            if remaining <= 0:
+                raise LiveClose(CODE_TIMEOUT)
+            try:
+                message = await asyncio.wait_for(websocket.receive(), remaining)
+            except TimeoutError:
+                raise LiveClose(CODE_TIMEOUT) from None
+            last = time.monotonic()
             if message["type"] == "websocket.disconnect":
                 return
             text = message.get("text")
@@ -320,8 +398,12 @@ class LiveHub:
     def _on_bytes(self, stream: _Stream, data: bytes) -> None:
         if len(data) > self.max_frame:
             raise LiveClose(CODE_TOO_BIG)
+        if not stream.meter.take(len(data)):
+            raise LiveClose(CODE_RATE)
         try:
             clusters = stream.splitter.feed(data)
+        except WebmTooBig as exc:
+            raise LiveClose(CODE_TOO_BIG) from exc
         except WebmError as exc:
             raise LiveClose(CODE_BAD_MEDIA) from exc
         with self._lock:
@@ -365,7 +447,7 @@ class LiveHub:
                 if len(self._streams) >= self.max_streams:
                     raise LiveClose(CODE_FULL)
                 stream_id = self._fresh_id()
-            stream = _Stream(stream_id)
+            stream = _Stream(stream_id, self.max_cluster, self.max_bytes_per_second)
             self._streams[stream_id] = stream
             return stream
 

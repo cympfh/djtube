@@ -4,7 +4,7 @@ import shutil
 
 import pytest
 
-from djtube.webm import WebmError, WebmSplitter, cluster_timecode, split_webm
+from djtube.webm import WebmError, WebmSplitter, WebmTooBig, cluster_timecode, split_webm
 
 UNKNOWN = b"\x01" + b"\xff" * 7
 
@@ -92,6 +92,16 @@ def test_truncated_known_cluster_is_dropped_on_finish():
     splitter = WebmSplitter()
     assert splitter.feed(partial) == []
     assert splitter.finish() == []
+
+
+def test_an_open_chunk_over_the_buffer_is_too_big():
+    splitter = WebmSplitter(max_buffer=32)
+    with pytest.raises(WebmTooBig):
+        splitter.feed(b"\x1a\x45\xdf\xa3" + b"\x00" * 64)
+    again = WebmSplitter(max_buffer=32)
+    again.feed(b"\x1a\x45\xdf\xa3")
+    with pytest.raises(WebmTooBig):
+        again.feed(b"\x00" * 40)
 
 
 def test_garbage_is_rejected():

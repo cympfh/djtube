@@ -34,11 +34,15 @@ CLUSTER_CHILDREN = frozenset(
 )
 
 # One open Cluster plus a little header. A live relay must not keep the show.
-DEFAULT_MAX_BUFFER = 2 * 1024 * 1024
+DEFAULT_MAX_BUFFER = 256 * 1024
 
 
 class WebmError(Exception):
     pass
+
+
+class WebmTooBig(WebmError):
+    """The open Cluster, or the bytes still being assembled, passed the buffer cap."""
 
 
 def _width(first: int) -> int:
@@ -124,7 +128,7 @@ class WebmSplitter:
         if not data:
             return []
         if len(self._buf) + len(data) > self.max_buffer:
-            raise WebmError("大きすぎる塊です")
+            raise WebmTooBig("大きすぎる塊です")
         self._buf.extend(data)
         return self._pull(final=False)
 
@@ -158,7 +162,7 @@ class WebmSplitter:
             self._pos = len(self._buf)
         self._compact()
         if len(self._buf) > self.max_buffer:
-            raise WebmError("大きすぎる塊です")
+            raise WebmTooBig("大きすぎる塊です")
         return emitted
 
     def _outside(self, element_id: int, header_end: int, size: int | None) -> tuple[list[bytes], bool]:
