@@ -30,13 +30,17 @@ export const LIVE_TAKEN = "この配信 ID は他の人が使っています。�
 export const LIVE_BUFFER_LIMIT = 1024 * 1024;
 export const LIVE_OUTPUT_STALLED = "音声出力が動いていません（出力デバイスを確認）";
 // A 4408 names the output device only when rendering looks stopped.
-// MediaRecorder fires dataavailable about every 200 ms while currentTime
-// advances, so 5 s since the last blob, or no blob at all, means the device
-// stalled. A network choke still produces blobs, so that does not match.
+// MediaRecorder fires dataavailable about every LIVE_TIMESLICE_MS (200 ms)
+// while currentTime advances. The 5 s threshold assumes that slice and must
+// stay well above it. A threshold near one slice would call a single quiet
+// tick a stalled device. Five seconds since the last non-empty blob, or no
+// such blob at all, means the device stalled. Empty blobs do not count. A
+// network choke still produces blobs, so that does not match.
 // Wall seconds since the recorder started, minus seconds currentTime
-// advanced, counts only during the first 20 s. That covers an init 4408
-// from a frozen device or a start at 9.9 s. An early gap does not stick
-// after that window. The page does not stop itself from this.
+// advanced, counts through the first 20 s, including the 20 s mark. That
+// covers an init 4408 from a frozen device, a start at 9.9 s, and a proxied
+// init close around 12–15 s. An early gap does not stick after that window.
+// The page does not stop itself from this.
 export const LIVE_OUTPUT_GAP_S = 5;
 export const LIVE_OUTPUT_START_WINDOW_S = 20;
 
@@ -629,9 +633,9 @@ export function createLiveControl(options) {
     }
     mine.recorder = recorder;
     recorder.ondataavailable = (event) => {
-      mine.lastBlobWall = now();
       const blob = event?.data;
       if (!blob || !blob.size || mine.ended) return;
+      mine.lastBlobWall = now();
       Promise.resolve(blob.arrayBuffer())
         .then((data) => {
           if (mine.ended || mine.socket?.readyState !== SOCKET_OPEN) return;

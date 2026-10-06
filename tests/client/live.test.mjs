@@ -900,6 +900,43 @@ test("a blob 5 seconds ago names the output device", async () => {
   assert.equal(harness.ui.painted().live, LIVE_OUTPUT_STALLED);
 });
 
+test("an empty blob does not count as arrived output", async () => {
+  const { bus, harness, setWall, blob } = renderHarness();
+  await goLive(harness);
+  blob();
+  bus.context.currentTime = RENDER_TIME0 + 5;
+  setWall(RENDER_WALL0 + 5000);
+  harness.recorders[0].emit(new Blob([]));
+  harness.sockets[0].serverClose(4408);
+  await flush();
+  assert.equal(harness.ui.painted().title, LIVE_OUTPUT_STALLED);
+  assert.equal(harness.ui.painted().live, LIVE_OUTPUT_STALLED);
+});
+
+test("an init 4408 at 15 seconds still names the output device", async () => {
+  // A proxied init 4408 arrived at 12.0 s, so a 10 s window would miss it.
+  const { harness, setWall, blob } = renderHarness();
+  await goLive(harness);
+  setWall(RENDER_WALL0 + 15000);
+  blob();
+  stillLive(harness);
+  harness.sockets[0].serverClose(4408);
+  await flush();
+  assert.equal(harness.ui.painted().title, LIVE_OUTPUT_STALLED);
+  assert.equal(harness.ui.painted().live, LIVE_OUTPUT_STALLED);
+});
+
+test("a start gap at 20 seconds still names the output device", async () => {
+  const { harness, setWall, blob } = renderHarness();
+  await goLive(harness);
+  setWall(RENDER_WALL0 + 20000);
+  blob();
+  harness.sockets[0].serverClose(4408);
+  await flush();
+  assert.equal(harness.ui.painted().title, LIVE_OUTPUT_STALLED);
+  assert.equal(harness.ui.painted().live, LIVE_OUTPUT_STALLED);
+});
+
 test("a late start at 6 seconds then a network choke keeps the 4408 wording", async () => {
   const { bus, harness, setWall, blob } = renderHarness();
   await goLive(harness);
