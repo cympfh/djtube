@@ -226,6 +226,7 @@ export function createLiveControl(options) {
   let fromPointer = false;
   let ignoreFocus = false;
   let suppressClick = false;
+  let touchOpen = false;
   let pinnedId = "";
   let pinnedToken = "";
   let claimSeq = 0;
@@ -271,9 +272,25 @@ export function createLiveControl(options) {
   function paint(status) {
     applyLiveStatus(button, live, status, menu?.head);
     if (status?.state !== "live") {
+      clearHold();
       clearMenuResult();
       cancelClose();
       setMenuOpen(false);
+      return;
+    }
+    if (menuIsHovered()) {
+      cancelClose();
+      setMenuOpen(true);
+    }
+  }
+
+  function menuIsHovered() {
+    const anchor = menu?.anchor;
+    if (!anchor || typeof anchor.matches !== "function") return false;
+    try {
+      return anchor.matches(":hover") === true;
+    } catch {
+      return false;
     }
   }
 
@@ -294,6 +311,7 @@ export function createLiveControl(options) {
       if (anchor.dataset.menu !== "open") anchor.dataset.menu = "open";
       return;
     }
+    touchOpen = false;
     if (anchor.dataset.menu) delete anchor.dataset.menu;
   }
 
@@ -321,7 +339,12 @@ export function createLiveControl(options) {
     if (menu.result.dataset) menu.result.dataset.result = kind;
     noteTimer = schedule(() => {
       noteTimer = 0;
+      const closeTouch = touchOpen;
       clearMenuResult();
+      if (closeTouch) {
+        cancelClose();
+        setMenuOpen(false);
+      }
     }, LIVE_MENU_NOTE_MS);
   }
 
@@ -601,13 +624,19 @@ export function createLiveControl(options) {
     };
     menu.audio.addEventListener("click", copyClick("audio"));
     menu.video.addEventListener("click", copyClick("video"));
+    const pointerOpens = (event) => event?.pointerType !== "touch" && button.dataset.live === "on";
     menu.anchor.addEventListener("pointerenter", (event) => {
-      if (event?.pointerType === "touch" || button.dataset.live !== "on") return;
+      if (!pointerOpens(event)) return;
       cancelClose();
       setMenuOpen(true);
     });
-    menu.anchor.addEventListener("pointerleave", () => {
-      if (button.dataset.live !== "on") return;
+    menu.anchor.addEventListener("pointermove", (event) => {
+      if (!pointerOpens(event)) return;
+      cancelClose();
+      setMenuOpen(true);
+    });
+    menu.anchor.addEventListener("pointerleave", (event) => {
+      if (event?.pointerType === "touch" || button.dataset.live !== "on") return;
       scheduleClose();
     });
     menu.anchor.addEventListener("focusin", () => {
@@ -658,27 +687,35 @@ export function createLiveControl(options) {
     return start();
   }
 
+  function clearHold() {
+    if (!holdTimer) return;
+    clearSchedule(holdTimer);
+    holdTimer = 0;
+  }
   button.addEventListener("pointerdown", () => {
+    suppressClick = false;
     fromPointer = true;
     schedule(() => {
       fromPointer = false;
     }, 0);
     if (button.dataset.live !== "on") return;
-    if (holdTimer) clearSchedule(holdTimer);
+    clearHold();
     holdTimer = schedule(() => {
       holdTimer = 0;
       suppressClick = true;
+      touchOpen = true;
       cancelClose();
       setMenuOpen(true);
     }, LIVE_MENU_HOLD_MS);
   });
-  const endHold = () => {
-    if (!holdTimer) return;
-    clearSchedule(holdTimer);
-    holdTimer = 0;
-  };
-  button.addEventListener("pointerup", endHold);
-  button.addEventListener("pointercancel", endHold);
+  button.addEventListener("pointerup", clearHold);
+  button.addEventListener("pointercancel", () => {
+    clearHold();
+    suppressClick = false;
+  });
+  button.addEventListener("contextmenu", (event) => {
+    event?.preventDefault?.();
+  });
   button.addEventListener("click", (event) => {
     if (suppressClick) {
       suppressClick = false;

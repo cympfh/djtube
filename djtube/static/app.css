@@ -131,6 +131,11 @@ button:hover { border-color: #5c564b; }
   color: var(--muted);
 }
 
+.live-button {
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+
 .midi-button svg,
 .live-button svg {
   width: 22px;
