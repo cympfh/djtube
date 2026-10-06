@@ -2,7 +2,7 @@ services:
   djtube:
     build: .
     ports:
-      - "8098:8098"
+      - "127.0.0.1:8098:8098"
     environment:
       YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
       DJTUBE_PLAYLISTS: /app/data/playlists.json
