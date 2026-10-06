@@ -699,16 +699,17 @@ def test_timeout_logs_name_the_init_and_idle_clocks(caplog):
         live_module.log.propagate = False
 
 
-def test_a_missing_claim_closes_inside_the_remaining_init_budget(caplog):
+def test_a_missing_claim_closes_on_the_claim_timeout(caplog):
     import djtube.live as live_module
 
     live_module._configure_log()
     live_module.log.propagate = True
     caplog.set_level(logging.INFO, logger="djtube.live")
     try:
-        # No first text. The close is the init budget left since accept:
-        # not immediate, not the idle clock, and not a second full wait.
-        hub = LiveHub(init_timeout=0.4, idle_timeout=5)
+        # No first text. The wait is claim_timeout from accept. init_timeout
+        # stays long so a mutant that uses the remaining init budget waits
+        # about five seconds and fails the upper bound.
+        hub = LiveHub(init_timeout=5, idle_timeout=5, claim_timeout=0.4)
         with TestClient(create_app(live=hub)) as client:
             started = time.monotonic()
             with client.websocket_connect("/api/live/publish") as socket:
@@ -1866,8 +1867,13 @@ def test_a_read_only_directory_refuses_new_ids_and_still_reclaims(tmp_path):
             assert set(hub._seen) == {"MINE"}
             with _ws(client, _with_token("MINE", token)) as socket:
                 assert socket.receive_json()["token"] == token
+            # That reclaim could not write either, so health stays store.
+            assert client.get("/api/health").json()["live"] == "store"
         finally:
             os.chmod(folder, 0o755)
+        with _ws(client, _with_token("MINE", token)) as socket:
+            assert socket.receive_json()["token"] == token
+            assert client.get("/api/health").json()["live"] == "on"
 
 
 def test_a_short_os_write_still_leaves_a_complete_file(tmp_path, monkeypatch):
@@ -2184,6 +2190,106 @@ def test_live_tone_claim_sends_seq():
     assert again["token"] == "secret"
 
 
+class _ToneSocket:
+    def __init__(self, hello: dict) -> None:
+        self.sent: list[object] = []
+        self._hello = json.dumps(hello)
+        self._once = False
+
+    async def send(self, data: object) -> None:
+        self.sent.append(data)
+
+    async def recv(self) -> str:
+        if self._once:
+            raise RuntimeError("extra recv")
+        self._once = True
+        return self._hello
+
+    async def __aenter__(self) -> "_ToneSocket":
+        return self
+
+    async def __aexit__(self, *_args: object) -> bool:
+        return False
+
+
+def _run_tone(monkeypatch, argv: list[str], hello: dict | None = None) -> tuple[int, _ToneSocket]:
+    import websockets
+
+    from djtube import live_tone
+
+    socket = _ToneSocket(hello or {"id": "ABCD", "token": "hello-token"})
+
+    async def connect(_url: str, **_kwargs: object) -> _ToneSocket:
+        return socket
+
+    monkeypatch.setattr(live_tone, "render_webm", lambda *_args, **_kwargs: b"\x1a\x45\xdf\xa3tone")
+    monkeypatch.setattr(live_tone, "split_webm", lambda _data: (b"init", [b"cl"]))
+    monkeypatch.setattr(websockets, "connect", connect)
+    return live_tone.main(argv), socket
+
+
+def test_live_tone_main_sends_the_cli_token_and_prints_the_hello_token(monkeypatch, capsys):
+    code, socket = _run_tone(
+        monkeypatch,
+        ["--id", "ABCD", "--token", "cli-token", "--no-pace", "--seconds", "1"],
+    )
+    assert code == 0
+    claim = json.loads(socket.sent[0])
+    assert claim["id"] == "ABCD"
+    assert claim["token"] == "cli-token"
+    assert claim["type"] == "mime"
+    printed = capsys.readouterr().out
+    assert "token: hello-token" in printed
+    assert "cli-token" not in printed
+
+
+def test_live_tone_main_refuses_an_id_without_a_token(monkeypatch, capsys):
+    from djtube import live_tone
+
+    rendered = {"n": 0}
+
+    def render(*_args, **_kwargs):
+        rendered["n"] += 1
+        return b"webm"
+
+    monkeypatch.setattr(live_tone, "render_webm", render)
+    assert live_tone.main(["--id", "ABCD", "--seconds", "1"]) == 2
+    assert rendered["n"] == 0
+    assert "トークン" in capsys.readouterr().err
+
+
+def test_live_tone_main_sends_now_after_hello(monkeypatch):
+    code, socket = _run_tone(
+        monkeypatch,
+        ["--no-pace", "--seconds", "1", "--now", "abcdefghijk:0.5"],
+    )
+    assert code == 0
+    claim = json.loads(socket.sent[0])
+    assert "id" not in claim
+    now = json.loads(socket.sent[1])
+    assert now == {"type": "now", "decks": [{"video": "abcdefghijk", "gain": 0.5}]}
+    assert isinstance(socket.sent[2], bytes)
+
+
+def test_live_tone_close_codes_name_the_reason():
+    from djtube.live_tone import _connect_error
+
+    class _Frame:
+        def __init__(self, code: int) -> None:
+            self.code = code
+
+    class _Exc(Exception):
+        def __init__(self, code: int) -> None:
+            self.rcvd = _Frame(code)
+
+    assert str(_connect_error(_Exc(4410))) == "配信が切れました"
+    assert str(_connect_error(_Exc(4429))) == "配信の上限に達しました"
+    assert str(_connect_error(_Exc(4430))) == "配信の記録を保存できませんでした"
+    assert str(_connect_error(_Exc(4431))) == "配信の記録を読めませんでした"
+    assert str(_connect_error(_Exc(4409))) == "その ID は使われています"
+    assert str(_connect_error(_Exc(4400))) == "ID の形式が違います"
+
+
 def _unreadable_log(path: Path) -> list[str]:
     records: list[str] = []
 
@@ -2410,6 +2516,31 @@ def test_the_seen_file_stores_wall_time(tmp_path):
     assert hub._seen[body["id"]].mono == 10.0
 
 
+def test_a_wall_step_after_boot_is_what_the_file_stores(tmp_path):
+    """A frozen boot wall would store 1010. The file follows the wall clock at the write."""
+
+    path = tmp_path / "fresh.json"
+    wall = [1_000.0]
+    mono = [0.0]
+    hub = LiveHub(
+        seen_path=path,
+        clock=lambda: wall[0],
+        mono=lambda: mono[0],
+        init_timeout=5,
+        idle_timeout=5,
+    )
+    with TestClient(create_app(live=hub)) as client:
+        with client.websocket_connect("/api/live/publish") as socket:
+            socket.send_json({"type": "mime", "mime": DEFAULT_MIME})
+            body = socket.receive_json()
+            mono[0] = 10.0
+            wall[0] = 6_000.0
+    hub.flush()
+    stored = json.loads(path.read_text(encoding="utf-8"))["records"][body["id"]]["at"]
+    assert stored == pytest.approx(6_000.0)
+    assert hub._seen[body["id"]].mono == 10.0
+
+
 def test_expiring_many_issued_prefixes_is_bounded():
     from collections import OrderedDict
 
@@ -2524,6 +2655,29 @@ def test_a_symlink_seen_path_is_left_in_place(tmp_path):
     assert target.read_text(encoding="utf-8") == "keep"
 
 
+def test_a_symlink_to_a_valid_seen_file_is_refused(tmp_path):
+    """O_NOFOLLOW. Following the link would load KEEP from a regular file."""
+
+    target = tmp_path / "real.json"
+    digest = "ab" * 32
+    body = json.dumps({"records": {"KEEP": {"at": 70.0, "token": digest}}})
+    target.write_text(body, encoding="utf-8")
+    path = tmp_path / "live-seen.json"
+    path.symlink_to(target)
+    records = _unreadable_log(path)
+    assert path.is_symlink()
+    assert target.read_text(encoding="utf-8") == body
+    assert str(path) in "\n".join(records)
+    with TestClient(create_app()) as client:
+        assert client.get("/api/health").json()["live"] == "unreadable"
+        with pytest.raises(WebSocketDisconnect) as off:
+            with client.websocket_connect("/api/live/publish") as socket:
+                socket.receive_json()
+        assert off.value.code == CODE_UNREADABLE
+    assert path.is_symlink()
+    assert target.read_text(encoding="utf-8") == body
+
+
 def _many_ids(count: int) -> list[str]:
     ids: list[str] = []
     number = 0
@@ -2607,7 +2761,8 @@ def test_load_reclaim_and_end_keep_wall_time_and_monotonic_time_apart(tmp_path):
     stamped.flush()
     stored = json.loads(fresh.read_text(encoding="utf-8"))["records"][body["id"]]["at"]
     assert stamped._seen[body["id"]].mono == 40.0
-    assert stored == pytest.approx(wall0 + 40.0)
+    # The write uses the wall clock at that moment, minus a zero monotonic age.
+    assert stored == pytest.approx(wall0 + 99_999)
 
 
 def test_an_in_date_head_is_put_back_at_the_head():
@@ -2680,12 +2835,15 @@ def test_a_reclaim_moves_the_record_past_an_older_idle_one():
     with TestClient(create_app(live=hub)) as client:
         with _ws(client, _with_token("HEAD", token), seq=2) as socket:
             assert socket.receive_json()["id"] == "HEAD"
-    assert hub._seen["HEAD"].mono == 10.0
-    assert list(hub._seen) == ["BACK", "HEAD"]
-    mono[0] = 109.0
-    hub._expire_locked()
-    assert "BACK" not in hub._seen
-    assert "HEAD" in hub._seen
+            # _end also moves the id. The order has to be read while this
+            # socket is still the stream, or a missing reclaim move_to_end
+            # still passes after close.
+            assert hub._seen["HEAD"].mono == 10.0
+            assert list(hub._seen) == ["BACK", "HEAD"]
+            mono[0] = 109.0
+            hub._expire_locked()
+            assert "BACK" not in hub._seen
+            assert "HEAD" in hub._seen
 
 
 def test_an_expired_idle_id_past_the_batch_is_not_reclaimed():
@@ -2712,6 +2870,71 @@ def test_an_expired_idle_id_past_the_batch_is_not_reclaimed():
                 socket.receive_json()
         assert denied.value.code == CODE_TAKEN
     assert target not in hub._seen
+
+
+def test_a_now_before_init_is_kept_and_the_cluster_still_plays():
+    hub = LiveHub(init_timeout=2, idle_timeout=5)
+    cluster = cluster_known(0, b"wave")
+    head, _data = document([cluster])
+    video = "abcdefghijk"
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=PREN") as publisher:
+            publisher.receive_json()
+            publisher.send_json({"type": "now", "decks": [{"video": video, "gain": 0.5}]})
+            assert hub.get("PREN").decks == ((video, 0.5),)
+            publisher.send_bytes(head + cluster)
+            with _Audio(client, "/stream/PREN") as listener:
+                assert listener.read() == head
+                assert listener.read() == cluster
+            assert hub.get("PREN") is not None
+
+
+def test_a_non_finite_or_non_numeric_at_is_skipped(tmp_path):
+    path = tmp_path / "live-seen.json"
+    digest = "ab" * 32
+    path.write_text(
+        json.dumps(
+            {
+                "records": {
+                    "NANQ": {"at": float("nan"), "token": digest},
+                    "INFQ": {"at": float("inf"), "token": digest},
+                    "BOOL": {"at": True, "token": digest},
+                    "TEXT": {"at": "12", "token": digest},
+                    "GOOD": {"at": 70.0, "token": digest},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    hub = LiveHub(seen_path=path, clock=lambda: 70.0, init_timeout=5, idle_timeout=5)
+    assert list(hub._seen) == ["GOOD"]
+
+
+def test_a_record_aged_exactly_the_ttl_is_expired_and_not_reclaimed():
+    mono = [0.0]
+    token = "edge-token"
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    hub = LiveHub(
+        token_ttl=100,
+        clock=lambda: 1_800_000_000.0,
+        mono=lambda: mono[0],
+        init_timeout=5,
+        idle_timeout=5,
+    )
+    hub._seen["EDGE"] = _Seen(0.0, 1, digest, token, "who")
+    hub._seen["KEEP"] = _Seen(1.0, None, "cd" * 32, "", "who")
+    mono[0] = 100.0
+    hub._expire_locked()
+    assert "EDGE" not in hub._seen
+    assert "KEEP" in hub._seen
+
+    hub._seen["EDGE"] = _Seen(0.0, 1, digest, token, "who")
+    with TestClient(create_app(live=hub)) as client:
+        with pytest.raises(WebSocketDisconnect) as denied:
+            with _ws(client, _with_token("EDGE", token), seq=2) as socket:
+                socket.receive_json()
+        assert denied.value.code == CODE_TAKEN
+    assert "EDGE" not in hub._seen
 
 
 def test_a_live_stream_older_than_the_window_can_be_reclaimed():

@@ -218,6 +218,14 @@ def _connect_error(exc: Exception) -> ToneError:
     code = _close_code(exc)
     if code == 4409:
         return ToneError("その ID は使われています")
+    if code == 4410:
+        return ToneError("配信が切れました")
+    if code == 4429:
+        return ToneError("配信の上限に達しました")
+    if code == 4430:
+        return ToneError("配信の記録を保存できませんでした")
+    if code == 4431:
+        return ToneError("配信の記録を読めませんでした")
     if code == 4400:
         return ToneError("ID の形式が違います")
     if isinstance(exc, ToneError):

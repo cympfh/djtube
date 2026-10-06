@@ -708,13 +708,12 @@ class LiveHub:
         # Oldest at the head. A re-stamp moves the prefix to the tail.
         self._issued: OrderedDict[str, list[float]] = OrderedDict()
         # Memory expiry uses a clock that does not step backwards. The file's
-        # ``at`` is this process's wall clock at startup plus the monotonic
-        # elapsed time, so a restart still drops a record after about 12 hours.
-        # A test that passes only ``clock`` drives both. Production does not.
+        # ``at`` is the wall clock when the snapshot is written, minus the
+        # monotonic age of the record. An NTP step after a wrong clock at boot
+        # therefore lands in the file. A test that passes only ``clock`` drives
+        # both. Production does not.
         self._clock = clock or time.time
         self._mono = mono if mono is not None else (clock if clock is not None else time.monotonic)
-        self._wall_boot = self._clock()
-        self._mono_boot = self._mono()
         self._save_failed = False
         self._lock = threading.Lock()
         self._streams: dict[str, _Stream] = {}
@@ -767,15 +766,15 @@ class LiveHub:
         return self.availability
 
     def _wall_of(self, mono: float) -> float:
-        """Wall time to store. It moves with the monotonic clock, not with a step back."""
+        """Wall time to store. Age stays monotonic; the stamp follows the wall clock now."""
 
-        return self._wall_boot + (mono - self._mono_boot)
+        return self._clock() - (self._mono() - mono)
 
     def _mono_from_wall(self, at: float) -> float:
         """Last-use stamp for a loaded row. A future ``at`` cannot extend the 12 hours."""
 
         clamped = min(at, self._clock())
-        converted = self._mono_boot + (clamped - self._wall_boot)
+        converted = self._mono() - (self._clock() - clamped)
         return min(converted, self._mono())
 
     async def publish(self, websocket: WebSocket) -> None:
@@ -1518,9 +1517,13 @@ class LiveHub:
         for stream_id, item in records.items():
             if not isinstance(stream_id, str) or not is_stream_id(stream_id) or not isinstance(item, dict):
                 continue
-            try:
-                at = float(item["at"])
-            except (KeyError, TypeError, ValueError):
+            raw_at = item.get("at")
+            # bool is an int, and a numeric string is not a timestamp. NaN and
+            # infinity would look fresh or never expire.
+            if isinstance(raw_at, bool) or not isinstance(raw_at, (int, float)):
+                continue
+            at = float(raw_at)
+            if not math.isfinite(at):
                 continue
             # Age is the wall span, clamped so a future timestamp counts as now.
             if wall - min(at, wall) >= self.token_ttl:
