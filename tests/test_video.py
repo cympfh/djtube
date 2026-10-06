@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import array
 import asyncio
 import contextlib
-import gc
 import io
+import math
 import os
 import queue
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -991,24 +993,24 @@ def test_now_changes_pixels_of_a_frame_taken_from_the_encoded_ts(tmp_path: Path)
     assert bias[2] < even[2]
 
 
-def _ts_packet(pid: int, payload: bytes) -> bytes:
+def _ts_packet(pid: int, payload: bytes, cc: int = 0) -> bytes:
     raw = bytearray(188)
     raw[0] = 0x47
     raw[1] = 0x40 | ((pid >> 8) & 0x1F)
     raw[2] = pid & 0xFF
-    raw[3] = 0x10
+    raw[3] = 0x10 | (cc & 0x0F)
     raw[4 : 4 + len(payload)] = payload
     return bytes(raw)
 
 
-def _pat_packet(pmt_pid: int) -> bytes:
+def _pat_packet(pmt_pid: int, cc: int = 0) -> bytes:
     body = bytearray(b"\x00\x01\xc1\x00\x00")
     body += (1).to_bytes(2, "big")
     body.append(0xE0 | ((pmt_pid >> 8) & 0x1F))
     body.append(pmt_pid & 0xFF)
     body += b"\x00\x00\x00\x00"
     section = bytes([0x00, 0xB0 | ((len(body) >> 8) & 0x0F), len(body) & 0xFF]) + bytes(body)
-    return _ts_packet(0, bytes([0]) + section)
+    return _ts_packet(0, bytes([0]) + section, cc)
 
 
 def _psi_packet(pid: int, table_id: int) -> bytes:
@@ -1068,6 +1070,18 @@ def test_sync_buffer_prepends_pat_pmt_and_sdt():
     assert snap[188:376] == pmt
     assert snap[376:564] == sdt
     assert snap[564:752] == sps
+    # A table that arrives after the SPS has a higher continuity counter.
+    # Prepending that newer packet puts the counter in front of the older one.
+    later_pat = _pat_packet(0x100, cc=9)
+    later_pmt = _ts_packet(0x100, bytes([0, 0x02, 9]), cc=8)
+    later_sdt = _ts_packet(0x11, bytes([0, 0x42, 9]), cc=7)
+    buf.append(later_pat + later_pmt + later_sdt)
+    again = buf.snapshot()
+    assert again[:188] == pat
+    assert again[188:376] == pmt
+    assert again[376:564] == sdt
+    assert again[564:752] == sps
+    assert again.index(later_pat) > again.index(sps)
 
 
 def test_a_malformed_now_is_dropped_and_the_audio_stays_up():
@@ -1462,27 +1476,38 @@ def _drain_audio(relay: FfmpegRelay) -> list[bytes]:
             return found
 
 
-def test_a_new_cluster_at_a_freed_primer_address_is_queued():
+def test_feed_keeps_a_cluster_when_id_repeats(monkeypatch):
+    """P5: an id() check drops a new cluster that reuses a primer's address.
+
+    id() is patched so the decoy and the primer report the same value. Identity
+    (`is`) still tells them apart.
+    """
+
+    import builtins
+
     relay = FfmpegRelay("PRIM", lambda: (), ThumbCache(lambda _video: None), width=16, height=16)
-    size = 128
-    primers = [bytes([index]) + b"\x11" * (size - 1) for index in range(8)]
-    relay.prime(b"init", tuple(primers))
+    primer = b"P" * 48
+    decoy = b"D" * 48
+    real_id = builtins.id
+
+    def repeated(obj: object) -> int:
+        if obj is primer or obj is decoy:
+            return 1
+        return real_id(obj)
+
+    monkeypatch.setattr(builtins, "id", repeated)
+    relay.prime(b"init", (primer,))
     relay._started = True
     _drain_audio(relay)
-    stale = {id(item) for item in primers}
-    del primers
-    gc.collect()
-    collided = None
-    for step in range(100_000):
-        fresh = bytes([step & 0xFF, (step >> 8) & 0xFF, (step >> 16) & 0xFF]) + b"\x22" * (size - 3)
-        if id(fresh) in stale:
-            collided = fresh
-            break
-    if collided is None:
-        assert relay._primed, "primer objects were freed and their addresses were not reused"
-        collided = b"\xff" + b"\x22" * (size - 1)
-    relay.feed(collided)
-    assert any(item is collided for item in _drain_audio(relay))
+    relay.feed(decoy)
+    assert any(item is decoy for item in _drain_audio(relay))
+
+
+def test_prime_feeds_only_the_last_two_clusters():
+    relay = FfmpegRelay("PRIM", lambda: (), ThumbCache(lambda _video: None), width=16, height=16)
+    clusters = [bytes([index]) + b"\x11" * 31 for index in range(8)]
+    relay.prime(b"init", tuple(clusters))
+    assert _drain_audio(relay) == clusters[-2:]
 
 
 def test_the_primed_object_is_not_written_twice():
@@ -1716,3 +1741,488 @@ def test_popen_and_close_stay_off_the_event_loop(tmp_path: Path):
                 with pytest.raises(WebSocketDisconnect) as replaced:
                     old.receive_json()
                 assert replaced.value.code == CODE_REPLACED
+
+
+def _pull_for(video: _Audio, seconds: float) -> bytes:
+    """Read the live body for up to `seconds`, then return what arrived."""
+
+    async def pull() -> bytes:
+        parts: list[bytes] = []
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + seconds
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                message = await asyncio.wait_for(video._send_rx.receive(), remaining)
+            except TimeoutError:
+                break
+            if message.get("type") != "http.response.body" or not message.get("more_body", False):
+                break
+            body = message.get("body", b"")
+            if isinstance(body, bytes) and body:
+                parts.append(body)
+        return b"".join(parts)
+
+    return video._portal.call(pull)
+
+
+def _goertzel(samples: array.array, start: int, count: int, freq: float, rate: int = 48000) -> float:
+    k = int(0.5 + (count * freq) / rate)
+    coeff = 2 * math.cos(2 * math.pi * k / count)
+    first = 0.0
+    second = 0.0
+    for index in range(start, start + count):
+        current = samples[index] + coeff * first - second
+        second = first
+        first = current
+    return first * first + second * second - coeff * first * second
+
+
+def _tone_onset(samples: array.array, origin: float, freq: float = 880.0, other: float = 440.0) -> float:
+    count = 2048
+    hop = 960
+    hits = 0
+    for start in range(0, len(samples) - count, hop):
+        high = _goertzel(samples, start, count, freq)
+        low = _goertzel(samples, start, count, other)
+        if high > 1e-4 and high > low * 3:
+            hits += 1
+            if hits >= 2:
+                begun = max(0, start - hop)
+                return origin + begun / 48000
+        else:
+            hits = 0
+    raise AssertionError(f"no {freq:.0f} Hz marker in {len(samples)} samples")
+
+
+def _audio_marker_pts(path: Path) -> float:
+    probed = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "packet=pts_time",
+            "-of",
+            "csv=p=0",
+            str(path),
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert probed.returncode == 0, probed.stderr[-400:]
+    origin = None
+    for line in probed.stdout.splitlines():
+        text = line.strip().rstrip(",")
+        if text and text != "N/A":
+            origin = float(text)
+            break
+    assert origin is not None
+    decoded = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-map",
+            "0:a:0",
+            "-ac",
+            "1",
+            "-ar",
+            "48000",
+            "-f",
+            "f32le",
+            "pipe:1",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    assert decoded.returncode == 0, decoded.stderr[-400:]
+    assert sys.byteorder == "little"
+    samples: array.array = array.array("f")
+    samples.frombytes(decoded.stdout)
+    return _tone_onset(samples, origin)
+
+
+def _video_marker_pts(path: Path, width: int, height: int) -> float:
+    probed = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "frame=pts_time",
+            "-of",
+            "csv=p=0",
+            str(path),
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert probed.returncode == 0, probed.stderr[-400:]
+    pts: list[float] = []
+    for line in probed.stdout.splitlines():
+        text = line.strip().rstrip(",")
+        if text and text != "N/A":
+            pts.append(float(text))
+    decoded = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-map",
+            "0:v:0",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    assert decoded.returncode == 0, decoded.stderr[-400:]
+    frame = width * height * 3
+    cx = width // 2
+    cy = height // 2
+    for index, stamp in enumerate(pts):
+        offset = index * frame + (cy * width + cx) * 3
+        if offset + 3 > len(decoded.stdout):
+            break
+        red, green, blue = decoded.stdout[offset : offset + 3]
+        if red > 40 and red > blue + 30 and red > green + 30:
+            return stamp
+    raise AssertionError(f"no red frame in {len(pts)} frames / {len(decoded.stdout)} bytes")
+
+
+def test_a_marker_tone_stays_within_a_fifth_of_a_second_of_the_picture(tmp_path: Path, monkeypatch):
+    """The picture and an 880 Hz marker that start together stay within about 0.2 s.
+
+    Priming all eight recent clusters stamps the current sound about a second
+    late. Only the last two are fed, so video PTS minus audio PTS stays small.
+    The deck fade is off, and the frame rate is 25, so the grid is finer than
+    the allowance. The clocks themselves do not depend on that rate.
+    """
+
+    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+        pytest.skip("ffmpeg is required")
+    from djtube.live_tone import render_webm
+
+    original_init = Composer.__init__
+
+    def instant(self, size=(VIDEO_WIDTH, VIDEO_HEIGHT), fade: float = 0.0) -> None:
+        original_init(self, size, 0.0)
+
+    monkeypatch.setattr(Composer, "__init__", instant)
+    width, height = 64, 36
+    red = Image.new("RGB", (320, 180), (230, 20, 20))
+    hub = LiveHub(
+        video_size=(width, height),
+        video_fps=25,
+        video_linger=0.2,
+        audio_queue_max=400,
+        video_listener_queue=500,
+        thumbs=ThumbCache(lambda video_id: red if video_id == VIDEO else None),
+    )
+    init, clusters = split_webm(render_webm([(440, 2.4), (880, 2.0)]))
+    switch_ms = 2400
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=AVSY") as publisher:
+            publisher.receive_json()
+            publisher.send_json({"type": "mime", "mime": "audio/webm"})
+            publisher.send_bytes(init + b"".join(clusters[:9]))
+            stream = hub.get("AVSY")
+            assert stream is not None and len(stream.recent) >= 2
+            now_tc = cluster_timecode(stream.recent[-1])
+            assert now_tc is not None
+            rest = [item for item in clusters if (cluster_timecode(item) or 0) > now_tc]
+            assert rest
+            with _Audio(client, "/stream/AVSY", query="thumbnail=1") as video:
+                assert video.status_code == 200
+                started = time.monotonic()
+                for cluster in rest:
+                    tc = cluster_timecode(cluster)
+                    assert tc is not None
+                    delay = (tc - now_tc) / 1000 - (time.monotonic() - started)
+                    if delay > 0:
+                        time.sleep(delay)
+                    if tc >= switch_ms - 200 and tc < switch_ms:
+                        publisher.send_json(_now())
+                    publisher.send_bytes(cluster)
+                time.sleep(0.4)
+                blob = _pull_for(video, 2.5)
+    path = tmp_path / "marker.ts"
+    path.write_bytes(blob)
+    assert blob.startswith(b"\x47")
+    video_pts = _video_marker_pts(path, width, height)
+    audio_pts = _audio_marker_pts(path)
+    delta = video_pts - audio_pts
+    print(f"A/V offset video-audio={delta:.3f}s video={video_pts:.3f} audio={audio_pts:.3f}")
+    assert abs(delta) <= 0.2, f"video-audio={delta:.3f}s video={video_pts:.3f} audio={audio_pts:.3f}"
+
+
+def _continuity_failures(stderr: str) -> list[str]:
+    return [line for line in stderr.splitlines() if "Continuity check failed" in line]
+
+
+def test_a_mid_stream_join_keeps_continuity_on_pat_pmt_and_sdt(tmp_path: Path):
+    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+        pytest.skip("ffmpeg is required")
+    from djtube.live_tone import render_webm
+
+    hub = LiveHub(
+        video_size=(64, 36),
+        video_fps=5,
+        video_linger=0.2,
+        audio_queue_max=400,
+        video_listener_queue=500,
+        thumbs=ThumbCache(lambda _video: None),
+    )
+    webm = render_webm([(440, 6.0)])
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=JOIN") as publisher:
+            publisher.receive_json()
+            publisher.send_json({"type": "mime", "mime": "audio/webm"})
+            with _Audio(client, "/stream/JOIN", query="thumbnail=1") as first:
+                assert first.status_code == 200
+                publisher.send_bytes(webm)
+                _pull_for(first, 2.5)
+                with _Audio(
+                    client, "/stream/JOIN", query="thumbnail=1", headers={"x-real-ip": "198.51.100.77"}
+                ) as second:
+                    assert second.status_code == 200
+                    blob = _pull_for(second, 1.2)
+    path = tmp_path / "join.ts"
+    path.write_bytes(blob)
+    assert blob.startswith(b"\x47") and len(blob) > 188 * 20
+    pids = _ts_pids(blob)
+    assert {0, 4096, 17} <= pids
+    checked = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(path), "-f", "null", "-"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    failed = _continuity_failures(checked.stderr)
+    print(f"continuity failures={len(failed)} pids={sorted(pids)}")
+    assert failed == [], failed
+    assert checked.returncode == 0, checked.stderr[-400:]
+
+
+def _ts_pids(blob: bytes) -> set[int]:
+    found: set[int] = set()
+    index = blob.find(b"\x47")
+    if index < 0:
+        return found
+    while index + 188 <= len(blob):
+        if blob[index] != 0x47:
+            index += 1
+            continue
+        found.add(((blob[index + 1] & 0x1F) << 8) | blob[index + 2])
+        index += 188
+    return found
+
+
+def test_the_global_cap_is_rechecked_after_a_handover(tmp_path: Path, monkeypatch):
+    """H6: a slot taken while the linger is stopping still refuses the new stream."""
+
+    script = _write_script(tmp_path, _CONTINUOUS_FFMPEG)
+    hub = _hub(
+        tmp_path,
+        ffmpeg=script,
+        max_video_encoders=1,
+        max_video_per_ip=1,
+        video_linger=30,
+        output_stall=30,
+    )
+    held = {"x-real-ip": "198.51.100.81"}
+    original = FfmpegRelay.take_abandoned
+    planted: dict[str, object] = {}
+
+    def take(self, *args, **kwargs):
+        bundle = original(self, *args, **kwargs)
+        # stop_handover already holds the hub lock. hub.get would lock it again.
+        other = planted.get("stream")
+        if bundle is not None and other is not None:
+            other.video_hold = True
+        return bundle
+
+    monkeypatch.setattr(FfmpegRelay, "take_abandoned", take)
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=CAPA", headers={"x-real-ip": "192.0.2.81"}) as first:
+            _publish_ready(first)
+            with _ws(client, "/api/live/publish?id=CAPB", headers={"x-real-ip": "192.0.2.82"}) as second:
+                _publish_ready(second)
+                with _ws(client, "/api/live/publish?id=CAPH", headers={"x-real-ip": "192.0.2.83"}) as third:
+                    _publish_ready(third)
+                    planted["stream"] = hub.get("CAPH")
+                    with _Audio(client, "/stream/CAPA", query="thumbnail=1", headers=held) as video:
+                        assert video.read()[:1] == b"\x47"
+                    lingering = hub.get("CAPA").relay
+                    assert lingering.occupies()
+                    with _deadline(5):
+                        denied = client.get("/stream/CAPB?thumbnail=1", headers=held)
+                    assert denied.status_code == 429
+                    assert lingering.occupies() is False
+                    assert hub.get("CAPH").video_hold is True
+
+
+def test_the_per_ip_cap_is_rechecked_after_a_handover(tmp_path: Path, monkeypatch):
+    """H6b: the global cap has room, but this address took another encoder during the stop."""
+
+    script = _write_script(tmp_path, _CONTINUOUS_FFMPEG)
+    hub = _hub(
+        tmp_path,
+        ffmpeg=script,
+        max_video_encoders=3,
+        max_video_per_ip=1,
+        video_linger=30,
+        output_stall=30,
+    )
+    held = {"x-real-ip": "198.51.100.84"}
+    original = FfmpegRelay.take_abandoned
+    planted: dict[str, object] = {}
+
+    def take(self, *args, **kwargs):
+        bundle = original(self, *args, **kwargs)
+        other = planted.get("stream")
+        if bundle is not None and other is not None and not other.video_listeners:
+            other.video_hold = True
+
+            class _Held:
+                address = held["x-real-ip"]
+
+                def offer_end(self) -> None:
+                    return
+
+                def mark_closed(self) -> None:
+                    return
+
+            other.video_listeners.add(_Held())
+        return bundle
+
+    monkeypatch.setattr(FfmpegRelay, "take_abandoned", take)
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=IPBA", headers={"x-real-ip": "192.0.2.84"}) as first:
+            _publish_ready(first)
+            with _ws(client, "/api/live/publish?id=IPBB", headers={"x-real-ip": "192.0.2.85"}) as second:
+                _publish_ready(second)
+                with _ws(client, "/api/live/publish?id=IPBH", headers={"x-real-ip": "192.0.2.86"}) as third:
+                    _publish_ready(third)
+                    planted["stream"] = hub.get("IPBH")
+                    with _Audio(client, "/stream/IPBA", query="thumbnail=1", headers=held) as video:
+                        assert video.read()[:1] == b"\x47"
+                    with _deadline(5):
+                        denied = client.get("/stream/IPBB?thumbnail=1", headers=held)
+                    assert denied.status_code == 429
+                    assert hub.get("IPBA").relay.occupies() is False
+
+
+def test_rejoining_during_linger_does_not_count_as_a_new_encoder(tmp_path: Path):
+    """H7: the linger already fills the only slot. The same address comes back anyway."""
+
+    script = _write_script(tmp_path, _CONTINUOUS_FFMPEG)
+    hub = _hub(
+        tmp_path,
+        ffmpeg=script,
+        max_video_encoders=1,
+        max_video_per_ip=1,
+        video_linger=30,
+        output_stall=30,
+    )
+    starter = {"x-real-ip": "198.51.100.87"}
+    other = {"x-real-ip": "198.51.100.88"}
+    guest = {"x-real-ip": "198.51.100.89"}
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=REJA", headers={"x-real-ip": "192.0.2.87"}) as first:
+            _publish_ready(first)
+            with _ws(client, "/api/live/publish?id=REJB", headers={"x-real-ip": "192.0.2.88"}) as second:
+                _publish_ready(second)
+                with _Audio(client, "/stream/REJA", query="thumbnail=1", headers=starter) as video:
+                    assert video.read()[:1] == b"\x47"
+                assert hub.get("REJA").relay.occupies()
+                with _Audio(client, "/stream/REJA", query="thumbnail=1", headers=starter) as again:
+                    assert again.status_code == 200
+                    assert again.read()[:1] == b"\x47"
+                    denied = client.get("/stream/REJB?thumbnail=1", headers=other)
+                    assert denied.status_code == 429
+                    with _Audio(client, "/stream/REJA", query="thumbnail=1", headers=guest) as joined:
+                        assert joined.status_code == 200
+                        assert joined.read()[:1] == b"\x47"
+
+
+def test_a_switch_stops_the_encoder_after_the_hub_listener_is_gone(tmp_path: Path):
+    """Closing clears the hub set before detach. The next open must not 429 on that stale listener."""
+
+    script = _write_script(tmp_path, _CONTINUOUS_FFMPEG)
+    hub = _hub(
+        tmp_path,
+        ffmpeg=script,
+        max_video_encoders=1,
+        max_video_per_ip=1,
+        video_linger=30,
+        output_stall=30,
+    )
+    held = {"x-real-ip": "198.51.100.90"}
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=SWCA", headers={"x-real-ip": "192.0.2.90"}) as first:
+            _publish_ready(first)
+            with _ws(client, "/api/live/publish?id=SWCB", headers={"x-real-ip": "192.0.2.91"}) as second:
+                _publish_ready(second)
+                with _Audio(client, "/stream/SWCA", query="thumbnail=1", headers=held) as video:
+                    assert video.read()[:1] == b"\x47"
+                    stream = hub.get("SWCA")
+                    relay = stream.relay
+                    assert relay.listeners
+                    stream.video_listeners.clear()
+                    with _Audio(client, "/stream/SWCB", query="thumbnail=1", headers=held) as moved:
+                        assert moved.status_code == 200
+                        assert moved.read()[:1] == b"\x47"
+                        assert relay.occupies() is False
+
+
+def test_handover_joins_off_the_event_loop(tmp_path: Path):
+    moved: list[bool] = []
+    ticks: dict[str, int] = {}
+    script = _write_script(tmp_path, _CONTINUOUS_FFMPEG)
+    hub = _hub(
+        tmp_path,
+        ffmpeg=script,
+        max_video_encoders=1,
+        max_video_per_ip=1,
+        video_linger=30,
+        output_stall=30,
+    )
+    held = {"x-real-ip": "198.51.100.92"}
+    with TestClient(create_app(live=hub)) as client:
+        ticks = _heartbeat(client)
+        with _ws(client, "/api/live/publish?id=LOOP", headers={"x-real-ip": "192.0.2.92"}) as first:
+            _publish_ready(first)
+            with _ws(client, "/api/live/publish?id=LOOQ", headers={"x-real-ip": "192.0.2.93"}) as second:
+                _publish_ready(second)
+                with _Audio(client, "/stream/LOOP", query="thumbnail=1", headers=held) as video:
+                    assert video.read()[:1] == b"\x47"
+                relay = hub.get("LOOP").relay
+                original = relay.finish_bundle
+
+                def slow(bundle) -> None:
+                    moved.append(_loop_was_free(ticks))
+                    original(bundle)
+
+                relay.finish_bundle = slow
+                with _deadline(5):
+                    with _Audio(client, "/stream/LOOQ", query="thumbnail=1", headers=held) as moved_video:
+                        assert moved_video.status_code == 200
+                        assert moved_video.read()[:1] == b"\x47"
+    assert moved == [True]

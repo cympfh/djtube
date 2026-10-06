@@ -51,6 +51,10 @@ RESTART_BACKOFF = 1.0
 # Opus clusters are about 200 ms. This is a few seconds, then the oldest is
 # dropped so a stuck muxer cannot fill memory or block the publisher.
 AUDIO_QUEUE_MAX = 32
+# The recent buffer holds eight clusters, about 1.6 s. Feeding all of them at
+# t=0 puts the picture a second ahead of the sound. AAC only needs the last
+# one or two to start.
+_PRIME_CLUSTERS = 2
 # AAC-LC, 48 kHz, one channel. The video URL is mono because the mix is.
 VIDEO_AUDIO_BITRATE = "128k"
 VIDEO_AUDIO_RATE = "48000"
@@ -236,8 +240,10 @@ def _pmt_pid(packet: bytes) -> int | None:
 class TsSyncBuffer:
     """Bytes since the last video SPS, so a late listener can decode immediately.
 
-    The latest PAT, PMT, and SDT are kept even when they sit before that SPS,
-    and prepended. A player that starts at a keyframe still needs the tables.
+    PAT, PMT, and SDT are copied at the moment that SPS is seen and prepended.
+    A table that arrives later has a higher continuity counter. Prepending that
+    newer copy in front of the older one still in the body makes the counter
+    go backwards.
     """
 
     def __init__(self, limit: int = _SYNC_PACKETS) -> None:
@@ -248,6 +254,9 @@ class TsSyncBuffer:
         self.pat: bytes | None = None
         self.pmt: bytes | None = None
         self.sdt: bytes | None = None
+        self._sync_pat: bytes | None = None
+        self._sync_pmt: bytes | None = None
+        self._sync_sdt: bytes | None = None
         self.pmt_pid: int | None = None
         self._partial = b""
 
@@ -270,7 +279,7 @@ class TsSyncBuffer:
         if not self.packets:
             return b""
         body = b"".join(self.packets[self.sync :])
-        prefix = b"".join(packet for packet in (self.pat, self.pmt, self.sdt) if packet)
+        prefix = b"".join(packet for packet in (self._sync_pat, self._sync_pmt, self._sync_sdt) if packet)
         if not prefix:
             return body
         return prefix + body
@@ -280,6 +289,10 @@ class TsSyncBuffer:
         self._remember(packet)
         if self._is_sync(packet):
             self.sync = len(self.packets) - 1
+            # Tables current at this keyframe, not ones that arrive afterwards.
+            self._sync_pat = self.pat
+            self._sync_pmt = self.pmt
+            self._sync_sdt = self.sdt
         self._trim()
 
     def _remember(self, packet: bytes) -> None:
@@ -443,6 +456,8 @@ class FfmpegRelay:
                 chunks = (bytes(recent),)
             else:
                 chunks = tuple(recent)
+            if len(chunks) > _PRIME_CLUSTERS:
+                chunks = chunks[-_PRIME_CLUSTERS:]
             self._primed = list(chunks)
             if init is not None:
                 self._init = init
@@ -525,13 +540,38 @@ class FfmpegRelay:
         A listener that arrived since the decision keeps the process.
         """
 
+        bundle = self.take_abandoned(keep_listeners=True)
+        if bundle is None:
+            return False
+        self.finish_bundle(bundle)
+        return True
+
+    def take_abandoned(self, *, keep_listeners: bool = False) -> tuple | None:
+        """Take the process without joining threads. None if it should keep running.
+
+        ``keep_listeners`` refuses while ``listeners`` is non-empty. Handover
+        passes False: the hub has already checked that no video listener remains,
+        and one still recorded here is waiting for ``detach``.
+        """
+
         with self._lock:
-            if self.listeners or not self._started:
-                return False
+            if not self._started:
+                return None
+            if keep_listeners and self.listeners:
+                return None
+            stale = list(self.listeners)
+            self.listeners.clear()
             bundle = self._take_process_locked()
+        for listener in stale:
+            listener.offer_end()
+            listener.mark_closed()
+        return bundle
+
+    def finish_bundle(self, bundle: tuple) -> None:
+        """Kill and join. Callers on the event loop must run this in a thread."""
+
         self._finish(bundle)
         log.info("video %s stop", self.stream_id)
-        return True
 
     def _linger(self) -> None:
         # The emptiness check and the decision to stop share this lock. A

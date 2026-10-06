@@ -616,24 +616,39 @@ class LiveHub:
             stream.listeners.discard(listener)
 
     def prepare_video(
-        self, stream_id: str, address: str
-    ) -> tuple[int, "_Listener | None", "_Stream | None", tuple | None]:
-        """Reserve a video listener. Popen happens in ``open_video``, off the event loop."""
+        self, stream_id: str, address: str, *, handover: bool = True
+    ) -> tuple[int, "_Listener | None", "_Stream | None", tuple | None] | list[FfmpegRelay]:
+        """Reserve a video listener, or return lingering relays to stop first.
+
+        Stopping joins threads, so a list result is finished with ``stop_handover``
+        on a worker. Popen happens in ``open_video``, also off the event loop.
+        """
 
         if not is_stream_id(stream_id):
             return 404, None, None, None
         with self._lock:
-            prepared = self._prepare_video_locked(stream_id, address, handover=True)
-        if isinstance(prepared, list):
-            # stop() joins threads. Do that outside the hub lock, then reserve.
-            for relay in prepared:
-                relay.stop_if_abandoned()
+            return self._prepare_video_locked(stream_id, address, handover=handover)
+
+    def stop_handover(self, relays: list[FfmpegRelay]) -> None:
+        """Stop relays whose hub listener set is still empty. Joins threads.
+
+        Run this off the event loop. The emptiness check shares the hub lock
+        with the take, so a listener reserved after the relays were chosen is
+        not killed. ``relay.listeners`` alone is not enough: ``drop_video``
+        clears the hub set before ``detach``.
+        """
+
+        bundles: list[tuple[FfmpegRelay, tuple]] = []
+        for relay in relays:
             with self._lock:
-                reserved = self._prepare_video_locked(stream_id, address, handover=False)
-            if isinstance(reserved, list):
-                return 429, None, None, None
-            return reserved
-        return prepared
+                stream = next((item for item in self._streams.values() if item.relay is relay), None)
+                if stream is None or stream.video_listeners:
+                    continue
+                bundle = relay.take_abandoned()
+            if bundle is not None:
+                bundles.append((relay, bundle))
+        for relay, bundle in bundles:
+            relay.finish_bundle(bundle)
 
     def _prepare_video_locked(
         self, stream_id: str, address: str, *, handover: bool
@@ -1387,17 +1402,23 @@ def mount_live(app: FastAPI, hub: LiveHub) -> None:
         address = _publisher_address(request)
         if request.method == "HEAD":
             status, mime, retry = hub.stream_status(stream_id, video=video, address=address)
-            headers = _status_headers(status, retry)
+            headers = _status_headers(status, retry, video=video)
             if mime is None:
                 return Response(status_code=status, headers=headers)
             return _HeaderOnly(status, mime)
         if video:
-            status, listener, stream, opener = hub.prepare_video(stream_id, address)
+            planned = hub.prepare_video(stream_id, address)
+            if isinstance(planned, list):
+                await asyncio.to_thread(hub.stop_handover, planned)
+                planned = hub.prepare_video(stream_id, address, handover=False)
+            if isinstance(planned, list):
+                planned = (429, None, None, None)
+            status, listener, stream, opener = planned
             if listener is None or stream is None or opener is None:
                 retry = None
                 if status == 503:
                     _status, _mime, retry = hub.stream_status(stream_id, video=True, address=address)
-                return Response(status_code=status, headers=_status_headers(status, retry))
+                return Response(status_code=status, headers=_status_headers(status, retry, video=True))
             owned = opener[0]
             try:
                 await asyncio.to_thread(hub.open_video, stream, listener, *opener)
@@ -1416,9 +1437,11 @@ def mount_live(app: FastAPI, hub: LiveHub) -> None:
         return _AudioResponse(hub, listener, stream)
 
 
-def _status_headers(status: int, retry: int | None) -> dict[str, str]:
+def _status_headers(status: int, retry: int | None, *, video: bool = False) -> dict[str, str]:
     headers = dict(_STREAM_HEADERS)
-    if status == 429 and retry is None:
+    # The video encoder cap can free within a second (someone leaves, or a linger
+    # ends). An audio listener cap does not, so it does not advertise Retry-After.
+    if status == 429 and retry is None and video:
         retry = 1
     if retry is not None:
         headers["Retry-After"] = str(retry)

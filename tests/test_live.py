@@ -291,6 +291,7 @@ def test_full_hub_and_full_listener_list_refuse_another_connection():
                 overflow = client.get(f"{PUBLIC_PREFIX}/stream/{stream_id}")
                 assert overflow.status_code == 429
                 assert overflow.headers["cache-control"] == "no-store"
+                assert "retry-after" not in overflow.headers
 
 
 def test_one_source_may_listen_only_so_many_times_on_one_stream():
