@@ -29,14 +29,10 @@ export const LIVE_SEND_BACKLOG = "送信が追いつかないため、配信を�
 export const LIVE_TAKEN = "この配信 ID は他の人が使っています。もう一度押すと新しい ID で配信します";
 export const LIVE_BUFFER_LIMIT = 1024 * 1024;
 export const LIVE_OUTPUT_STALLED = "音声出力が動いていません（出力デバイスを確認）";
-// How often to sample AudioContext.currentTime. The page does not stop
-// itself from this timer. A 4408 uses the samples only to choose hover text.
-export const LIVE_RENDER_WATCH_MS = 3000;
-// The server accepts four now-playing messages a second. 250 ms is that
-// same rate. Unchanged JSON is not sent again.
-export const NOW_INTERVAL_MS = 250;
-
-const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
+// On a 4408, wall seconds since the recorder started minus seconds
+// AudioContext.currentTime advanced. At least this much means the output
+// device was not rendering. The page does not stop itself from this.
+export const LIVE_OUTPUT_GAP_S = 5;
 
 const CLOSE_TEXT = {
   4408: "音声が届かなくなったため、配信を止めました",
@@ -46,6 +42,12 @@ const CLOSE_TEXT = {
   1008: "送信の上限に達しました",
   1009: "データが大きすぎるため、配信を止めました",
 };
+
+// The server accepts four now-playing messages a second. 250 ms is that
+// same rate. Unchanged JSON is not sent again.
+export const NOW_INTERVAL_MS = 250;
+
+const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 
 const SOCKET_OPEN = 1;
 
@@ -252,6 +254,7 @@ export function createLiveControl(options) {
     return id;
   });
   const clearTimer = options.clearTimer || ((id) => clearTimeout(id));
+  const now = options.now || (() => performance.now());
   const root = options.root;
   const doc = options.document ?? (typeof document === "undefined" ? undefined : document);
   const nowPlaying = options.nowPlaying;
@@ -481,7 +484,6 @@ export function createLiveControl(options) {
   }
 
   function teardown(mine) {
-    clearWatch(mine);
     const recorder = mine.recorder;
     const socket = mine.socket;
     const dest = mine.dest;
@@ -586,44 +588,13 @@ export function createLiveControl(options) {
     };
   }
 
-  function clearWatch(mine) {
-    if (!mine || mine.watch == null) return;
-    clearTimer(mine.watch);
-    mine.watch = null;
-  }
-
-  function renderTime() {
+  function outputStalled(mine) {
+    if (mine.renderWall == null || mine.renderMark == null) return false;
     const time = bus?.context?.currentTime;
-    return typeof time === "number" ? time : null;
-  }
-
-  function noteRender(mine) {
-    const now = renderTime();
-    if (now == null) return;
-    if (mine.renderMark == null) {
-      mine.renderMark = now;
-      return;
-    }
-    if (now > mine.renderMark) mine.renderMoved = true;
-  }
-
-  function renderFrozen(mine) {
-    noteRender(mine);
-    if (mine.renderMoved || mine.renderMark == null) return false;
-    const now = renderTime();
-    return now != null && now <= mine.renderMark;
-  }
-
-  function armWatch(mine) {
-    clearWatch(mine);
-    if (mine.ended || session !== mine) return;
-    noteRender(mine);
-    mine.watch = setTimer(() => {
-      mine.watch = null;
-      if (mine.ended || session !== mine) return;
-      noteRender(mine);
-      armWatch(mine);
-    }, LIVE_RENDER_WATCH_MS);
+    if (typeof time !== "number") return false;
+    const wall = (now() - mine.renderWall) / 1000;
+    const rendered = time - mine.renderMark;
+    return wall - rendered >= LIVE_OUTPUT_GAP_S;
   }
 
   function begin(mine, id, token) {
@@ -670,7 +641,9 @@ export function createLiveControl(options) {
       finish(mine, { state: "error", reason: LIVE_UNSUPPORTED });
       return;
     }
-    armWatch(mine);
+    const mark = bus?.context?.currentTime;
+    mine.renderWall = now();
+    mine.renderMark = typeof mark === "number" ? mark : null;
     mine.url = url;
     paint(liveStatus(mine));
     deliverCopy(mine, url);
@@ -742,7 +715,7 @@ export function createLiveControl(options) {
         pinnedId = "";
         pinnedToken = "";
       }
-      const stalled = code === 4408 && renderFrozen(mine);
+      const stalled = code === 4408 && outputStalled(mine);
       finish(mine, { state: "error", reason: stalled ? LIVE_OUTPUT_STALLED : closeReason(code) });
     };
   }
@@ -781,9 +754,6 @@ export function createLiveControl(options) {
       dest: null,
       url: "",
       clip,
-      watch: null,
-      renderMark: null,
-      renderMoved: false,
     };
     session = mine;
     paint({ state: "starting" });

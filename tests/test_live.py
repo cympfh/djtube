@@ -624,6 +624,31 @@ def test_timeout_logs_name_the_init_and_idle_clocks(caplog):
         live_module.log.propagate = False
 
 
+def test_a_missing_claim_closes_inside_the_remaining_init_budget(caplog):
+    import djtube.live as live_module
+
+    live_module._configure_log()
+    live_module.log.propagate = True
+    caplog.set_level(logging.INFO, logger="djtube.live")
+    try:
+        # No first text. The close is the init budget left since accept:
+        # not immediate, not the idle clock, and not a second full wait.
+        hub = LiveHub(init_timeout=0.4, idle_timeout=5)
+        with TestClient(create_app(live=hub)) as client:
+            started = time.monotonic()
+            with client.websocket_connect("/api/live/publish") as socket:
+                with pytest.raises(WebSocketDisconnect) as quiet:
+                    socket.receive_json()
+                assert quiet.value.code == CODE_TIMEOUT
+            elapsed = time.monotonic() - started
+        assert elapsed > 0.2
+        assert elapsed < 0.7
+        assert any(record.message == "timeout claim" for record in caplog.records)
+        assert not any(record.message.startswith("publish") for record in caplog.records)
+    finally:
+        live_module.log.propagate = False
+
+
 def test_mime_alone_does_not_postpone_the_init_deadline():
     hub = LiveHub(init_timeout=0.3, idle_timeout=5)
     with TestClient(create_app(live=hub)) as client:
