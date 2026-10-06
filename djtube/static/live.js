@@ -19,6 +19,8 @@ export const LIVE_MENU_COPY_FAILED = "コピーできませんでした";
 export const LIVE_MENU_CLOSE_MS = 250;
 export const LIVE_MENU_NOTE_MS = 4000;
 export const LIVE_MENU_HOLD_MS = 500;
+// Chromium follows a pen with mouse boundary events that did not move.
+export const LIVE_MENU_MOUSE_GRACE_MS = 500;
 export const LIVE_COPY_AUDIO = "音声ストリーミングURLをコピー";
 export const LIVE_COPY_VIDEO = "動画ストリーミングURLをコピー";
 export const LIVE_SEND_BACKLOG = "送信が追いつかないため、配信を止めました";
@@ -223,7 +225,10 @@ export function createLiveControl(options) {
   let session = null;
   // Why the panel is open. null while it is closed.
   let openBy = null;
-  let lastPointer = "";
+  // True after touch or pen, until a real mouse event. A tap must not open from :hover.
+  let coarse = false;
+  let suppressMouse = false;
+  let suppressTimer = 0;
   // Esc while the icon is hovered. Cleared on pointerleave.
   let blockPointer = false;
   // Esc restored focus onto the icon. The next focusin is that restoration.
@@ -285,7 +290,7 @@ export function createLiveControl(options) {
     }
     if (wasOn) return;
     // A tap leaves :hover on Chrome's mobile emulation and on WebKit.
-    if (lastPointer !== "touch" && lastPointer !== "pen" && menuIsHovered()) openAs("pointer");
+    if (!coarse && menuIsHovered()) openAs("pointer");
     if (focusVisible(button)) openAs("focus");
   }
 
@@ -308,9 +313,43 @@ export function createLiveControl(options) {
     }
   }
 
+  function pointerMoved(event) {
+    return (event?.movementX || 0) !== 0 || (event?.movementY || 0) !== 0;
+  }
+
+  function markCoarse() {
+    coarse = true;
+    suppressMouse = true;
+    if (suppressTimer) clearTimer(suppressTimer);
+    suppressTimer = setTimer(() => {
+      suppressTimer = 0;
+      suppressMouse = false;
+    }, LIVE_MENU_MOUSE_GRACE_MS);
+  }
+
   function rememberPointer(event) {
     const type = event?.pointerType;
-    if (type === "mouse" || type === "pen" || type === "touch") lastPointer = type;
+    if (type === "touch" || type === "pen") {
+      markCoarse();
+      return;
+    }
+    if (type === "mouse" && !suppressMouse) coarse = false;
+  }
+
+  function stillMouse(event) {
+    return event?.pointerType === "mouse" && !pointerMoved(event);
+  }
+
+  function quietMouse(event) {
+    return suppressMouse && menu?.anchor?.dataset?.menu === "open" && stillMouse(event);
+  }
+
+  function acceptMouse() {
+    coarse = false;
+    suppressMouse = false;
+    if (!suppressTimer) return;
+    clearTimer(suppressTimer);
+    suppressTimer = 0;
   }
 
   function clearMenuResult() {
@@ -660,23 +699,35 @@ export function createLiveControl(options) {
     menu.audio.addEventListener("click", copyClick("audio"));
     menu.video.addEventListener("click", copyClick("video"));
     const pointerArrived = (event) => {
+      if (quietMouse(event)) return;
+      // A still mouse must not turn a pen or touch open into a hover.
+      if (openBy === "touch" && stillMouse(event)) return;
       rememberPointer(event);
       if (event?.pointerType !== "mouse") return;
+      acceptMouse();
       if (openBy === "focus") return;
       openAs("pointer");
     };
     menu.anchor.addEventListener("pointerenter", pointerArrived);
     menu.anchor.addEventListener("pointermove", pointerArrived);
     menu.anchor.addEventListener("pointerdown", (event) => {
+      if (quietMouse(event)) return;
       rememberPointer(event);
       if (event?.pointerType !== "mouse") return;
+      acceptMouse();
       if (openBy === "touch") openBy = "pointer";
     });
     menu.anchor.addEventListener("pointerleave", (event) => {
+      if (quietMouse(event)) return;
       blockPointer = false;
       const type = event?.pointerType;
-      if (type === "touch" || type === "pen" || button.dataset.live !== "on") return;
-      if (openBy === "focus" || menu.anchor.dataset.menu !== "open") return;
+      if (type === "touch" || type === "pen") {
+        rememberPointer(event);
+        return;
+      }
+      if (type === "mouse") acceptMouse();
+      if (button.dataset.live !== "on") return;
+      if (openBy !== "pointer") return;
       scheduleClose();
     });
     menu.anchor.addEventListener("focusin", (event) => {
@@ -701,12 +752,14 @@ export function createLiveControl(options) {
       button.focus?.();
     });
     if (root && typeof root.addEventListener === "function") {
+      // Capture, so a target that stops the bubble (the playlist grip) still closes
+      // the panel. Do not preventDefault: the tap has to reach that target.
       root.addEventListener("pointerdown", (event) => {
         if (menu.anchor.dataset.menu !== "open") return;
         const target = event?.target;
         if (target && typeof menu.anchor.contains === "function" && menu.anchor.contains(target)) return;
         closeMenu();
-      });
+      }, true);
     }
   }
 
@@ -726,9 +779,11 @@ export function createLiveControl(options) {
     return true;
   }
   button.addEventListener("pointerdown", (event) => {
+    if (quietMouse(event)) return;
     rememberPointer(event);
     const type = event?.pointerType;
     if (type === "mouse") {
+      acceptMouse();
       if (openBy === "touch") openBy = "pointer";
       swallowClick = false;
       clearHold();
@@ -753,6 +808,10 @@ export function createLiveControl(options) {
   button.addEventListener("pointercancel", () => {
     clearHold();
     swallowClick = false;
+  });
+  // A pen dragged off the icon never receives pointercancel.
+  button.addEventListener("pointerleave", () => {
+    clearHold();
   });
   button.addEventListener("contextmenu", (event) => {
     event?.preventDefault?.();
