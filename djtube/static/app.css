@@ -163,7 +163,7 @@ button:hover { border-color: #5c564b; }
   right: 0;
   z-index: 6;
   width: max-content;
-  max-width: min(320px, 80vw);
+  max-width: min(320px, calc(100vw - 32px));
   padding-top: 8px;
 }
 
@@ -213,6 +213,9 @@ button:hover { border-color: #5c564b; }
   line-height: 1.35;
   text-align: left;
   padding: 6px 8px;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .stage {
