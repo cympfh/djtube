@@ -66,6 +66,8 @@ export const JOG_STEP_SECONDS = 0.05;
 export const JOG_SEARCH_STEP_SECONDS = 0.5;
 
 export const MIDI_STATUS_IDLE = "MIDI未接続";
+/** Accessible name of the header button. It does not change with connection state. */
+export const MIDI_BUTTON_LABEL = "MIDI を開く";
 
 function binding(action, args, extra) {
   const spec = { action };
@@ -308,15 +310,25 @@ export function setFlx4Outputs(port, outputs) {
   return messages;
 }
 
-/** Hover and screen-reader text for the header MIDI button. */
+/** Hover text for the header MIDI button. */
 export function controllerStatusText(status) {
   if (!status || status.state === "idle") return MIDI_STATUS_IDLE;
   if (status.state === "unsupported") return "Web MIDI 非対応";
-  if (status.state === "insecure") return "未接続 — HTTPS が必要です";
+  if (status.state === "insecure") return "MIDI未接続：HTTPS が必要です";
   if (status.state === "denied") return "MIDI が拒否されました";
   if (status.state === "open" && status.names?.length) return `MIDI接続済み：${status.names.join("、")}`;
   if (status.state === "opening") return "MIDI を開いています…";
   return MIDI_STATUS_IDLE;
+}
+
+/** Paint the header button and the hidden result. Skip a write when the value is unchanged. */
+export function applyMidiStatus(button, live, status) {
+  const text = controllerStatusText(status);
+  if (button.title !== text) button.title = text;
+  if (button.getAttribute("aria-label") !== MIDI_BUTTON_LABEL) button.setAttribute("aria-label", MIDI_BUTTON_LABEL);
+  if (status?.state !== "opening" && live.textContent !== text) live.textContent = text;
+  const face = midiButtonState(status);
+  if (button.dataset.midi !== face) button.dataset.midi = face;
 }
 
 /** Header button face. "on" only after a device is actually connected. */

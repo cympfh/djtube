@@ -1,10 +1,9 @@
 import { SOURCE_UNAVAILABLE, createActions, freshState, sourcePlaybackBlocked } from "./actions.js";
 import {
+  applyMidiStatus,
   connectController,
-  controllerStatusText,
   extinguishFlx4Leds,
   flx4LedPort,
-  midiButtonState,
   paintFlx4Leds,
   resumeFlx4Leds,
 } from "./controller.js";
@@ -953,24 +952,13 @@ window.addEventListener(
 );
 
 const midiButton = document.getElementById("midi-button");
-
-function showMidiStatus(status) {
-  const text = controllerStatusText(status);
-  if (midiButton.title !== text) midiButton.title = text;
-  if (midiButton.getAttribute("aria-label") !== text) midiButton.setAttribute("aria-label", text);
-}
-
-function paintMidiButton(status) {
-  midiButton.dataset.midi = midiButtonState(status);
-}
+const midiLive = document.getElementById("midi-live");
 
 midiButton.addEventListener("click", () => {
   const opening = { state: "opening", names: [], connected: false };
-  showMidiStatus(opening);
-  paintMidiButton(opening);
+  applyMidiStatus(midiButton, midiLive, opening);
   connectController(actions, (status) => {
-    paintMidiButton(status);
-    showMidiStatus(status);
+    applyMidiStatus(midiButton, midiLive, status);
   });
 });
 

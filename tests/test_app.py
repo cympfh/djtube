@@ -95,7 +95,9 @@ def test_index_uses_public_asset_prefix():
     assert 'data-midi="off"' in html
     assert 'id="midi-status"' not in html
     assert 'title="MIDI未接続"' in html
-    assert 'aria-label="MIDI未接続"' in html
+    assert 'aria-label="MIDI を開く"' in html
+    assert 'aria-label="MIDI未接続"' not in html
+    assert 'class="sr-only" id="midi-live" role="status"></p>' in html
     assert "T で切り替え" not in html
     assert "次のロード先" not in html
     assert 'id="target-A"' not in html
