@@ -937,6 +937,17 @@ test("a start gap at 20 seconds still names the output device", async () => {
   assert.equal(harness.ui.painted().live, LIVE_OUTPUT_STALLED);
 });
 
+test("a 4408 at 21 seconds keeps the existing wording", async () => {
+  const { harness, setWall, blob } = renderHarness();
+  await goLive(harness);
+  setWall(RENDER_WALL0 + 21000);
+  blob();
+  harness.sockets[0].serverClose(4408);
+  await flush();
+  assert.equal(harness.ui.painted().title, closeReason(4408));
+  assert.equal(harness.ui.painted().live, closeReason(4408));
+});
+
 test("a late start at 6 seconds then a network choke keeps the 4408 wording", async () => {
   const { bus, harness, setWall, blob } = renderHarness();
   await goLive(harness);

@@ -38,8 +38,8 @@ export const LIVE_OUTPUT_STALLED = "音声出力が動いていません（出�
 // network choke still produces blobs, so that does not match.
 // Wall seconds since the recorder started, minus seconds currentTime
 // advanced, counts through the first 20 s, including the 20 s mark. That
-// covers an init 4408 from a frozen device, a start at 9.9 s, and a proxied
-// init close around 12–15 s. An early gap does not stick after that window.
+// covers an init 4408 from a frozen device, a start at 9.9 s, and e.g. 12 s
+// observed behind a proxy. An early gap does not stick after that window.
 // The page does not stop itself from this.
 export const LIVE_OUTPUT_GAP_S = 5;
 export const LIVE_OUTPUT_START_WINDOW_S = 20;
