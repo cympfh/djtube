@@ -345,11 +345,15 @@ class LiveHub:
 
     async def publish(self, websocket: WebSocket) -> None:
         _configure_log()
+        requested = websocket.query_params.get("id")
+        token = websocket.query_params.get("token")
+        # Uvicorn logs the path at accept, including the query. Drop the secret first.
+        _hide_token(websocket.scope)
         await websocket.accept()
         try:
             stream, generation, token, replaced, ended = self._open(
-                websocket.query_params.get("id"),
-                websocket.query_params.get("token"),
+                requested,
+                token,
                 _publisher_address(websocket),
             )
         except LiveClose as exc:
@@ -666,6 +670,24 @@ class LiveHub:
         stream.latest = None
         stream.splitter.clear()
         return True
+
+
+def _hide_token(scope: dict) -> None:
+    raw = scope.get("query_string") or b""
+    if not isinstance(raw, (bytes, bytearray)) or b"token=" not in raw:
+        return
+    try:
+        text = bytes(raw).decode("ascii")
+    except UnicodeDecodeError:
+        scope["query_string"] = b""
+        return
+    kept: list[str] = []
+    for part in text.split("&"):
+        name, _sep, _value = part.partition("=")
+        if name == "token" or not part:
+            continue
+        kept.append(part)
+    scope["query_string"] = "&".join(kept).encode("ascii")
 
 
 def _token_ok(expected: str, presented: str) -> bool:

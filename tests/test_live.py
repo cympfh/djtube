@@ -807,6 +807,47 @@ def test_joined_tone_plays_from_the_current_moment_not_the_beginning():
     assert not list(Path(".").glob("*.webm"))
 
 
+def test_the_access_log_path_drops_the_token():
+    from djtube.app import StripPrefixMiddleware
+    from djtube.live import _hide_token
+
+    scope = {"query_string": b"id=ABCD&token=sekret&x=1"}
+    _hide_token(scope)
+    assert scope["query_string"] == b"id=ABCD&x=1"
+    only = {"query_string": b"token=sekret"}
+    _hide_token(only)
+    assert only["query_string"] == b""
+    _hide_token({"query_string": b"id=ABCD"})
+
+    seen: dict[str, bytes] = {}
+
+    async def app(inner, _receive, _send):
+        seen["query"] = inner.get("query_string")
+        seen["path"] = inner.get("path")
+
+    middleware = StripPrefixMiddleware(app)
+
+    async def run(outer):
+        await middleware(outer, None, None)
+
+    prefixed = {
+        "type": "websocket",
+        "path": "/djtube/api/live/publish",
+        "raw_path": b"/djtube/api/live/publish",
+        "query_string": b"id=ABCD&token=sekret",
+    }
+    asyncio.run(run(prefixed))
+    assert prefixed["query_string"] == b"id=ABCD"
+    assert seen["query"] == b"id=ABCD&token=sekret"
+    assert seen["path"] == "/api/live/publish"
+
+    bare = {"type": "websocket", "path": "/api/live/publish", "query_string": b"token=sekret"}
+    asyncio.run(run(bare))
+    assert bare["query_string"] == b""
+    assert seen["query"] == b"token=sekret"
+    assert seen["path"] == "/api/live/publish"
+
+
 def test_a_token_reclaims_a_live_id_and_is_not_logged():
     cluster = cluster_known(0, b"wave")
     head, _data = document([cluster])
