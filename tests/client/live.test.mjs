@@ -8,7 +8,6 @@ import {
   LIVE_BUTTON_LABEL,
   LIVE_COPY_FAILED,
   LIVE_DROPPED,
-  LIVE_RECLAIM_TRIES,
   LIVE_SEND_BACKLOG,
   LIVE_TAKEN,
   LIVE_IDLE,
@@ -213,10 +212,20 @@ function setup(extra = {}) {
   return { ui, sockets, recorders, copies, bus, control };
 }
 
-async function goLive(harness, id = "ABCD") {
+const LIVE_TOKEN = "secret-token";
+
+function idMessage(id = "ABCD", token = LIVE_TOKEN) {
+  return JSON.stringify({ type: "id", id, token });
+}
+
+function pinnedPublishUrl(id = "ABCD", token = LIVE_TOKEN) {
+  return `wss://s.cympfh.cc/djtube/api/live/publish?id=${id}&token=${token}`;
+}
+
+async function goLive(harness, id = "ABCD", token = LIVE_TOKEN) {
   const pending = harness.ui.button.click();
   await flush();
-  harness.sockets[0].receive(JSON.stringify({ type: "id", id }));
+  harness.sockets[0].receive(idMessage(id, token));
   await pending;
   await flush();
 }
@@ -229,6 +238,10 @@ test("listener and publish URLs use the public prefix", () => {
     livePublishUrl("/djtube", "https://s.cympfh.cc", "ABCD"),
     "wss://s.cympfh.cc/djtube/api/live/publish?id=ABCD",
   );
+  assert.equal(
+    livePublishUrl("/djtube", "https://s.cympfh.cc", "ABCD", LIVE_TOKEN),
+    pinnedPublishUrl(),
+  );
   assert.equal(mimeMessage(), JSON.stringify({ type: "mime", mime: LIVE_MIME }));
   assert.equal(closeReason(4408), "音声が届かなくなったため、配信を止めました");
   assert.equal(closeReason(4409), LIVE_TAKEN);
@@ -237,6 +250,7 @@ test("listener and publish URLs use the public prefix", () => {
   assert.equal(closeReason(1008), "送信の上限に達しました");
   assert.equal(closeReason(1009), "データが大きすぎるため、配信を止めました");
   assert.equal(closeReason(1006), LIVE_DROPPED);
+  assert.equal(closeReason(4410), LIVE_DROPPED);
   assert.equal(liveButtonFace({ state: "live" }), "on");
   assert.equal(liveButtonFace({ state: "idle" }), "off");
   assert.equal(liveButtonFace({ state: "error", reason: "x" }), "off");
@@ -346,7 +360,7 @@ test("the first click publishes the master, copies the listener URL, and sends m
   assert.equal(harness.bus.master.connections.includes(harness.bus.context.destinations[0]), true);
   assert.equal(harness.bus.master.connections.includes(harness.bus.destination), true);
 
-  harness.sockets[0].receive(JSON.stringify({ type: "id", id: "ABCD" }));
+  harness.sockets[0].receive(idMessage());
   await pending;
   await flush();
   const url = "https://s.cympfh.cc/djtube/stream/ABCD";
@@ -559,7 +573,7 @@ test("stopping before the socket opens closes it and sends nothing after it open
   assert.equal(harness.ui.painted().title, LIVE_IDLE);
   assert.equal(harness.bus.context.destinations[0].track.live, false);
   harness.sockets[0].readyState = 1;
-  harness.sockets[0].onmessage?.({ data: JSON.stringify({ type: "id", id: "ABCD" }) });
+  harness.sockets[0].onmessage?.({ data: idMessage() });
   await flush();
   assert.deepEqual(harness.sockets[0].sent, []);
   assert.equal(harness.recorders.length, 0);
@@ -577,8 +591,8 @@ test("starting again reuses the id and copies the same listener URL", async () =
   await flush();
   assert.equal(harness.sockets.length, 2);
   assert.equal(harness.sockets[0].url, "wss://s.cympfh.cc/djtube/api/live/publish");
-  assert.equal(harness.sockets[1].url, "wss://s.cympfh.cc/djtube/api/live/publish?id=ABCD");
-  harness.sockets[1].receive(JSON.stringify({ type: "id", id: "ABCD" }));
+  assert.equal(harness.sockets[1].url, pinnedPublishUrl());
+  harness.sockets[1].receive(idMessage());
   await flush();
   assert.equal(harness.ui.painted().title, `配信中：${url}`);
   assert.equal(harness.ui.painted().live, `配信中：${url}`);
@@ -587,7 +601,7 @@ test("starting again reuses the id and copies the same listener URL", async () =
   assert.equal(harness.sockets[1].sent[0], mimeMessage());
 });
 
-test("an immediate restart waits for our close and does not lose the id to 4409", async () => {
+test("an immediate restart reuses the id and token without waiting for the old close", async () => {
   let releaseClose = null;
   const harness = setup({
     makeSocket(url) {
@@ -627,25 +641,24 @@ test("an immediate restart waits for our close and does not lose the id to 4409"
   assert.equal(harness.sockets[0].readyState, 2);
   harness.ui.button.click();
   await flush();
-  assert.equal(harness.sockets.length, 1);
-  releaseClose();
-  await flush();
   assert.equal(harness.sockets.length, 2);
-  assert.equal(harness.sockets[1].url, "wss://s.cympfh.cc/djtube/api/live/publish?id=ABCD");
+  assert.equal(harness.sockets[1].url, pinnedPublishUrl());
   assert.equal(harness.sockets[1].closed, null);
-  harness.sockets[1].receive(JSON.stringify({ type: "id", id: "ABCD" }));
+  assert.equal(typeof releaseClose, "function");
+  harness.sockets[1].receive(idMessage());
   await flush();
   assert.equal(harness.ui.painted().face, "on");
   assert.equal(harness.ui.painted().title, "配信中：https://s.cympfh.cc/djtube/stream/ABCD");
   assert.equal(harness.sockets[1].sent[0], mimeMessage());
+  releaseClose();
+  await flush();
+  assert.equal(harness.ui.painted().face, "on");
+  assert.equal(harness.sockets.length, 2);
 });
 
-test("a real 4409 keeps the id, says someone else has it, and stops", async () => {
+test("a 4409 drops the id and the next click takes a new one", async () => {
   let taken = false;
   const harness = setup({
-    sleep() {
-      return Promise.resolve();
-    },
     makeSocket(url) {
       const socket = fakeSocket(url);
       if (taken) queueMicrotask(() => socket.serverClose(4409));
@@ -658,20 +671,24 @@ test("a real 4409 keeps the id, says someone else has it, and stops", async () =
   taken = true;
   harness.ui.button.click();
   await flush();
-  const again = harness.sockets.slice(1);
-  assert.equal(again.length, 1 + LIVE_RECLAIM_TRIES);
-  assert.deepEqual(
-    again.map((socket) => socket.url),
-    Array(again.length).fill("wss://s.cympfh.cc/djtube/api/live/publish?id=ABCD"),
-  );
+  assert.equal(harness.sockets.length, 2);
+  assert.equal(harness.sockets[1].url, pinnedPublishUrl());
   assert.equal(harness.ui.painted().face, "off");
   assert.equal(harness.ui.painted().title, LIVE_TAKEN);
   assert.equal(harness.ui.painted().live, LIVE_TAKEN);
   assert.equal(harness.recorders.length, 1);
   assert.deepEqual(harness.copies, ["https://s.cympfh.cc/djtube/stream/ABCD"]);
-  const opened = harness.sockets.length;
   await flush();
-  assert.equal(harness.sockets.length, opened);
+  assert.equal(harness.sockets.length, 2);
+  taken = false;
+  harness.ui.button.click();
+  await flush();
+  assert.equal(harness.sockets.length, 3);
+  assert.equal(harness.sockets[2].url, "wss://s.cympfh.cc/djtube/api/live/publish");
+  harness.sockets[2].receive(idMessage("EFGH", "next-token"));
+  await flush();
+  assert.equal(harness.ui.painted().title, "配信中：https://s.cympfh.cc/djtube/stream/EFGH");
+  assert.equal(harness.ui.painted().face, "on");
 });
 
 test("cancelling before the id arrives does not copy or open another socket", async () => {
@@ -686,7 +703,7 @@ test("cancelling before the id arrives does not copy or open another socket", as
   assert.equal(harness.sockets.length, 1);
   assert.equal(harness.sockets[0].closed, 1000);
   assert.equal(harness.ui.painted().title, LIVE_IDLE);
-  harness.sockets[0].receive(JSON.stringify({ type: "id", id: "ABCD" }));
+  harness.sockets[0].receive(idMessage());
   await flush();
   assert.equal(harness.recorders.length, 0);
   assert.equal(harness.copies.length, 0);
@@ -770,6 +787,18 @@ test("a server close stops the broadcast, shows the reason, and does not reconne
     await flush();
     assert.equal(harness.sockets.length, 1);
     assert.equal(harness.copies.length, 1);
+    if (code === 4409 || code === 1006) {
+      harness.ui.button.click();
+      await flush();
+      const next = harness.sockets.at(-1).url;
+      if (code === 4409) {
+        assert.equal(next, "wss://s.cympfh.cc/djtube/api/live/publish");
+      } else {
+        assert.equal(next, pinnedPublishUrl());
+      }
+      harness.ui.button.click();
+      await flush();
+    }
   }
 });
 

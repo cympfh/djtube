@@ -3,11 +3,13 @@ from __future__ import annotations
 import array
 import asyncio
 import contextlib
+import logging
 import math
 import shutil
 import subprocess
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 import anyio
 import pytest
@@ -20,9 +22,13 @@ from djtube.live import (
     CODE_BAD_MEDIA,
     CODE_FULL,
     CODE_RATE,
+    CODE_REPLACED,
     CODE_TAKEN,
     CODE_TIMEOUT,
     CODE_TOO_BIG,
+    RESERVATION_MAX,
+    RESERVATION_PER_IP,
+    RESERVATION_TTL,
     BURST_SECONDS,
     IDLE_TIMEOUT,
     INIT_TIMEOUT,
@@ -45,6 +51,19 @@ from djtube.webm import cluster_timecode, split_webm
 from tests.test_webm import cluster_known, document
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _id_token(payload: dict, stream_id: str) -> str:
+    assert payload["type"] == "id"
+    assert payload["id"] == stream_id
+    token = payload["token"]
+    assert isinstance(token, str) and token
+    assert token.strip() == token
+    return token
+
+
+def _with_token(stream_id: str, token: str) -> str:
+    return f"/api/live/publish?id={stream_id}&token={quote(token, safe='')}"
 
 
 def _slices(data: bytes) -> list[bytes]:
@@ -211,13 +230,21 @@ def test_ids_are_four_uppercase_letters_and_collisions_are_rejected():
                 socket.receive_json()
         assert bad.value.code == CODE_BAD_ID
         with client.websocket_connect("/djtube/api/live/publish?id=ABCD") as claimed:
-            assert claimed.receive_json() == {"type": "id", "id": "ABCD"}
+            token = _id_token(claimed.receive_json(), "ABCD")
             with pytest.raises(WebSocketDisconnect) as taken:
                 with client.websocket_connect("/api/live/publish?id=ABCD") as other:
                     other.receive_json()
             assert taken.value.code == CODE_TAKEN
-        with client.websocket_connect("/api/live/publish?id=ABCD") as again:
-            assert again.receive_json() == {"type": "id", "id": "ABCD"}
+            with pytest.raises(WebSocketDisconnect) as wrong:
+                with client.websocket_connect(_with_token("ABCD", "not-the-token")) as other:
+                    other.receive_json()
+            assert wrong.value.code == CODE_TAKEN
+        with pytest.raises(WebSocketDisconnect) as reserved:
+            with client.websocket_connect("/api/live/publish?id=ABCD") as again:
+                again.receive_json()
+        assert reserved.value.code == CODE_TAKEN
+        with client.websocket_connect(_with_token("ABCD", token)) as again:
+            assert _id_token(again.receive_json(), "ABCD") == token
         with pytest.raises(WebSocketDisconnect) as lower:
             with client.websocket_connect("/api/live/publish?id=abcd") as socket:
                 socket.receive_json()
@@ -431,7 +458,7 @@ def test_a_slow_listener_is_dropped_and_a_full_queue_drops_old_clusters():
         assert listener.pending_kinds()[0] == "init"
 
         hub = LiveHub(send_timeout=0.05, max_streams=2)
-        stream = hub._open("SLOW", "203.0.113.8")
+        stream, _generation, _token, _replaced, _ended = hub._open("SLOW", None, "203.0.113.8")
         waiting = _Listener(limit=4)
         stream.listeners.add(waiting)
         waiting.offer_init(b"i")
@@ -468,6 +495,9 @@ def test_relay_caps_match_the_publisher_budget():
     assert hub.max_frame == MAX_FRAME == 256 * 1024
     assert hub.init_timeout == INIT_TIMEOUT == 10
     assert hub.idle_timeout == IDLE_TIMEOUT == 30
+    assert hub.reservation_ttl == RESERVATION_TTL == 12 * 60 * 60
+    assert hub.reservation_max == RESERVATION_MAX == 4096
+    assert hub.reservation_per_ip == RESERVATION_PER_IP == 32
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert '--ws-max-size", "1048576"' in dockerfile
 
@@ -494,7 +524,7 @@ def test_a_silent_publisher_loses_its_slot_and_a_quiet_one_does_too():
         assert silent.get("AAAA") is None
         assert silent.get("AAAB") is None
         with client.websocket_connect("/api/live/publish?id=AAAC") as again:
-            assert again.receive_json() == {"type": "id", "id": "AAAC"}
+            assert _id_token(again.receive_json(), "AAAC")
 
     cluster = cluster_known(0, b"wave")
     head, _data = document([cluster])
@@ -655,7 +685,9 @@ def test_one_address_may_publish_twice_and_forwarded_for_does_not_count():
         second = {"x-real-ip": "203.0.113.8", "x-forwarded-for": "198.51.100.2"}
         spoofed = {"x-forwarded-for": "203.0.113.50"}
         with client.websocket_connect("/api/live/publish?id=IPAA", headers=first) as held:
-            assert held.receive_json()["id"] == "IPAA"
+            ipaa = held.receive_json()
+            assert ipaa["id"] == "IPAA"
+            ipaa_token = ipaa["token"]
             with client.websocket_connect("/api/live/publish?id=IPAB", headers=second) as also:
                 assert also.receive_json()["id"] == "IPAB"
                 with pytest.raises(WebSocketDisconnect) as full:
@@ -682,7 +714,11 @@ def test_one_address_may_publish_twice_and_forwarded_for_does_not_count():
                             forwarded_full.receive_json()
                     assert shared.value.code == CODE_FULL
         assert hub.get("IPAA") is None
-        with client.websocket_connect("/api/live/publish?id=IPAA", headers=first) as again:
+        with pytest.raises(WebSocketDisconnect) as reserved:
+            with client.websocket_connect("/api/live/publish?id=IPAA", headers=first) as blocked:
+                blocked.receive_json()
+        assert reserved.value.code == CODE_TAKEN
+        with client.websocket_connect(_with_token("IPAA", ipaa_token), headers=first) as again:
             assert again.receive_json()["id"] == "IPAA"
 
 
@@ -769,3 +805,157 @@ def test_joined_tone_plays_from_the_current_moment_not_the_beginning():
     assert _dominant(early_pcm, 0.2) == 440
     assert _dominant(early_pcm, 2.6) == 880
     assert not list(Path(".").glob("*.webm"))
+
+
+def test_a_token_reclaims_a_live_id_and_is_not_logged():
+    cluster = cluster_known(0, b"wave")
+    head, _data = document([cluster])
+    later = cluster_known(200, b"next")
+    head_later, _rest = document([later])
+    hub = LiveHub(init_timeout=5, idle_timeout=5)
+    records: list[str] = []
+
+    class _Grab(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record.getMessage())
+
+    logger = logging.getLogger("djtube.live")
+    handler = _Grab()
+    logger.addHandler(handler)
+    try:
+        with TestClient(create_app(live=hub)) as client:
+            with pytest.raises(WebSocketDisconnect) as invented:
+                with client.websocket_connect("/api/live/publish?id=FREE&token=invented") as socket:
+                    socket.receive_json()
+            assert invented.value.code == CODE_TAKEN
+            with client.websocket_connect("/api/live/publish?id=HEAR") as old:
+                token = _id_token(old.receive_json(), "HEAR")
+                old.send_bytes(head + cluster)
+                with _Audio(client, "/stream/HEAR") as listener:
+                    assert listener.read() == head
+                    assert listener.read() == cluster
+                    with pytest.raises(WebSocketDisconnect) as missing:
+                        with client.websocket_connect("/api/live/publish?id=HEAR") as bare:
+                            bare.receive_json()
+                    assert missing.value.code == CODE_TAKEN
+                    with pytest.raises(WebSocketDisconnect) as wrong:
+                        with client.websocket_connect("/api/live/publish?id=HEAR&token=%C3%A9") as bare:
+                            bare.receive_json()
+                    assert wrong.value.code == CODE_TAKEN
+                    with client.websocket_connect(_with_token("HEAR", token)) as new:
+                        assert _id_token(new.receive_json(), "HEAR") == token
+                        with pytest.raises(WebSocketDisconnect) as replaced:
+                            old.receive_json()
+                        assert replaced.value.code == CODE_REPLACED
+                        assert listener.read() is None
+                        new.send_bytes(head_later + later)
+                        with _Audio(client, "/stream/HEAR") as resumed:
+                            assert resumed.read() == head_later
+                            assert resumed.read() == later
+    finally:
+        logger.removeHandler(handler)
+    text = "\n".join(records)
+    assert token not in text
+    assert "publish HEAR" in text
+    assert "end HEAR" in text
+
+
+def test_a_reserved_id_is_not_handed_to_anyone_else(monkeypatch):
+    monkeypatch.setattr("djtube.live.secrets.choice", lambda _alphabet: "Z")
+    hub = LiveHub(init_timeout=5, idle_timeout=5)
+    with TestClient(create_app(live=hub)) as client:
+        with client.websocket_connect("/api/live/publish?id=ZZZZ") as held:
+            token = _id_token(held.receive_json(), "ZZZZ")
+        with pytest.raises(WebSocketDisconnect) as full:
+            with client.websocket_connect("/api/live/publish") as fresh:
+                fresh.receive_json()
+        assert full.value.code == CODE_FULL
+        with client.websocket_connect(_with_token("ZZZZ", token)) as again:
+            assert again.receive_json()["id"] == "ZZZZ"
+
+
+def test_reservations_expire_and_idle_holds_are_capped():
+    now = [0.0]
+    expired = LiveHub(reservation_ttl=12, clock=lambda: now[0], init_timeout=5, idle_timeout=5)
+    with TestClient(create_app(live=expired)) as client:
+        with client.websocket_connect("/api/live/publish?id=GONE") as publisher:
+            token = _id_token(publisher.receive_json(), "GONE")
+        now[0] = 11
+        with client.websocket_connect(_with_token("GONE", token)) as still:
+            assert still.receive_json()["token"] == token
+        now[0] = 23
+        with pytest.raises(WebSocketDisconnect) as stale:
+            with client.websocket_connect(_with_token("GONE", token)) as socket:
+                socket.receive_json()
+        assert stale.value.code == CODE_TAKEN
+        with client.websocket_connect("/api/live/publish?id=GONE") as taken:
+            body = taken.receive_json()
+            assert body["id"] == "GONE"
+            assert body["token"] != token
+
+    now[0] = 0
+    capped = LiveHub(
+        reservation_ttl=1000,
+        reservation_max=2,
+        reservation_per_ip=32,
+        clock=lambda: now[0],
+        init_timeout=5,
+        idle_timeout=5,
+    )
+    with TestClient(create_app(live=capped)) as client:
+        for index, stream_id in enumerate(("AAAA", "AAAB")):
+            now[0] = index
+            with client.websocket_connect(f"/api/live/publish?id={stream_id}") as publisher:
+                _id_token(publisher.receive_json(), stream_id)
+        now[0] = 2
+        with client.websocket_connect("/api/live/publish?id=AAAC") as publisher:
+            _id_token(publisher.receive_json(), "AAAC")
+        with pytest.raises(WebSocketDisconnect) as kept:
+            with client.websocket_connect("/api/live/publish?id=AAAB") as blocked:
+                blocked.receive_json()
+        assert kept.value.code == CODE_TAKEN
+        with pytest.raises(WebSocketDisconnect) as kept_later:
+            with client.websocket_connect("/api/live/publish?id=AAAC") as blocked:
+                blocked.receive_json()
+        assert kept_later.value.code == CODE_TAKEN
+        with client.websocket_connect("/api/live/publish?id=AAAA") as publisher:
+            assert publisher.receive_json()["id"] == "AAAA"
+
+    per_source = LiveHub(
+        reservation_ttl=1000,
+        reservation_max=100,
+        reservation_per_ip=1,
+        clock=lambda: now[0],
+        init_timeout=5,
+        idle_timeout=5,
+    )
+    one = {"x-real-ip": "203.0.113.10"}
+    other = {"x-real-ip": "203.0.113.11"}
+    with TestClient(create_app(live=per_source)) as client:
+        now[0] = 10
+        with client.websocket_connect("/api/live/publish?id=BBBB", headers=one) as publisher:
+            _id_token(publisher.receive_json(), "BBBB")
+        now[0] = 11
+        with client.websocket_connect("/api/live/publish?id=BBBC", headers=one) as publisher:
+            kept_token = _id_token(publisher.receive_json(), "BBBC")
+        with client.websocket_connect("/api/live/publish?id=BBBB", headers=other) as publisher:
+            assert publisher.receive_json()["id"] == "BBBB"
+        with pytest.raises(WebSocketDisconnect) as still_held:
+            with client.websocket_connect("/api/live/publish?id=BBBC", headers=other) as blocked:
+                blocked.receive_json()
+        assert still_held.value.code == CODE_TAKEN
+        with client.websocket_connect(_with_token("BBBC", kept_token), headers=other) as publisher:
+            assert publisher.receive_json()["token"] == kept_token
+
+    live_cap = LiveHub(reservation_max=1, reservation_per_ip=32, init_timeout=5, idle_timeout=5)
+    with TestClient(create_app(live=live_cap)) as client:
+        with client.websocket_connect("/api/live/publish?id=CCCC") as live:
+            _id_token(live.receive_json(), "CCCC")
+            with client.websocket_connect("/api/live/publish?id=CCCD") as extra:
+                _id_token(extra.receive_json(), "CCCD")
+                with pytest.raises(WebSocketDisconnect) as taken:
+                    with client.websocket_connect("/api/live/publish?id=CCCC") as stranger:
+                        stranger.receive_json()
+                assert taken.value.code == CODE_TAKEN
+                assert live_cap.get("CCCC") is not None
+                assert live_cap.get("CCCD") is not None
