@@ -12,8 +12,14 @@ not accept a chunk within the timeout is dropped, and the publisher keeps
 going. Closing the HTTP response removes the listener even if the publisher is
 quiet.
 
-A publisher that does not produce an initialization segment, or that stops
-sending, is closed and its slot is released. Byte rate and Cluster size are
+A publisher that produces no initialization segment within ``INIT_TIMEOUT``
+of accept, or that lets ``IDLE_TIMEOUT`` pass after the last complete
+Cluster, is closed with 4408 and its slot is released. The claim wait is the
+same init clock, not a second one that starts when the id is sent. The log
+line is ``timeout <id> init`` or ``timeout <id> idle``. A missing first text
+frame is the same close code, logged as ``timeout claim``. MIME text and
+bytes that never start a Cluster do not extend the init clock. An unfinished
+Cluster does not refresh the idle clock. Byte rate and Cluster size are
 capped the same way.
 """
 
@@ -351,8 +357,9 @@ class LiveHub:
         # The id and token arrive in the first text frame, never the URL.
         # nginx logs $request, which is the path and query, not the frame.
         await websocket.accept()
+        connected = time.monotonic()
         try:
-            claim = await self._read_claim(websocket)
+            claim = await self._read_claim(websocket, connected)
             normalized = None
             if claim.mime_present:
                 normalized = normalize_mime(claim.mime)
@@ -388,7 +395,7 @@ class LiveHub:
             await websocket.send_json({"type": "id", "id": stream.id, "token": token})
             if claim.leading:
                 self._on_bytes(stream, claim.leading, generation)
-            await self._consume(websocket, stream, generation)
+            await self._consume(websocket, stream, generation, connected)
         except LiveClose as exc:
             await _close(websocket, exc.code)
         except WebSocketDisconnect:
@@ -397,10 +404,18 @@ class LiveHub:
             if self._end(stream, generation):
                 log.info("end %s", stream.id)
 
-    async def _read_claim(self, websocket: WebSocket) -> "_Claim":
+    async def _read_claim(self, websocket: WebSocket, connected: float) -> "_Claim":
+        # The init budget starts at accept. Time spent waiting for this frame
+        # is not given back when the id is sent.
+        remaining = self.init_timeout - (time.monotonic() - connected)
+        if remaining <= 0:
+            log.info("timeout claim")
+            raise LiveClose(CODE_TIMEOUT)
         try:
-            message = await asyncio.wait_for(websocket.receive(), self.init_timeout)
+            message = await asyncio.wait_for(websocket.receive(), remaining)
         except TimeoutError:
+            # No claim yet, so there is no stream id to name.
+            log.info("timeout claim")
             raise LiveClose(CODE_TIMEOUT) from None
         if message["type"] == "websocket.disconnect":
             raise WebSocketDisconnect()
@@ -443,23 +458,34 @@ class LiveHub:
         with self._lock:
             stream.listeners.discard(listener)
 
-    async def _consume(self, websocket: WebSocket, stream: _Stream, generation: int) -> None:
-        opened = time.monotonic()
-        last_cluster = opened
+    def _timeout(self, stream: _Stream, kind: str) -> None:
+        """Close 4408. ``kind`` is ``init`` or ``idle`` and is the log word."""
+
+        log.info("timeout %s %s", stream.id, kind)
+        raise LiveClose(CODE_TIMEOUT)
+
+    async def _consume(self, websocket: WebSocket, stream: _Stream, generation: int, connected: float) -> None:
+        # ``init`` is what remains of INIT_TIMEOUT since accept. MIME and
+        # bytes that never start a Cluster do not move it. ``idle`` starts
+        # only once ``stream.init`` exists and moves only when a Cluster
+        # completes. Both close 4408; the log says which clock fired.
+        last_cluster = time.monotonic()
         while True:
             if stream.generation != generation:
                 return
             now = time.monotonic()
             if stream.init is None:
-                remaining = self.init_timeout - (now - opened)
+                kind = "init"
+                remaining = self.init_timeout - (now - connected)
             else:
+                kind = "idle"
                 remaining = self.idle_timeout - (now - last_cluster)
             if remaining <= 0:
-                raise LiveClose(CODE_TIMEOUT)
+                self._timeout(stream, kind)
             try:
                 message = await asyncio.wait_for(websocket.receive(), remaining)
             except TimeoutError:
-                raise LiveClose(CODE_TIMEOUT) from None
+                self._timeout(stream, kind)
             if stream.generation != generation:
                 return
             if message["type"] == "websocket.disconnect":

@@ -26,6 +26,10 @@ export const LIVE_COPY_VIDEO = "動画ストリーミングURLをコピー";
 export const LIVE_SEND_BACKLOG = "送信が追いつかないため、配信を止めました";
 export const LIVE_TAKEN = "この配信 ID は他の人が使っています。もう一度押すと新しい ID で配信します";
 export const LIVE_BUFFER_LIMIT = 1024 * 1024;
+export const LIVE_OUTPUT_STALLED = "音声出力が動いていません（出力デバイスを確認）";
+// How often to sample AudioContext.currentTime. The page does not stop
+// itself from this timer. A 4408 uses the samples only to choose hover text.
+export const LIVE_RENDER_WATCH_MS = 3000;
 
 const CLOSE_TEXT = {
   4408: "音声が届かなくなったため、配信を止めました",
@@ -438,6 +442,7 @@ export function createLiveControl(options) {
   }
 
   function teardown(mine) {
+    clearWatch(mine);
     const recorder = mine.recorder;
     const socket = mine.socket;
     const dest = mine.dest;
@@ -538,6 +543,46 @@ export function createLiveControl(options) {
     };
   }
 
+  function clearWatch(mine) {
+    if (!mine || mine.watch == null) return;
+    clearTimer(mine.watch);
+    mine.watch = null;
+  }
+
+  function renderTime() {
+    const time = bus?.context?.currentTime;
+    return typeof time === "number" ? time : null;
+  }
+
+  function noteRender(mine) {
+    const now = renderTime();
+    if (now == null) return;
+    if (mine.renderMark == null) {
+      mine.renderMark = now;
+      return;
+    }
+    if (now > mine.renderMark) mine.renderMoved = true;
+  }
+
+  function renderFrozen(mine) {
+    noteRender(mine);
+    if (mine.renderMoved || mine.renderMark == null) return false;
+    const now = renderTime();
+    return now != null && now <= mine.renderMark;
+  }
+
+  function armWatch(mine) {
+    clearWatch(mine);
+    if (mine.ended || session !== mine) return;
+    noteRender(mine);
+    mine.watch = setTimer(() => {
+      mine.watch = null;
+      if (mine.ended || session !== mine) return;
+      noteRender(mine);
+      armWatch(mine);
+    }, LIVE_RENDER_WATCH_MS);
+  }
+
   function begin(mine, id, token) {
     if (mine.ended || mine.recorder) return;
     if (pinnedId && id !== pinnedId) {
@@ -582,6 +627,7 @@ export function createLiveControl(options) {
       finish(mine, { state: "error", reason: LIVE_UNSUPPORTED });
       return;
     }
+    armWatch(mine);
     mine.url = url;
     paint(liveStatus(mine));
     deliverCopy(mine, url);
@@ -624,7 +670,8 @@ export function createLiveControl(options) {
         pinnedId = "";
         pinnedToken = "";
       }
-      finish(mine, { state: "error", reason: closeReason(code) });
+      const stalled = code === 4408 && renderFrozen(mine);
+      finish(mine, { state: "error", reason: stalled ? LIVE_OUTPUT_STALLED : closeReason(code) });
     };
   }
 
@@ -655,7 +702,17 @@ export function createLiveControl(options) {
     } catch {
       clip = null;
     }
-    const mine = { ended: false, socket: null, recorder: null, dest: null, url: "", clip };
+    const mine = {
+      ended: false,
+      socket: null,
+      recorder: null,
+      dest: null,
+      url: "",
+      clip,
+      watch: null,
+      renderMark: null,
+      renderMoved: false,
+    };
     session = mine;
     paint({ state: "starting" });
     let pending = null;

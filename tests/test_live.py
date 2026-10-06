@@ -568,6 +568,58 @@ def test_a_silent_publisher_loses_its_slot_and_a_quiet_one_does_too():
         assert stalled.get("STOP") is None
 
 
+def test_timeout_logs_name_the_init_and_idle_clocks(caplog):
+    import djtube.live as live_module
+
+    live_module._configure_log()
+    live_module.log.propagate = True
+    caplog.set_level(logging.INFO, logger="djtube.live")
+    try:
+        hub = LiveHub(init_timeout=0.2, idle_timeout=5)
+        with TestClient(create_app(live=hub)) as client:
+            with _ws(client, "/api/live/publish?id=INIT") as publisher:
+                publisher.receive_json()
+                with pytest.raises(WebSocketDisconnect) as quiet:
+                    publisher.receive_json()
+                assert quiet.value.code == CODE_TIMEOUT
+        assert "timeout INIT init" in caplog.text
+        assert "timeout INIT idle" not in caplog.text
+
+        caplog.clear()
+        cluster = cluster_known(0, b"wave")
+        head, _data = document([cluster])
+        stalled = LiveHub(init_timeout=2, idle_timeout=0.25)
+        with TestClient(create_app(live=stalled)) as client:
+            with _ws(client, "/api/live/publish?id=IDLE") as publisher:
+                publisher.receive_json()
+                publisher.send_bytes(head + cluster)
+                with pytest.raises(WebSocketDisconnect) as quiet:
+                    publisher.receive_json()
+                assert quiet.value.code == CODE_TIMEOUT
+        assert "timeout IDLE idle" in caplog.text
+        assert "timeout IDLE init" not in caplog.text
+
+        caplog.clear()
+        # The claim arrives late. The init deadline stays on accept, so the
+        # close is not another full init_timeout after the id.
+        delayed = LiveHub(init_timeout=0.5, idle_timeout=5)
+        with TestClient(create_app(live=delayed)) as client:
+            started = time.monotonic()
+            with client.websocket_connect("/api/live/publish") as socket:
+                time.sleep(0.3)
+                socket.send_json({"id": "WAIT"})
+                assert socket.receive_json()["id"] == "WAIT"
+                with pytest.raises(WebSocketDisconnect) as quiet:
+                    socket.receive_json()
+                assert quiet.value.code == CODE_TIMEOUT
+            elapsed = time.monotonic() - started
+        assert elapsed < 0.75
+        assert "timeout WAIT init" in caplog.text
+        assert "timeout claim" not in caplog.text
+    finally:
+        live_module.log.propagate = False
+
+
 def test_mime_alone_does_not_postpone_the_init_deadline():
     hub = LiveHub(init_timeout=0.3, idle_timeout=5)
     with TestClient(create_app(live=hub)) as client:
