@@ -6,8 +6,12 @@ import {
   LIVE_BITRATE,
   LIVE_BUFFER_LIMIT,
   LIVE_BUTTON_LABEL,
+  LIVE_COPY_AUDIO,
   LIVE_COPY_FAILED,
+  LIVE_COPY_VIDEO,
+  LIVE_COPIED,
   LIVE_DROPPED,
+  LIVE_MENU_COPY_FAILED,
   LIVE_SEND_BACKLOG,
   LIVE_TAKEN,
   LIVE_IDLE,
@@ -19,6 +23,7 @@ import {
   closeReason,
   createLiveControl,
   listenerUrl,
+  videoListenerUrl,
   liveButtonFace,
   livePublishUrl,
   liveStatusText,
@@ -37,11 +42,13 @@ function fakeButton() {
   const writes = [];
   let title = LIVE_IDLE;
   let label = LIVE_BUTTON_LABEL;
+  let expanded = "false";
   let face = "off";
   let liveText = "";
   const listeners = {};
   const button = {
     writes,
+    focused: false,
     get title() {
       return title;
     },
@@ -50,12 +57,17 @@ function fakeButton() {
       title = value;
     },
     getAttribute(name) {
-      return name === "aria-label" ? label : null;
+      if (name === "aria-label") return label;
+      if (name === "aria-expanded") return expanded;
+      return null;
     },
     setAttribute(name, value) {
-      if (name !== "aria-label") return;
-      writes.push("aria-label");
-      label = value;
+      if (name === "aria-label") {
+        writes.push("aria-label");
+        label = value;
+        return;
+      }
+      if (name === "aria-expanded") expanded = value;
     },
     dataset: {
       get live() {
@@ -71,6 +83,9 @@ function fakeButton() {
     },
     click() {
       return listeners.click();
+    },
+    focus() {
+      this.focused = true;
     },
   };
   const live = {
@@ -196,8 +211,65 @@ function openBus(state = "running") {
   return { context, master, failed: false, destination };
 }
 
+function fakeMenu() {
+  const listeners = { anchor: {} };
+  let headText = "";
+  let resultText = "";
+  const anchor = {
+    dataset: {},
+    hover: false,
+    focus: false,
+    matches(selector) {
+      if (selector === ":hover") return this.hover;
+      if (selector === ":focus-within") return this.focus;
+      return false;
+    },
+    contains(node) {
+      return node?.inside === true;
+    },
+    addEventListener(type, fn) {
+      listeners.anchor[type] = fn;
+    },
+    emit(type, event) {
+      listeners.anchor[type]?.(event);
+    },
+  };
+  const head = {
+    get textContent() {
+      return headText;
+    },
+    set textContent(value) {
+      headText = String(value);
+    },
+  };
+  const result = {
+    dataset: {},
+    get textContent() {
+      return resultText;
+    },
+    set textContent(value) {
+      resultText = String(value);
+    },
+  };
+  function pressable(slot) {
+    return {
+      addEventListener(type, fn) {
+        if (type === "click") listeners[slot] = fn;
+      },
+      click() {
+        return listeners[slot]?.({
+          preventDefault() {},
+          stopPropagation() {},
+        });
+      },
+    };
+  }
+  return { anchor, head, audio: pressable("audio"), video: pressable("video"), result };
+}
+
 function setup(extra = {}) {
   const ui = fakeButton();
+  const menu = extra.menu === null ? null : extra.menu || fakeMenu();
   const sockets = [];
   const recorders = [];
   const copies = [];
@@ -243,8 +315,9 @@ function setup(extra = {}) {
       }),
     armCopy: extra.armCopy,
     sleep: extra.sleep,
+    menu,
   });
-  return { ui, sockets, recorders, copies, bus, control };
+  return { ui, menu, sockets, recorders, copies, bus, control };
 }
 
 const LIVE_TOKEN = "secret-token";
@@ -269,6 +342,10 @@ async function goLive(harness, id = "ABCD", token = LIVE_TOKEN) {
 
 test("listener and publish URLs use the public prefix", () => {
   assert.equal(listenerUrl("/djtube", "ABCD", "https://s.cympfh.cc"), "https://s.cympfh.cc/djtube/stream/ABCD");
+  assert.equal(
+    videoListenerUrl("/djtube", "ABCD", "https://s.cympfh.cc"),
+    "https://s.cympfh.cc/djtube/stream/ABCD?thumbnail=1",
+  );
   assert.equal(livePublishUrl("/djtube", "https://s.cympfh.cc"), PUBLISH_URL);
   assert.equal(livePublishUrl("/djtube", "http://127.0.0.1:8098"), "ws://127.0.0.1:8098/djtube/api/live/publish");
   assert.equal(livePublishUrl("/djtube", "https://s.cympfh.cc", "ABCD", LIVE_TOKEN), PUBLISH_URL);
@@ -310,6 +387,7 @@ test("listener and publish URLs use the public prefix", () => {
 
 test("applyLiveStatus writes a result once and leaves the button name", () => {
   const ui = fakeButton();
+  const head = { textContent: "" };
   assert.equal(liveStatusText({ state: "idle" }), LIVE_IDLE);
   assert.equal(liveStatusText({ state: "unsupported" }), LIVE_UNSUPPORTED);
   assert.equal(liveStatusText({ state: "starting" }), LIVE_STARTING);
@@ -318,7 +396,7 @@ test("applyLiveStatus writes a result once and leaves the button name", () => {
     "配信中：https://s.cympfh.cc/djtube/stream/ABCD",
   );
 
-  applyLiveStatus(ui.button, ui.live, { state: "idle" });
+  applyLiveStatus(ui.button, ui.live, { state: "idle" }, head);
   assert.deepEqual(ui.painted(), {
     title: LIVE_IDLE,
     label: LIVE_BUTTON_LABEL,
@@ -328,10 +406,11 @@ test("applyLiveStatus writes a result once and leaves the button name", () => {
   assert.deepEqual(ui.button.writes, ["status"]);
 
   ui.button.writes.length = 0;
-  applyLiveStatus(ui.button, ui.live, { state: "idle" });
+  applyLiveStatus(ui.button, ui.live, { state: "idle" }, head);
   assert.deepEqual(ui.button.writes, []);
+  assert.equal(head.textContent, "");
 
-  applyLiveStatus(ui.button, ui.live, { state: "starting" });
+  applyLiveStatus(ui.button, ui.live, { state: "starting" }, head);
   assert.deepEqual(ui.painted(), {
     title: LIVE_STARTING,
     label: LIVE_BUTTON_LABEL,
@@ -341,32 +420,35 @@ test("applyLiveStatus writes a result once and leaves the button name", () => {
   assert.deepEqual(ui.button.writes, ["title"]);
 
   ui.button.writes.length = 0;
-  applyLiveStatus(ui.button, ui.live, { state: "starting" });
+  applyLiveStatus(ui.button, ui.live, { state: "starting" }, head);
   assert.deepEqual(ui.button.writes, []);
+  assert.equal(head.textContent, "");
 
   const url = "https://s.cympfh.cc/djtube/stream/ABCD";
-  applyLiveStatus(ui.button, ui.live, { state: "live", url, note: "" });
+  applyLiveStatus(ui.button, ui.live, { state: "live", url, note: "" }, head);
   assert.deepEqual(ui.painted(), {
-    title: `配信中：${url}`,
+    title: "",
     label: LIVE_BUTTON_LABEL,
     face: "on",
     live: `配信中：${url}`,
   });
+  assert.equal(head.textContent, `配信中：${url}`);
   assert.deepEqual(ui.button.writes, ["title", "status", "data-live"]);
 
   ui.button.writes.length = 0;
-  applyLiveStatus(ui.button, ui.live, { state: "live", url, note: "" });
+  applyLiveStatus(ui.button, ui.live, { state: "live", url, note: "" }, head);
   assert.deepEqual(ui.button.writes, []);
 
-  applyLiveStatus(ui.button, ui.live, { state: "live", url, copyFailed: true });
-  assert.equal(ui.painted().title, `配信中：${url}`);
+  applyLiveStatus(ui.button, ui.live, { state: "live", url, copyFailed: true }, head);
+  assert.equal(ui.painted().title, "");
+  assert.equal(head.textContent, `配信中：${url}`);
   assert.equal(ui.painted().live, `配信中：${url}。${LIVE_COPY_FAILED}`);
   assert.deepEqual(ui.button.writes, ["status"]);
   ui.button.writes.length = 0;
-  applyLiveStatus(ui.button, ui.live, { state: "live", url, copyFailed: true });
+  applyLiveStatus(ui.button, ui.live, { state: "live", url, copyFailed: true }, head);
   assert.deepEqual(ui.button.writes, []);
 
-  applyLiveStatus(ui.button, ui.live, { state: "error", reason: "配信の上限に達しました" });
+  applyLiveStatus(ui.button, ui.live, { state: "error", reason: "配信の上限に達しました" }, head);
   assert.deepEqual(ui.painted(), {
     title: "配信の上限に達しました",
     label: LIVE_BUTTON_LABEL,
@@ -374,9 +456,10 @@ test("applyLiveStatus writes a result once and leaves the button name", () => {
     live: "配信の上限に達しました",
   });
   assert.deepEqual(ui.button.writes, ["title", "status", "data-live"]);
+  assert.equal(head.textContent, "");
 
   ui.button.writes.length = 0;
-  applyLiveStatus(ui.button, ui.live, { state: "error", reason: "配信の上限に達しました" });
+  applyLiveStatus(ui.button, ui.live, { state: "error", reason: "配信の上限に達しました" }, head);
   assert.deepEqual(ui.button.writes, []);
 });
 
@@ -400,7 +483,8 @@ test("the first click publishes the master, copies the listener URL, and sends m
   await flush();
   const url = "https://s.cympfh.cc/djtube/stream/ABCD";
   assert.deepEqual(harness.copies, [url]);
-  assert.equal(harness.ui.painted().title, `配信中：${url}`);
+  assert.equal(harness.ui.painted().title, "");
+  assert.equal(harness.menu.head.textContent, `配信中：${url}`);
   assert.equal(harness.ui.painted().live, `配信中：${url}`);
   assert.equal(harness.ui.painted().face, "on");
   assert.equal(harness.ui.painted().label, LIVE_BUTTON_LABEL);
@@ -513,7 +597,8 @@ test("a failed copy still starts, and the URL stays on the hover", async () => {
   await goLive(harness, "WXYZ");
   const url = "https://s.cympfh.cc/djtube/stream/WXYZ";
   assert.equal(harness.ui.painted().face, "on");
-  assert.equal(harness.ui.painted().title, `配信中：${url}`);
+  assert.equal(harness.ui.painted().title, "");
+  assert.equal(harness.menu.head.textContent, `配信中：${url}`);
   assert.equal(harness.ui.painted().live, `配信中：${url}。${LIVE_COPY_FAILED}`);
   assert.equal(harness.sockets[0].sent[0], openedClaim());
 });
@@ -533,7 +618,8 @@ test("a rejected clipboard reservation falls back, and a failed fallback stays o
   const savedUrl = "https://s.cympfh.cc/djtube/stream/COPY";
   assert.deepEqual(saved.copies, [savedUrl]);
   assert.equal(saved.ui.painted().face, "on");
-  assert.equal(saved.ui.painted().title, `配信中：${savedUrl}`);
+  assert.equal(saved.ui.painted().title, "");
+  assert.equal(saved.menu.head.textContent, `配信中：${savedUrl}`);
   assert.equal(saved.ui.painted().live, `配信中：${savedUrl}`);
 
   const failed = setup({
@@ -552,7 +638,8 @@ test("a rejected clipboard reservation falls back, and a failed fallback stays o
   await goLive(failed, "FAIL");
   const failedUrl = "https://s.cympfh.cc/djtube/stream/FAIL";
   assert.equal(failed.ui.painted().face, "on");
-  assert.equal(failed.ui.painted().title, `配信中：${failedUrl}`);
+  assert.equal(failed.ui.painted().title, "");
+  assert.equal(failed.menu.head.textContent, `配信中：${failedUrl}`);
   assert.equal(failed.ui.painted().live, `配信中：${failedUrl}。${LIVE_COPY_FAILED}`);
   assert.equal(failed.sockets[0].sent[0], openedClaim());
   assert.equal(failed.sockets.length, 1);
@@ -566,6 +653,7 @@ test("the second click stops without copying or asking", async () => {
   await flush();
   assert.deepEqual(harness.copies, ["https://s.cympfh.cc/djtube/stream/ABCD"]);
   assert.equal(harness.ui.painted().title, LIVE_IDLE);
+  assert.equal(harness.menu.head.textContent, "");
   assert.equal(harness.ui.painted().live, LIVE_IDLE);
   assert.equal(harness.ui.painted().face, "off");
   assert.equal(harness.recorders[0].stopped, true);
@@ -591,7 +679,8 @@ test("silence keeps a zero-gain source on the stream until the broadcast stops",
   assert.deepEqual(keep.connections[0].connections, [dest]);
   assert.equal(harness.bus.master.connections.includes(keep.connections[0]), false);
   assert.equal(harness.ui.painted().face, "on");
-  assert.equal(harness.ui.painted().title, "配信中：https://s.cympfh.cc/djtube/stream/ABCD");
+  assert.equal(harness.ui.painted().title, "");
+  assert.equal(harness.menu.head.textContent, "配信中：https://s.cympfh.cc/djtube/stream/ABCD");
   harness.ui.button.click();
   await flush();
   assert.equal(keep.stopped, true);
@@ -661,7 +750,8 @@ test("starting again reuses the id and copies the same listener URL", async () =
   assert.equal(harness.sockets[1].sent[0], claimMessage("ABCD", LIVE_TOKEN, 2));
   harness.sockets[1].receive(idMessage());
   await flush();
-  assert.equal(harness.ui.painted().title, `配信中：${url}`);
+  assert.equal(harness.ui.painted().title, "");
+  assert.equal(harness.menu.head.textContent, `配信中：${url}`);
   assert.equal(harness.ui.painted().live, `配信中：${url}`);
   assert.equal(harness.ui.painted().face, "on");
   assert.deepEqual(harness.copies, [url, url]);
@@ -715,7 +805,8 @@ test("an immediate restart reuses the id and token without waiting for the old c
   harness.sockets[1].receive(idMessage());
   await flush();
   assert.equal(harness.ui.painted().face, "on");
-  assert.equal(harness.ui.painted().title, "配信中：https://s.cympfh.cc/djtube/stream/ABCD");
+  assert.equal(harness.ui.painted().title, "");
+  assert.equal(harness.menu.head.textContent, "配信中：https://s.cympfh.cc/djtube/stream/ABCD");
   releaseClose();
   await flush();
   assert.equal(harness.ui.painted().face, "on");
@@ -755,7 +846,8 @@ test("a 4409 drops the id and the next click takes a new one", async () => {
   assert.equal(harness.sockets[2].url, "wss://s.cympfh.cc/djtube/api/live/publish");
   harness.sockets[2].receive(idMessage("EFGH", "next-token"));
   await flush();
-  assert.equal(harness.ui.painted().title, "配信中：https://s.cympfh.cc/djtube/stream/EFGH");
+  assert.equal(harness.ui.painted().title, "");
+  assert.equal(harness.menu.head.textContent, "配信中：https://s.cympfh.cc/djtube/stream/EFGH");
   assert.equal(harness.ui.painted().face, "on");
   assert.equal(JSON.parse(harness.sockets[2].sent[0]).seq, 3);
 });
@@ -928,14 +1020,16 @@ test("a deck that missed the master is named on the live hover", async () => {
   await goLive(harness);
   const url = "https://s.cympfh.cc/djtube/stream/ABCD";
   const noted = `${`配信中：${url}`}。デッキ A はマスターに入っていないため、配信には入りません`;
-  assert.equal(harness.ui.painted().title, noted);
+  assert.equal(harness.ui.painted().title, "");
+  assert.equal(harness.menu.head.textContent, noted);
   assert.equal(harness.ui.painted().live, noted);
   harness.ui.button.writes.length = 0;
   harness.control.refresh();
   assert.deepEqual(harness.ui.button.writes, []);
   gap.A = false;
   harness.control.refresh();
-  assert.equal(harness.ui.painted().title, `配信中：${url}`);
+  assert.equal(harness.ui.painted().title, "");
+  assert.equal(harness.menu.head.textContent, `配信中：${url}`);
   assert.equal(harness.ui.painted().live, `配信中：${url}`);
   harness.ui.button.writes.length = 0;
   harness.control.refresh();
@@ -956,6 +1050,96 @@ test("an unsupported browser keeps the hover and does not open a socket", async 
   assert.equal(harness.ui.painted().title, LIVE_UNSUPPORTED);
 });
 
+test("the live menu copies the audio and video URLs without stopping", async () => {
+  const harness = setup();
+  await harness.menu.audio.click();
+  await flush();
+  assert.deepEqual(harness.copies, []);
+  assert.equal(harness.menu.result.textContent, "");
+
+  await goLive(harness);
+  const url = "https://s.cympfh.cc/djtube/stream/ABCD";
+  assert.equal(harness.ui.button.getAttribute("aria-expanded"), "false");
+  harness.menu.anchor.hover = true;
+  harness.menu.anchor.emit("mouseenter");
+  assert.equal(harness.ui.button.getAttribute("aria-expanded"), "true");
+
+  await harness.menu.audio.click();
+  await flush();
+  assert.deepEqual(harness.copies, [url, url]);
+  assert.equal(harness.menu.result.textContent, LIVE_COPIED);
+  assert.equal(harness.menu.result.dataset.result, "ok");
+  assert.equal(harness.ui.painted().face, "on");
+  assert.equal(harness.sockets[0].closed, null);
+
+  await harness.menu.video.click();
+  await flush();
+  assert.equal(harness.copies[2], `${url}?thumbnail=1`);
+  assert.equal(harness.menu.result.textContent, LIVE_COPIED);
+  assert.equal(harness.ui.painted().face, "on");
+  assert.equal(harness.sockets.length, 1);
+});
+
+test("a failed menu copy stays on the air and says so", async () => {
+  let fail = false;
+  const harness = setup({
+    async copyText(url) {
+      if (fail) throw new Error("denied");
+      harness.copies.push(url);
+    },
+  });
+  await goLive(harness);
+  fail = true;
+  await harness.menu.audio.click();
+  await flush();
+  assert.equal(harness.menu.result.textContent, LIVE_MENU_COPY_FAILED);
+  assert.equal(harness.menu.result.dataset.result, "fail");
+  assert.equal(harness.ui.painted().face, "on");
+  assert.equal(harness.copies.length, 1);
+});
+
+test("escape closes the live menu until the pointer or focus leaves", async () => {
+  const harness = setup();
+  await goLive(harness);
+  harness.menu.anchor.hover = true;
+  harness.menu.anchor.focus = true;
+  harness.menu.anchor.emit("mouseenter");
+  assert.equal(harness.ui.button.getAttribute("aria-expanded"), "true");
+
+  const event = {
+    key: "Escape",
+    prevented: false,
+    stopped: false,
+    preventDefault() {
+      this.prevented = true;
+    },
+    stopPropagation() {
+      this.stopped = true;
+    },
+  };
+  harness.menu.anchor.emit("keydown", event);
+  assert.equal(event.prevented, true);
+  assert.equal(harness.menu.anchor.dataset.menu, "closed");
+  assert.equal(harness.ui.button.focused, true);
+  assert.equal(harness.ui.button.getAttribute("aria-expanded"), "false");
+  assert.equal(harness.ui.painted().face, "on");
+
+  harness.menu.anchor.emit("focusout", { relatedTarget: { inside: true } });
+  assert.equal(harness.menu.anchor.dataset.menu, "closed");
+  harness.menu.anchor.emit("focusout", { relatedTarget: null });
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  harness.menu.anchor.emit("focusin");
+  assert.equal(harness.ui.button.getAttribute("aria-expanded"), "true");
+
+  harness.menu.anchor.dataset.menu = "closed";
+  harness.menu.anchor.emit("mouseleave");
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  harness.menu.anchor.hover = false;
+  harness.menu.anchor.focus = false;
+  harness.menu.anchor.emit("mouseenter");
+  assert.equal(harness.ui.button.getAttribute("aria-expanded"), "false");
+});
+
 test("the header button matches the MIDI control and the page tells a DJ how to start", () => {
   const app = readFileSync(new URL("../../djtube/static/app.js", import.meta.url), "utf8");
   const css = readFileSync(new URL("../../djtube/static/app.css", import.meta.url), "utf8");
@@ -974,6 +1158,16 @@ test("the header button matches the MIDI control and the page tells a DJ how to 
   assert.match(html, /id="live-button"/);
   assert.match(html, /id="live-status" role="status"/);
   assert.match(html, /title="配信を始める"/);
+  assert.match(html, /id="live-copy-audio">音声ストリーミングURLをコピー/);
+  assert.match(html, /id="live-copy-video">動画ストリーミングURLをコピー/);
+  assert.equal(LIVE_COPY_AUDIO, "音声ストリーミングURLをコピー");
+  assert.equal(LIVE_COPY_VIDEO, "動画ストリーミングURLをコピー");
+  assert.match(css, /\.live-anchor:hover > \.live-button\[data-live="on"\] \+ \.live-menu/);
+  assert.match(css, /\.live-anchor:focus-within > \.live-button\[data-live="on"\] \+ \.live-menu/);
+  assert.match(css, /\.live-anchor\[data-menu="closed"\]:hover > \.live-button\[data-live="on"\] \+ \.live-menu/);
+  assert.match(css, /\.live-menu\s*\{[^}]*padding-top:\s*8px/);
+  assert.match(app, /getElementById\("live-copy-audio"\)/);
+  assert.match(app, /getElementById\("live-copy-video"\)/);
   assert.equal(html.includes("おもちゃ"), false);
   assert.match(
     readme,

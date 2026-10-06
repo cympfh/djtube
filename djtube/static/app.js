@@ -960,6 +960,13 @@ const midiLive = document.getElementById("midi-live");
 const liveControl = bindLive({
   button: document.getElementById("live-button"),
   live: document.getElementById("live-status"),
+  menu: {
+    anchor: document.getElementById("live-anchor"),
+    head: document.getElementById("live-menu-head"),
+    audio: document.getElementById("live-copy-audio"),
+    video: document.getElementById("live-copy-video"),
+    result: document.getElementById("live-menu-result"),
+  },
   bus: mix,
   audios,
   prefix,

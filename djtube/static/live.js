@@ -14,6 +14,10 @@ export const LIVE_UNSUPPORTED = "このブラウザでは配信できません";
 export const LIVE_CONNECT_FAILED = "音声を配信に接続できませんでした";
 export const LIVE_DROPPED = "配信が切れました";
 export const LIVE_COPY_FAILED = "URL をコピーできませんでした";
+export const LIVE_COPIED = "コピーしました";
+export const LIVE_MENU_COPY_FAILED = "コピーできませんでした";
+export const LIVE_COPY_AUDIO = "音声ストリーミングURLをコピー";
+export const LIVE_COPY_VIDEO = "動画ストリーミングURLをコピー";
 export const LIVE_SEND_BACKLOG = "送信が追いつかないため、配信を止めました";
 export const LIVE_TAKEN = "この配信 ID は他の人が使っています。もう一度押すと新しい ID で配信します";
 export const LIVE_BUFFER_LIMIT = 1024 * 1024;
@@ -65,6 +69,10 @@ export function listenerUrl(prefix, id, origin) {
   return `${base}${prefix}/stream/${encodeURIComponent(id)}`;
 }
 
+export function videoListenerUrl(prefix, id, origin) {
+  return `${listenerUrl(prefix, id, origin)}?thumbnail=1`;
+}
+
 export function closeReason(code) {
   return CLOSE_TEXT[code] || LIVE_DROPPED;
 }
@@ -96,22 +104,34 @@ export function liveButtonFace(status) {
   return status?.state === "live" ? "on" : "off";
 }
 
-/** Hover stays the live URL. A failed copy is only added for the screen reader. */
+/** The screen reader hears the live URL. A failed copy is only added there. */
 export function liveAnnounceText(status) {
   const text = liveStatusText(status);
   if (status?.state === "live" && status.copyFailed) return `${text}。${LIVE_COPY_FAILED}`;
   return text;
 }
 
-/** Paint the header button and the hidden result. Skip a write when the value is unchanged. */
-export function applyLiveStatus(button, live, status) {
+/**
+ * Paint the header button, the hidden result, and the live menu heading.
+ * While live the browser title stays empty so it does not sit on top of the menu.
+ * Skip a write when the value is unchanged.
+ */
+export function applyLiveStatus(button, live, status, menuHead) {
   const hover = liveStatusText(status);
   const announced = liveAnnounceText(status);
-  if (button.title !== hover) button.title = hover;
+  const nativeTitle = status?.state === "live" ? "" : hover;
+  if (button.title !== nativeTitle) button.title = nativeTitle;
   if (button.getAttribute("aria-label") !== LIVE_BUTTON_LABEL) button.setAttribute("aria-label", LIVE_BUTTON_LABEL);
   if (status?.state !== "starting" && live.textContent !== announced) live.textContent = announced;
   const face = liveButtonFace(status);
   if (button.dataset.live !== face) button.dataset.live = face;
+  const menuText = status?.state === "live" ? hover : "";
+  if (menuHead && menuHead.textContent !== menuText) menuHead.textContent = menuText;
+}
+
+function readyMenu(menu) {
+  if (!menu?.anchor || !menu.head || !menu.audio || !menu.video || !menu.result) return null;
+  return menu;
 }
 
 export async function copyLiveUrl(url, doc = globalThis.document, nav = globalThis.navigator) {
@@ -188,6 +208,7 @@ export function createLiveControl(options) {
   const createRecorder = options.createRecorder;
   const copyText = options.copyText;
   const armCopy = options.armCopy;
+  const menu = readyMenu(options.menu);
   let session = null;
   let pinnedId = "";
   let pinnedToken = "";
@@ -232,7 +253,49 @@ export function createLiveControl(options) {
   }
 
   function paint(status) {
-    applyLiveStatus(button, live, status);
+    applyLiveStatus(button, live, status, menu?.head);
+    if (status?.state !== "live") clearMenuResult();
+    syncExpanded();
+  }
+
+  function clearMenuResult() {
+    if (!menu?.result) return;
+    if (menu.result.textContent) menu.result.textContent = "";
+    if (menu.result.dataset?.result) delete menu.result.dataset.result;
+    if (menu.anchor?.dataset?.menu) delete menu.anchor.dataset.menu;
+  }
+
+  function syncExpanded() {
+    if (typeof button.getAttribute !== "function" || typeof button.setAttribute !== "function") return;
+    const anchor = menu?.anchor;
+    const hovering = typeof anchor?.matches === "function" && (anchor.matches(":hover") || anchor.matches(":focus-within"));
+    const open = button.dataset.live === "on" && anchor?.dataset?.menu !== "closed" && hovering;
+    const value = open ? "true" : "false";
+    if (button.getAttribute("aria-expanded") !== value) button.setAttribute("aria-expanded", value);
+  }
+
+  function showMenuResult(text, kind) {
+    if (!menu?.result || menu.result.textContent === text) {
+      if (menu?.result?.dataset) menu.result.dataset.result = kind;
+      return;
+    }
+    menu.result.textContent = text;
+    if (menu.result.dataset) menu.result.dataset.result = kind;
+  }
+
+  async function copyMenu(kind) {
+    const mine = session;
+    if (!mine || mine.ended || !mine.url) return;
+    const url = kind === "video" ? `${mine.url}?thumbnail=1` : mine.url;
+    try {
+      if (typeof copyText !== "function") throw new Error("clipboard");
+      await copyText(url);
+      if (mine.ended || session !== mine) return;
+      showMenuResult(LIVE_COPIED, "ok");
+    } catch {
+      if (mine.ended || session !== mine) return;
+      showMenuResult(LIVE_MENU_COPY_FAILED, "fail");
+    }
   }
 
   function teardown(mine) {
@@ -488,6 +551,36 @@ export function createLiveControl(options) {
     openPublish(mine);
   }
 
+  if (menu) {
+    const copyClick = (kind) => (event) => {
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      return copyMenu(kind);
+    };
+    menu.audio.addEventListener("click", copyClick("audio"));
+    menu.video.addEventListener("click", copyClick("video"));
+    menu.anchor.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || button.dataset.live !== "on") return;
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      menu.anchor.dataset.menu = "closed";
+      button.focus?.();
+      syncExpanded();
+    });
+    menu.anchor.addEventListener("mouseleave", () => {
+      if (menu.anchor.dataset.menu) delete menu.anchor.dataset.menu;
+      syncExpanded();
+    });
+    menu.anchor.addEventListener("mouseenter", syncExpanded);
+    menu.anchor.addEventListener("focusin", syncExpanded);
+    menu.anchor.addEventListener("focusout", (event) => {
+      const next = event.relatedTarget;
+      if (next && typeof menu.anchor.contains === "function" && menu.anchor.contains(next)) return;
+      if (menu.anchor.dataset.menu) delete menu.anchor.dataset.menu;
+      syncExpanded();
+    });
+  }
+
   function onClick() {
     if (!supported) return;
     if (session) {
@@ -528,5 +621,6 @@ export function bindLive(options) {
     connectSocket: options.connectSocket || ((url) => new WebSocket(url)),
     createRecorder: options.createRecorder || ((stream, recorderOptions) => new MediaRecorder(stream, recorderOptions)),
     copyText: options.copyText || ((url) => copyLiveUrl(url)),
+    menu: options.menu,
   });
 }
