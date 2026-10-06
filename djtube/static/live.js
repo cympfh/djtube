@@ -29,10 +29,16 @@ export const LIVE_SEND_BACKLOG = "送信が追いつかないため、配信を�
 export const LIVE_TAKEN = "この配信 ID は他の人が使っています。もう一度押すと新しい ID で配信します";
 export const LIVE_BUFFER_LIMIT = 1024 * 1024;
 export const LIVE_OUTPUT_STALLED = "音声出力が動いていません（出力デバイスを確認）";
-// On a 4408, wall seconds since the recorder started minus seconds
-// AudioContext.currentTime advanced. At least this much means the output
-// device was not rendering. The page does not stop itself from this.
+// A 4408 names the output device only when rendering looks stopped.
+// MediaRecorder fires dataavailable about every 200 ms while currentTime
+// advances, so 5 s since the last blob, or no blob at all, means the device
+// stalled. A network choke still produces blobs, so that does not match.
+// Wall seconds since the recorder started, minus seconds currentTime
+// advanced, counts only during the first 20 s. That covers an init 4408
+// from a frozen device or a start at 9.9 s. An early gap does not stick
+// after that window. The page does not stop itself from this.
 export const LIVE_OUTPUT_GAP_S = 5;
+export const LIVE_OUTPUT_START_WINDOW_S = 20;
 
 const CLOSE_TEXT = {
   4408: "音声が届かなくなったため、配信を止めました",
@@ -589,12 +595,17 @@ export function createLiveControl(options) {
   }
 
   function outputStalled(mine) {
-    if (mine.renderWall == null || mine.renderMark == null) return false;
     const time = bus?.context?.currentTime;
-    if (typeof time !== "number") return false;
-    const wall = (now() - mine.renderWall) / 1000;
+    if (typeof time !== "number" || mine.renderWall == null) return false;
+    const wallNow = now();
+    const sinceBlob =
+      mine.lastBlobWall == null ? Number.POSITIVE_INFINITY : (wallNow - mine.lastBlobWall) / 1000;
+    if (sinceBlob >= LIVE_OUTPUT_GAP_S) return true;
+    if (mine.renderMark == null) return false;
+    const elapsed = (wallNow - mine.renderWall) / 1000;
+    if (elapsed > LIVE_OUTPUT_START_WINDOW_S) return false;
     const rendered = time - mine.renderMark;
-    return wall - rendered >= LIVE_OUTPUT_GAP_S;
+    return elapsed - rendered >= LIVE_OUTPUT_GAP_S;
   }
 
   function begin(mine, id, token) {
@@ -618,6 +629,7 @@ export function createLiveControl(options) {
     }
     mine.recorder = recorder;
     recorder.ondataavailable = (event) => {
+      mine.lastBlobWall = now();
       const blob = event?.data;
       if (!blob || !blob.size || mine.ended) return;
       Promise.resolve(blob.arrayBuffer())
