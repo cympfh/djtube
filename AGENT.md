@@ -42,7 +42,6 @@ nginx は `/djtube/` を外してコンテナへ渡す。コンテナはポー�
 | `/djtube/api/cookies` | `/api/cookies` |
 | `/djtube/stream/ABCD` | `/stream/ABCD` |
 | `/djtube/api/live/publish` | `/api/live/publish` |
-| `/djtube/api/live/ABCD` | `/api/live/ABCD` |
 
 フロントの基準パスは `/djtube/`。直に `http://127.0.0.1:8098/djtube/` を開いても、同じプレフィックスをコンテナ側で剥がすので動く。
 
@@ -167,26 +166,21 @@ Web MIDI は安全なページで、「MIDI を開く」を押したときだけ
 
 ## 配信
 
-DJ のミックスを、開いているブラウザから聴き手へ中継する。録音も保存もしない。配信も聴取も認証なしで、制限で守る。誰でも配信でき、ID を知っていれば誰でも聴ける。鍵は付けない。守る制限は、初期化が来ない配信とデータが止まった配信の切断、配信者ごとの帯域、同時配信数、接続元ごとの本数、Cluster の大きさである。配信ボタンと、マスター出力を `MediaRecorder` に渡す処理は、ここにはまだ無い。サーバと聴き手のページだけ。
+DJ のミックスを、開いているブラウザから聴き手へ中継する。録音も保存もしない。配信も聴取も認証なしで、制限で守る。誰でも配信でき、ID を知っていれば誰でも聴ける。鍵は付けない。守る制限は、初期化が来ない配信とデータが止まった配信の切断、配信者ごとの帯域、同時配信数、接続元ごとの本数、Cluster の大きさ、配信ごとの聴き手の人数、聴き手の接続元ごとの本数、全配信を合わせた聴き手の人数である。配信ボタンと、マスター出力を `MediaRecorder` に渡す処理は、ここにはまだ無い。サーバと、聴く URL だけ。
 
 ID は英大文字 4 文字。配信の WebSocket を開くたびに、使っていない ID をサーバが振る。同じページを開き直して配信し直すと別の ID になる。クエリ `?id=ABCD` で空いている ID を取ることもできる。使われていれば close `4409`。4 文字の英大文字でなければ `4400`。同時の配信は 8 本まで。接続元ごとに 2 本まで。どちらかを超えると `4429`。接続元は nginx が付ける `X-Real-IP` だけを信じる。そのヘッダが無いときは、接続の相手アドレスを使う。`X-Forwarded-For` は見ない。IPv4 はアドレスごと、IPv6 は `/64` ごとに数える。8098 には nginx からだけ届くようにする。X-Real-IP を信じる前提。既存の location すべてに X-Real-IP を付ける。付け忘れると、全員が 1 つの接続元になって配信が 2 本までになる。
 
-配信元は `ws(s)://<host>/djtube/api/live/publish`（コンテナでは `/api/live/publish`）。繋がるとサーバがテキストで `{"type":"id","id":"ABCD"}` を返す。初期化セグメントの前に、`{"type":"mime","mime":"audio/webm;codecs=opus"}` を 1 回だけ受け取る。省略時もこの MIME。`audio/webm` も同じものとして受ける。それ以外は close `1003`。初期化の前の 2 回目以降のテキストは無視する。初期化のあとのテキストは close `1003`。無通信の 30 秒は、Cluster が完成したときだけ戻る。Cluster にならないバイトでは戻らない。バイナリは MediaRecorder の `dataavailable` を、そのまま 1 フレームずつ送る。`start(200)` 前後の短い塊を想定する。1 フレームが 256KB を超えると close `1009`。平均は 1 秒あたり 64KB で、一度に溜められるのは 8 秒分（512KB）まで。それを超えると close `1008`。初期化セグメントが 10 秒来ない配信、または最後の Cluster から 30 秒止まった配信は close `4408` で切り、枠を空ける。MIME だけ送っても、初期化の 10 秒は延びない。イメージの uvicorn は `--ws-max-size 1048576` で、それより大きい WebSocket メッセージは読む前に切る。
+配信元は `ws(s)://<host>/djtube/api/live/publish`（コンテナでは `/api/live/publish`）。繋がるとサーバがテキストで `{"type":"id","id":"ABCD"}` を返す。初期化セグメントの前に、`{"type":"mime","mime":"audio/webm;codecs=opus"}` を 1 回だけ受け取る。省略時もこの MIME。`audio/webm` も同じものとして受ける。それ以外は close `1003`。HTTP の `Content-Type` は、この正規化した値（`audio/webm;codecs=opus`）だけである。配信者が書いた任意の文字列にはならない。初期化の前の 2 回目以降のテキストは無視する。初期化のあとのテキストは close `1003`。無通信の 30 秒は、Cluster が完成したときだけ戻る。Cluster にならないバイトでは戻らない。バイナリは MediaRecorder の `dataavailable` を、そのまま 1 フレームずつ送る。`start(200)` 前後の短い塊を想定する。1 フレームが 256KB を超えると close `1009`。平均は 1 秒あたり 64KB で、一度に溜められるのは 8 秒分（512KB）まで。それを超えると close `1008`。初期化セグメントが 10 秒来ない配信、または最後の Cluster から 30 秒止まった配信は close `4408` で切り、枠を空ける。MIME だけ送っても、初期化の 10 秒は延びない。イメージの uvicorn は `--ws-max-size 1048576` で、それより大きい WebSocket メッセージは読む前に切る。
 
-聴き手がソケットを閉じたら、配信が黙っていても待ちから外す。配信元が途中で切れたら、聴き手に `{"type":"end"}` を送ってから枠を空ける。
+聴き手が HTTP を切ったら、配信が黙っていても待ちから外す。配信元が途中で切れたら、聴き手のレスポンスを閉じてから枠を空ける。
 
 MediaRecorder の塊は Cluster の境界で切れない。SimpleBlock の途中で切れて、次の塊が続きになる。サーバはバイト列を足して、最初の Cluster より前を初期化セグメントとして覚えておく。既知サイズの Cluster は、そのバイトが揃った時点で聴き手へ送る。MediaRecorder の Cluster はサイズ不明なので、次の Cluster が始まるか、配信元が切れて最後の子要素まで揃ったときに完成とする。Cluster の中身は書き換えない。初期化セグメントと完成した Cluster 以外（途中の Cues など）は聴き手へ出さない。開いている Cluster と、まだ揃っていないバイトが 256KB を超えると close `1009`。形の違うバイト列は close `1003`。配信が続いているあいだサーバが持っているのは、初期化セグメントと、いま開いている Cluster と、直近に完成した Cluster 1 つと、聴き手ごとの短い待ち行列だけ。
 
-聴き手のページは `/djtube/stream/ABCD`（コンテナでは `/stream/ABCD`）。ログインは無い。ID の形が違うときは「ID の形式が違います」。その ID の配信が無いときは「この配信はありません」。ページは `Cache-Control: no-cache`。配信中なら「接続しています」から再生に入る。
+聴く URL は `/djtube/stream/ABCD`（コンテナでは `/stream/ABCD`、公開では `https://s.cympfh.cc/djtube/stream/ABCD`）。HTML ではない。`audio/webm;codecs=opus` を、`Content-Length` の無い終わりのないレスポンスで返す。前段のサーバがこれを chunked で送る。VLC や mpv や ffplay にこの URL を入れると、その時点の音から鳴る。ログインは無い。ID の形が違うときも、その ID の配信が無いときも `404`。配信ごとに聴き手は 200 人まで。同じ配信で、接続元 1 つあたり 4 本まで。全配信を合わせて 400 人まで。どれかを超えると `429`。接続元は配信と同じく `X-Real-IP` で、無ければ接続の相手。IPv6 は `/64`。`X-Forwarded-For` は見ない。`HEAD` は配信中なら `200` と、GET と同じヘッダだけを返す。無ければ `404`。聴き手の枠は使わない。`Cache-Control: no-store`。`X-Accel-Buffering: no`。
 
-聴き手の WebSocket は `/djtube/api/live/ABCD`。
+配信中の本体は、初期化セグメント、直近に完成した Cluster 1 つ、それ以降に完成する Cluster を、この順でバイトのまま書く。それより前の Cluster は送らない。途中から来た人は、その時点の音から聞こえる。初期化がまだ無いあいだは、レスポンスを開いたまま待つ。配信元が切れると、残りの Cluster を書いてからレスポンスを閉じる。
 
-- 無い ID は `{"type":"absent"}` のあと close `4404`
-- 聴き手が 200 人を超えると `{"type":"full"}` のあと close `4429`
-- 配信中は `{"type":"start","id":"ABCD","mime":"audio/webm;codecs=opus"}`、続けて初期化セグメント、直近に完成した Cluster 1 つ、それ以降に完成する Cluster。それより前の Cluster は送らない。途中から来た人は、その時点の音から聞こえる
-- 配信元が切れると `{"type":"end"}` のあと close `1000`。ページは「配信が終了しました」になり、先頭からは再生し直さない
-
-待ち行列は聴き手ごとに Cluster 8 つまで。あふれたら古い Cluster から捨てて、遅れを溜めない。送れていない状態が 2 秒続く聴き手は close `1013` で切る。ページ側は `SourceBuffer.mode = "sequence"` で、初期化セグメントのあとに Cluster を足す。バッファが再生位置より 1.5 秒以上進んだら、終わりの 0.3 秒手前へ飛ぶ。sequence にできないブラウザは、バッファの先頭が再生位置より先なら、同じようにいまの端へシークする。
+待ち行列は聴き手ごとに Cluster 8 つまで。あふれたら古い Cluster から捨てて、遅れを溜めない。送り出し自体が 2 秒ブロックした聴き手は切る。配信は止めない。HTTP では、OS の送信バッファが埋まるまでこの 2 秒は始まらない。回線が詰まった聴き手は、そのバッファの分だけ遅れたまま聴き続ける。切れた聴き手は待ちから外す。
 
 試験音は著作権のある音源を置かず、ffmpeg がその場で作る。
 
@@ -194,9 +188,9 @@ MediaRecorder の塊は Cluster の境界で切れない。SimpleBlock の途中
 uv run python -m djtube.live_tone --base http://127.0.0.1:8098
 ```
 
-440 Hz と 880 Hz を 2 秒ごとに交互に送る。標準出力に ID と聴く URL が出る。`--seconds`、`--id ABCD`、待たずに送る `--no-pace`。ffmpeg が要る。途中から聴くページを開くと、そのときの高さだけが聞こえる。
+440 Hz と 880 Hz を 2 秒ごとに交互に送る。標準出力に ID と聴く URL が出る。`--seconds`、`--id ABCD`、待たずに送る `--no-pace`。ffmpeg が要る。途中からその URL を開くと、そのときの高さだけが聞こえる。
 
-公開の nginx はこのリポジトリに無い。`/djtube/` を外して 8098 へ渡している location に、WebSocket の Upgrade を足す。HTTP のリクエストまで `Connection` を `upgrade` に固定しない。`map` は `http` ブロックに置く。読み書きのタイムアウトが短いと、音が続いているのに切れる。
+公開の nginx はこのリポジトリに無い。`/djtube/` を外して 8098 へ渡している location に、WebSocket の Upgrade を足す。HTTP のリクエストまで `Connection` を `upgrade` に固定しない。`map` は `http` ブロックに置く。読み書きのタイムアウトが短いと、音が続いているのに切れる。`proxy_buffering off` が前提。レスポンスの `X-Accel-Buffering: no` は、付け忘れた location にもバッファを止める。
 
 ```nginx
 map $http_upgrade $connection_upgrade {

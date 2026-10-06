@@ -226,8 +226,13 @@ class WebmSplitter:
 
 
 def split_webm(data: bytes) -> tuple[bytes, list[bytes]]:
+    """Split a finished file. Slices stay under the buffer cap, so a long tone is not one feed."""
+
     splitter = WebmSplitter()
-    clusters = splitter.feed(data)
+    clusters: list[bytes] = []
+    step = 16 * 1024
+    for start in range(0, len(data), step):
+        clusters.extend(splitter.feed(data[start : start + step]))
     clusters.extend(splitter.finish())
     if splitter.init is None:
         raise WebmError("初期化セグメントがありません")
