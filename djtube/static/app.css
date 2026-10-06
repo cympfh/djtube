@@ -116,7 +116,8 @@ button:hover { border-color: #5c564b; }
   border-color: var(--text);
 }
 
-.midi-button {
+.midi-button,
+.live-button {
   width: 36px;
   height: 36px;
   padding: 0;
@@ -128,13 +129,15 @@ button:hover { border-color: #5c564b; }
   color: var(--muted);
 }
 
-.midi-button svg {
+.midi-button svg,
+.live-button svg {
   width: 22px;
   height: 22px;
   display: block;
 }
 
-.midi-button[data-midi="on"] {
+.midi-button[data-midi="on"],
+.live-button[data-live="on"] {
   color: #16140f;
   background: var(--a);
   border-color: var(--a);

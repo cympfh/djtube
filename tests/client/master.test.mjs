@@ -230,6 +230,7 @@ test("scratch still reaches the master when the deck element cannot join the gra
     assert.equal(player.setEqGain("low", -3), false);
     assert.equal(player.audio.volume, 0.4);
     assert.equal(player._level, null);
+    assert.equal(player.offMaster(), true);
     player.playScratch({ rate: 2, chirpHz: 640 });
     const scratchGain = mix.context.nodes.find((item) => item.kind === "gain" && item !== mix.master);
     assert.ok(scratchGain);
@@ -239,6 +240,69 @@ test("scratch still reaches the master when the deck element cannot join the gra
     assert.deepEqual(mix.master.connections, [mix.context.destination]);
   } finally {
     installed.restore();
+  }
+});
+
+test("a source captured before the graph throws still reaches the master through a gain", () => {
+  const previous = globalThis.window;
+  const made = [];
+  let sources = 0;
+  globalThis.window = {
+    AudioContext: function AudioContext() {
+      this.destination = { kind: "destination" };
+      this.state = "running";
+      this.resume = function resume() {};
+      this.createMediaElementSource = function createMediaElementSource(audio) {
+        sources += 1;
+        const source = {
+          kind: "source",
+          media: audio,
+          connections: [],
+          connect(target) {
+            this.connections.push(target);
+          },
+        };
+        made.push(source);
+        return source;
+      };
+      this.createGain = function createGain() {
+        const gain = {
+          kind: "gain",
+          gain: { value: 1 },
+          connections: [],
+          connect(target) {
+            this.connections.push(target);
+          },
+        };
+        made.push(gain);
+        return gain;
+      };
+      this.createBiquadFilter = function createBiquadFilter() {
+        throw new Error("biquad");
+      };
+    },
+  };
+  try {
+    const player = createDeckPlayer("A", "player-A");
+    player.audio = { volume: 1 };
+    player.volume = 0.35;
+    assert.equal(player.setEqGain("high", 3), false);
+    assert.equal(sources, 1);
+    assert.equal(player.audio.volume, 1);
+    assert.equal(player.offMaster(), false);
+    assert.equal(player._graphFailed, false);
+    const master = player._bus.master;
+    const source = made.find((item) => item.kind === "source");
+    assert.equal(player._level.gain.value, 0.35);
+    assert.deepEqual(source.connections, [player._level]);
+    assert.deepEqual(player._level.connections, [master]);
+    assert.deepEqual(master.connections, [player._context.destination]);
+    assert.equal(player.setFilter(0), false);
+    assert.equal(sources, 1);
+    assert.equal(player._level.gain.value, 0.35);
+  } finally {
+    if (previous === undefined) delete globalThis.window;
+    else globalThis.window = previous;
   }
 });
 

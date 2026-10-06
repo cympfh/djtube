@@ -14,6 +14,7 @@ import { formatTime } from "./format.js";
 import { bpmText, tempoValueText } from "./bpm.js";
 import { formatRate } from "./rate.js";
 import { handleKeydown, isSearchTarget, isTypingTarget, legendGroups } from "./keys.js";
+import { bindLive } from "./live.js";
 import { createAudioBus } from "./master.js";
 import { createDeckPlayer, startDeckAudio } from "./player.js";
 import { bindCookies, cookiePanelOpen } from "./cookies.js";
@@ -788,6 +789,7 @@ function render() {
   renderDeck("B");
   renderFader();
   cookiesUi.setOpen(cookiePanelOpen(state.decks));
+  liveControl.refresh();
   document.getElementById("search-button").disabled = state.searching;
   document.getElementById("search-button").textContent = state.searching ? "検索中" : "検索";
   const music = document.getElementById("music-only");
@@ -955,6 +957,13 @@ window.addEventListener(
 
 const midiButton = document.getElementById("midi-button");
 const midiLive = document.getElementById("midi-live");
+const liveControl = bindLive({
+  button: document.getElementById("live-button"),
+  live: document.getElementById("live-status"),
+  bus: mix,
+  audios,
+  prefix,
+});
 
 midiButton.addEventListener("click", () => {
   const opening = { state: "opening", names: [], connected: false };
