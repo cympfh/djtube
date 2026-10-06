@@ -40,6 +40,7 @@ import {
   mimeMessage,
   nowMessage,
   NOW_INTERVAL_MS,
+  nextClaimSeq,
 } from "../../djtube/static/live.js";
 
 function flush() {
@@ -370,6 +371,7 @@ function setup(extra = {}) {
     now: extra.now,
     document: extra.document,
     root: extra.root,
+    initialSeq: extra.initialSeq,
   });
   return { ui, menu, sockets, recorders, copies, bus, control };
 }
@@ -404,7 +406,9 @@ test("listener and publish URLs use the public prefix", () => {
   assert.equal(livePublishUrl("/djtube", "http://127.0.0.1:8098"), "ws://127.0.0.1:8098/djtube/api/live/publish");
   assert.equal(livePublishUrl("/djtube", "https://s.cympfh.cc", "ABCD", LIVE_TOKEN), PUBLISH_URL);
   assert.equal(PUBLISH_URL.includes("token"), false);
-  assert.equal(mimeMessage(), JSON.stringify({ type: "mime", mime: LIVE_MIME }));
+  assert.equal(nextClaimSeq(0), 1);
+  assert.equal(nextClaimSeq(Number.MAX_SAFE_INTEGER - 1), Number.MAX_SAFE_INTEGER);
+  assert.equal(nextClaimSeq(Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER);
   assert.equal(
     claimMessage("ABCD", LIVE_TOKEN, 2),
     JSON.stringify({ type: "mime", mime: LIVE_MIME, seq: 2, id: "ABCD", token: LIVE_TOKEN }),
@@ -412,6 +416,8 @@ test("listener and publish URLs use the public prefix", () => {
   assert.equal(closeReason(4408), "音声が届かなくなったため、配信を止めました");
   assert.equal(closeReason(4409), LIVE_TAKEN);
   assert.equal(closeReason(4429), "配信の上限に達しました");
+  assert.equal(closeReason(4430), "配信の記録を保存できませんでした");
+  assert.equal(closeReason(4431), "配信の記録を読めませんでした");
   assert.equal(closeReason(1003), "配信の形式が受け付けられませんでした");
   assert.equal(closeReason(1008), "送信の上限に達しました");
   assert.equal(closeReason(1009), "データが大きすぎるため、配信を止めました");
@@ -1173,6 +1179,21 @@ test("a 4409 drops the id and the next click takes a new one", async () => {
   assert.equal(JSON.parse(harness.sockets[2].sent[0]).seq, 3);
 });
 
+test("a token sent while the stream is up does not replace the one from the hello", async () => {
+  const harness = setup();
+  await goLive(harness, "ABCD", "first-token");
+  harness.sockets[0].receive(idMessage("ABCD", "refreshed-token"));
+  await flush();
+  assert.equal(harness.ui.painted().face, "on");
+  harness.ui.button.click();
+  await flush();
+  harness.ui.button.click();
+  await flush();
+  const claim = JSON.parse(harness.sockets[1].sent[0]);
+  assert.equal(claim.id, "ABCD");
+  assert.equal(claim.token, "first-token");
+});
+
 test("a new token from the server is what the next claim sends", async () => {
   const harness = setup();
   await goLive(harness, "ABCD", "first-token");
@@ -1266,6 +1287,8 @@ test("stopping while the context is resuming does not open a socket", async () =
 test("a server close stops the broadcast, shows the reason, and does not reconnect", async () => {
   const cases = [
     [4429, "配信の上限に達しました"],
+    [4430, "配信の記録を保存できませんでした"],
+    [4431, "配信の記録を読めませんでした"],
     [4408, "音声が届かなくなったため、配信を止めました"],
     [4409, LIVE_TAKEN],
     [1003, "配信の形式が受け付けられませんでした"],
@@ -2134,4 +2157,207 @@ test("now playing is sent when the picture changes, and not faster than four a s
   harness.ui.button.click();
   await flush();
   assert.equal(timers[0], null);
+});
+
+test("the first text is sent once", async () => {
+  const harness = setup();
+  const pending = harness.ui.button.click();
+  await flush();
+  const socket = harness.sockets[0];
+  assert.equal(socket.sent.length, 1);
+  socket.onopen();
+  socket.onopen();
+  assert.equal(socket.sent.length, 1);
+  const claim = JSON.parse(socket.sent[0]);
+  assert.equal(claim.type, "mime");
+  assert.equal(claim.mime, LIVE_MIME);
+  assert.equal(claim.id, undefined);
+  await pending;
+});
+
+test("a 4410 drops the id and the next click takes a new one", async () => {
+  const harness = setup();
+  await goLive(harness, "ABCD");
+  harness.sockets[0].serverClose(4410);
+  await flush();
+  assert.equal(harness.ui.painted().title, LIVE_DROPPED);
+  assert.equal(harness.ui.painted().face, "off");
+  harness.ui.button.click();
+  await flush();
+  const next = JSON.parse(harness.sockets[1].sent[0]);
+  assert.equal(next.id, undefined);
+  assert.equal(next.token, undefined);
+  assert.equal(harness.sockets[1].url.includes("?"), false);
+});
+
+function lateSocket(url) {
+  return {
+    url,
+    readyState: 1,
+    sent: [],
+    closed: null,
+    onmessage: null,
+    onclose: null,
+    send(data) {
+      this.sent.push(data);
+    },
+    receive(text) {
+      this.onmessage?.({ data: text });
+    },
+    close(code) {
+      this.closed = code ?? 1000;
+      this.readyState = 2;
+    },
+    serverClose(code) {
+      this.readyState = 3;
+      this.onclose?.({ code });
+    },
+  };
+}
+
+test("a 4410 on a replaced socket keeps the id", async () => {
+  const harness = setup({ makeSocket: lateSocket });
+  await goLive(harness, "ABCD");
+  harness.ui.button.click();
+  await flush();
+  harness.ui.button.click();
+  await flush();
+  assert.equal(harness.sockets[1].sent[0], claimMessage("ABCD", LIVE_TOKEN, 2));
+  harness.sockets[1].receive(idMessage());
+  await flush();
+  assert.equal(harness.ui.painted().face, "on");
+  harness.sockets[0].serverClose(4410);
+  await flush();
+  assert.equal(harness.ui.painted().face, "on");
+  assert.equal(harness.ui.painted().title, "");
+  harness.ui.button.click();
+  await flush();
+  harness.ui.button.click();
+  await flush();
+  const claim = JSON.parse(harness.sockets.at(-1).sent[0]);
+  assert.equal(claim.id, "ABCD");
+  assert.equal(claim.token, LIVE_TOKEN);
+});
+
+test("a 4409 after stop drops the id", async () => {
+  const harness = setup({ makeSocket: lateSocket });
+  await goLive(harness, "ABCD");
+  harness.ui.button.click();
+  await flush();
+  assert.equal(harness.ui.painted().title, LIVE_IDLE);
+  harness.sockets[0].serverClose(4409);
+  await flush();
+  harness.ui.button.click();
+  await flush();
+  const claim = JSON.parse(harness.sockets[1].sent[0]);
+  assert.equal(claim.id, undefined);
+  assert.equal(claim.token, undefined);
+});
+
+test("a 4409 on a replaced socket keeps the id", async () => {
+  const harness = setup({ makeSocket: lateSocket });
+  await goLive(harness, "ABCD");
+  harness.ui.button.click();
+  await flush();
+  harness.ui.button.click();
+  await flush();
+  harness.sockets[1].receive(idMessage());
+  await flush();
+  assert.equal(harness.ui.painted().face, "on");
+  harness.sockets[0].serverClose(4409);
+  await flush();
+  assert.equal(harness.ui.painted().face, "on");
+  harness.ui.button.click();
+  await flush();
+  harness.ui.button.click();
+  await flush();
+  const claim = JSON.parse(harness.sockets.at(-1).sent[0]);
+  assert.equal(claim.id, "ABCD");
+  assert.equal(claim.token, LIVE_TOKEN);
+});
+
+test("a close after stop leaves the idle hover", async () => {
+  const source = readFileSync(new URL("../../djtube/static/live.js", import.meta.url), "utf8");
+  const onclose = source.slice(source.indexOf("socket.onclose"), source.indexOf("function openPublish"));
+  const guardAt = onclose.indexOf("if (mine.ended) return;");
+  const stallAt = onclose.search(/outputStalled|renderFrozen/);
+  assert.ok(guardAt !== -1);
+  assert.ok(stallAt !== -1);
+  assert.ok(guardAt < stallAt);
+
+  const harness = setup({ makeSocket: lateSocket });
+  await goLive(harness, "ABCD");
+  harness.ui.button.click();
+  await flush();
+  assert.equal(harness.ui.painted().title, LIVE_IDLE);
+  assert.equal(harness.ui.painted().live, LIVE_IDLE);
+  harness.sockets[0].serverClose(4408);
+  await flush();
+  assert.equal(harness.ui.painted().title, LIVE_IDLE);
+  assert.equal(harness.ui.painted().live, LIVE_IDLE);
+  assert.equal(harness.ui.painted().face, "off");
+});
+
+test("a 4410 after stop keeps the id", async () => {
+  const harness = setup({ makeSocket: lateSocket });
+  await goLive(harness, "ABCD");
+  harness.ui.button.click();
+  await flush();
+  harness.sockets[0].serverClose(4410);
+  await flush();
+  harness.ui.button.click();
+  await flush();
+  const claim = JSON.parse(harness.sockets[1].sent[0]);
+  assert.equal(claim.id, "ABCD");
+  assert.equal(claim.token, LIVE_TOKEN);
+});
+
+test("a 4410 on the socket that replaced the old one drops the id", async () => {
+  const harness = setup({ makeSocket: lateSocket });
+  await goLive(harness, "ABCD");
+  harness.ui.button.click();
+  await flush();
+  harness.ui.button.click();
+  await flush();
+  harness.sockets[1].receive(idMessage());
+  await flush();
+  harness.sockets[1].serverClose(4410);
+  await flush();
+  assert.equal(harness.ui.painted().title, LIVE_DROPPED);
+  harness.ui.button.click();
+  await flush();
+  const claim = JSON.parse(harness.sockets.at(-1).sent[0]);
+  assert.equal(claim.id, undefined);
+  assert.equal(claim.token, undefined);
+});
+
+test("a 4409 on the socket that replaced the old one drops the id", async () => {
+  const harness = setup({ makeSocket: lateSocket });
+  await goLive(harness, "ABCD");
+  harness.ui.button.click();
+  await flush();
+  harness.ui.button.click();
+  await flush();
+  harness.sockets[1].receive(idMessage());
+  await flush();
+  harness.ui.button.click();
+  await flush();
+  harness.sockets[1].serverClose(4409);
+  await flush();
+  harness.ui.button.click();
+  await flush();
+  const claim = JSON.parse(harness.sockets.at(-1).sent[0]);
+  assert.equal(claim.id, undefined);
+  assert.equal(claim.token, undefined);
+});
+
+test("seq stops at the largest safe integer", async () => {
+  const harness = setup({ initialSeq: Number.MAX_SAFE_INTEGER - 1 });
+  await goLive(harness);
+  assert.equal(JSON.parse(harness.sockets[0].sent[0]).seq, Number.MAX_SAFE_INTEGER);
+  harness.ui.button.click();
+  await flush();
+  harness.ui.button.click();
+  await flush();
+  assert.equal(JSON.parse(harness.sockets[1].sent[0]).seq, Number.MAX_SAFE_INTEGER);
 });

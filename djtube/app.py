@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import mimetypes
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -10,7 +11,7 @@ from djtube.assets import DOCUMENT_CACHE, VersionedStaticFiles, asset_version, s
 from djtube.audio import AudioError, audio_needs_cookies, clear_audio_cache, open_audio
 from djtube.cookies import MAX_COOKIE_BYTES, CookieError, CookieStore, cookie_path, install_store
 from djtube.ids import is_video_id
-from djtube.live import LiveHub, mount_live
+from djtube.live import LiveHub, live_seen_path, mount_live
 from djtube.thumbs import thumb_cache
 from djtube.paths import INDEX_PATH, PUBLIC_PREFIX, STATIC_DIR
 from djtube.playlists import PlaylistError, PlaylistStore, playlist_path
@@ -60,6 +61,16 @@ class MoveTrackBody(BaseModel):
     to_index: int = Field(alias="to")
 
 
+def _default_live() -> LiveHub:
+    """Remember live ids in data/live-seen.json. A bad file disables streaming only."""
+
+    try:
+        return LiveHub(seen_path=live_seen_path(), thumbs=thumb_cache())
+    except OSError:
+        logging.getLogger("djtube.live").warning("live streaming is off because id records are unavailable")
+        return LiveHub(enabled=False, availability="unreadable", thumbs=thumb_cache())
+
+
 def create_app(
     playlist_store: PlaylistStore | None = None,
     cookies: CookieStore | None = None,
@@ -69,7 +80,7 @@ def create_app(
     store = playlist_store if playlist_store is not None else PlaylistStore(playlist_path())
     jar = cookies if cookies is not None else CookieStore(cookie_path())
     install_store(jar)
-    mount_live(app, live if live is not None else LiveHub(thumbs=thumb_cache()))
+    mount_live(app, live if live is not None else _default_live())
 
     def raise_playlist(exc: PlaylistError) -> None:
         raise HTTPException(exc.status, str(exc)) from None
@@ -82,6 +93,7 @@ def create_app(
             "prefix": PUBLIC_PREFIX,
             "flx4": "mapped",
             "playback": "ytdlp-stream",
+            "live": app.state.live.health_live(),
         }
 
     @app.get("/api/audio/{video_id}/cause")
