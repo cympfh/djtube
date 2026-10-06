@@ -158,6 +158,40 @@ function openBus(state = "running") {
       this.destinations.push(dest);
       return dest;
     },
+    createGain() {
+      return {
+        gain: { value: 1 },
+        connections: [],
+        connect(target) {
+          this.connections.push(target);
+        },
+        disconnect() {
+          this.connections = [];
+        },
+      };
+    },
+    createConstantSource() {
+      const source = {
+        started: false,
+        stopped: false,
+        connections: [],
+        connect(target) {
+          this.connections.push(target);
+        },
+        disconnect() {
+          this.connections = [];
+        },
+        start() {
+          this.started = true;
+        },
+        stop() {
+          this.stopped = true;
+        },
+      };
+      this.keeps.push(source);
+      return source;
+    },
+    keeps: [],
   };
   return { context, master, failed: false, destination };
 }
@@ -542,6 +576,37 @@ test("the second click stops without copying or asking", async () => {
   harness.ui.button.writes.length = 0;
   harness.sockets[0].onclose?.({ code: 1000 });
   assert.deepEqual(harness.ui.button.writes, []);
+});
+
+test("silence keeps a zero-gain source on the stream until the broadcast stops", async () => {
+  const harness = setup();
+  await goLive(harness);
+  const keep = harness.bus.context.keeps[0];
+  const dest = harness.bus.context.destinations[0];
+  assert.equal(harness.bus.context.keeps.length, 1);
+  assert.equal(keep.started, true);
+  assert.equal(keep.stopped, false);
+  assert.equal(keep.connections.length, 1);
+  assert.equal(keep.connections[0].gain.value, 0);
+  assert.deepEqual(keep.connections[0].connections, [dest]);
+  assert.equal(harness.bus.master.connections.includes(keep.connections[0]), false);
+  assert.equal(harness.ui.painted().face, "on");
+  assert.equal(harness.ui.painted().title, "配信中：https://s.cympfh.cc/djtube/stream/ABCD");
+  harness.ui.button.click();
+  await flush();
+  assert.equal(keep.stopped, true);
+  assert.equal(harness.ui.painted().title, LIVE_IDLE);
+});
+
+test("a context without a constant source still publishes", async () => {
+  const bus = openBus();
+  delete bus.context.createConstantSource;
+  delete bus.context.createGain;
+  const harness = setup({ bus });
+  await goLive(harness);
+  assert.equal(harness.ui.painted().face, "on");
+  assert.equal(bus.context.keeps.length, 0);
+  assert.equal(harness.sockets[0].sent[0], openedClaim());
 });
 
 test("stopping before the socket opens closes it and sends nothing after it opens", async () => {
