@@ -42,12 +42,14 @@ _LOG_HANDLER = "djtube-live"
 STREAM_ID_LENGTH = 4
 STREAM_ALPHABET = string.ascii_uppercase
 DEFAULT_MIME = "audio/webm;codecs=opus"
-MAX_FRAME = 1024 * 1024
+MAX_FRAME = 256 * 1024
 MAX_TEXT = 1024
 MAX_STREAMS = 8
+MAX_PER_IP = 2
 MAX_LISTENERS = 200
 MAX_CLUSTER = DEFAULT_MAX_BUFFER
 MAX_BYTES_PER_SECOND = 64 * 1024
+BURST_SECONDS = 8
 LISTENER_QUEUE = 8
 SEND_TIMEOUT = 2.0
 INIT_TIMEOUT = 10.0
@@ -74,6 +76,21 @@ class LiveClose(Exception):
 
 def is_stream_id(value: str) -> bool:
     return len(value) == STREAM_ID_LENGTH and all(char in STREAM_ALPHABET for char in value)
+
+
+def _publisher_address(websocket: WebSocket) -> str:
+    """The address nginx put in X-Real-IP, or the socket peer when that header is absent.
+
+    X-Forwarded-For is not read. A client can put anything there.
+    """
+
+    raw = websocket.headers.get("x-real-ip")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    client = websocket.client
+    if client is not None and client.host:
+        return client.host
+    return ""
 
 
 def normalize_mime(value: object) -> str | None:
@@ -168,18 +185,19 @@ class _Listener:
 
 
 class _Meter:
-    """One-second burst, then a steady byte rate. Over the cap, the publisher is closed."""
+    """Average `per_second`, with a burst of several seconds. Over that, the publisher is closed."""
 
-    def __init__(self, per_second: int) -> None:
+    def __init__(self, per_second: int, burst_seconds: float) -> None:
         self.per_second = per_second
-        self.tokens = float(per_second)
+        self.capacity = float(per_second * burst_seconds)
+        self.tokens = self.capacity
         self.at = time.monotonic()
 
     def take(self, amount: int) -> bool:
         now = time.monotonic()
         elapsed = now - self.at
         self.at = now
-        self.tokens = min(float(self.per_second), self.tokens + elapsed * self.per_second)
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.per_second)
         if amount > self.tokens:
             return False
         self.tokens -= amount
@@ -187,16 +205,20 @@ class _Meter:
 
 
 class _Stream:
-    def __init__(self, stream_id: str, max_cluster: int, bytes_per_second: int) -> None:
+    def __init__(
+        self, stream_id: str, address: str, max_cluster: int, bytes_per_second: int, burst_seconds: float
+    ) -> None:
         self.id = stream_id
+        self.address = address
         self.mime = DEFAULT_MIME
+        self.mime_announced = False
         self.mime_locked = False
         self.init: bytes | None = None
         self.latest: bytes | None = None
         self.closed = False
         self.listeners: set[_Listener] = set()
         self.splitter = WebmSplitter(max_cluster)
-        self.meter = _Meter(bytes_per_second)
+        self.meter = _Meter(bytes_per_second, burst_seconds)
 
 
 class LiveHub:
@@ -206,20 +228,24 @@ class LiveHub:
         send_timeout: float = SEND_TIMEOUT,
         listener_queue: int = LISTENER_QUEUE,
         max_streams: int = MAX_STREAMS,
+        max_per_ip: int = MAX_PER_IP,
         max_listeners: int = MAX_LISTENERS,
         max_frame: int = MAX_FRAME,
         max_cluster: int = MAX_CLUSTER,
         max_bytes_per_second: int = MAX_BYTES_PER_SECOND,
+        burst_seconds: float = BURST_SECONDS,
         init_timeout: float = INIT_TIMEOUT,
         idle_timeout: float = IDLE_TIMEOUT,
     ) -> None:
         self.send_timeout = send_timeout
         self.listener_queue = listener_queue
         self.max_streams = max_streams
+        self.max_per_ip = max_per_ip
         self.max_listeners = max_listeners
         self.max_frame = max_frame
         self.max_cluster = max_cluster
         self.max_bytes_per_second = max_bytes_per_second
+        self.burst_seconds = burst_seconds
         self.init_timeout = init_timeout
         self.idle_timeout = idle_timeout
         self._lock = threading.Lock()
@@ -239,7 +265,7 @@ class LiveHub:
         _configure_log()
         await websocket.accept()
         try:
-            stream = self._open(websocket.query_params.get("id"))
+            stream = self._open(websocket.query_params.get("id"), _publisher_address(websocket))
         except LiveClose as exc:
             await _close(websocket, exc.code)
             return
@@ -351,30 +377,32 @@ class LiveHub:
 
     async def _consume(self, websocket: WebSocket, stream: _Stream) -> None:
         opened = time.monotonic()
-        last = opened
+        last_cluster = opened
         while True:
             now = time.monotonic()
             if stream.init is None:
                 remaining = self.init_timeout - (now - opened)
             else:
-                remaining = self.idle_timeout - (now - last)
+                remaining = self.idle_timeout - (now - last_cluster)
             if remaining <= 0:
                 raise LiveClose(CODE_TIMEOUT)
             try:
                 message = await asyncio.wait_for(websocket.receive(), remaining)
             except TimeoutError:
                 raise LiveClose(CODE_TIMEOUT) from None
-            last = time.monotonic()
             if message["type"] == "websocket.disconnect":
                 return
             text = message.get("text")
             data = message.get("bytes")
             if text is not None:
                 self._on_text(stream, text)
-            elif data:
-                self._on_bytes(stream, data)
+            elif data and self._on_bytes(stream, data):
+                last_cluster = time.monotonic()
 
     def _on_text(self, stream: _Stream, text: str) -> None:
+        with self._lock:
+            if stream.closed or stream.init is not None or stream.mime_announced:
+                return
         if len(text.encode("utf-8")) > MAX_TEXT:
             raise LiveClose(CODE_TOO_BIG)
         try:
@@ -391,11 +419,12 @@ class LiveHub:
         if mime is None:
             raise LiveClose(CODE_BAD_MEDIA)
         with self._lock:
-            if stream.mime_locked:
+            if stream.closed or stream.init is not None or stream.mime_announced:
                 return
             stream.mime = mime
+            stream.mime_announced = True
 
-    def _on_bytes(self, stream: _Stream, data: bytes) -> None:
+    def _on_bytes(self, stream: _Stream, data: bytes) -> bool:
         if len(data) > self.max_frame:
             raise LiveClose(CODE_TOO_BIG)
         if not stream.meter.take(len(data)):
@@ -408,7 +437,7 @@ class LiveHub:
             raise LiveClose(CODE_BAD_MEDIA) from exc
         with self._lock:
             if stream.closed:
-                return
+                return bool(clusters)
             stream.mime_locked = True
             fresh_init = None
             listeners: list[_Listener] = []
@@ -421,6 +450,7 @@ class LiveHub:
                 listener.offer_init(fresh_init)
         for cluster in clusters:
             self._fanout(stream, cluster)
+        return bool(clusters)
 
     def _fanout(self, stream: _Stream, cluster: bytes) -> None:
         with self._lock:
@@ -431,7 +461,7 @@ class LiveHub:
         for listener in listeners:
             listener.offer_media(cluster)
 
-    def _open(self, requested: str | None) -> _Stream:
+    def _open(self, requested: str | None, address: str) -> _Stream:
         if requested is not None and requested.strip() == "":
             requested = None
         with self._lock:
@@ -440,14 +470,14 @@ class LiveHub:
                     raise LiveClose(CODE_BAD_ID)
                 if requested in self._streams:
                     raise LiveClose(CODE_TAKEN)
-                if len(self._streams) >= self.max_streams:
-                    raise LiveClose(CODE_FULL)
                 stream_id = requested
             else:
-                if len(self._streams) >= self.max_streams:
-                    raise LiveClose(CODE_FULL)
                 stream_id = self._fresh_id()
-            stream = _Stream(stream_id, self.max_cluster, self.max_bytes_per_second)
+            if len(self._streams) >= self.max_streams:
+                raise LiveClose(CODE_FULL)
+            if sum(stream.address == address for stream in self._streams.values()) >= self.max_per_ip:
+                raise LiveClose(CODE_FULL)
+            stream = _Stream(stream_id, address, self.max_cluster, self.max_bytes_per_second, self.burst_seconds)
             self._streams[stream_id] = stream
             return stream
 

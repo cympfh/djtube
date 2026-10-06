@@ -167,11 +167,11 @@ Web MIDI は安全なページで、「MIDI を開く」を押したときだけ
 
 ## 配信
 
-DJ のミックスを、開いているブラウザから聴き手へ中継する。録音も保存もしない。配信も聴取も認証なしで、制限で守る。誰でも配信でき、ID を知っていれば誰でも聴ける。鍵は付けない。守る制限は、初期化が来ない配信とデータが止まった配信の切断、配信者ごとの帯域、同時配信数、Cluster の大きさである。配信ボタンと、マスター出力を `MediaRecorder` に渡す処理は、ここにはまだ無い。サーバと聴き手のページだけ。
+DJ のミックスを、開いているブラウザから聴き手へ中継する。録音も保存もしない。配信も聴取も認証なしで、制限で守る。誰でも配信でき、ID を知っていれば誰でも聴ける。鍵は付けない。守る制限は、初期化が来ない配信とデータが止まった配信の切断、配信者ごとの帯域、同時配信数、接続元ごとの本数、Cluster の大きさである。配信ボタンと、マスター出力を `MediaRecorder` に渡す処理は、ここにはまだ無い。サーバと聴き手のページだけ。
 
-ID は英大文字 4 文字。配信の WebSocket を開くたびに、使っていない ID をサーバが振る。同じページを開き直して配信し直すと別の ID になる。クエリ `?id=ABCD` で空いている ID を取ることもできる。使われていれば close `4409`。4 文字の英大文字でなければ `4400`。同時の配信は 8 本までで、それ以上は `4429`。
+ID は英大文字 4 文字。配信の WebSocket を開くたびに、使っていない ID をサーバが振る。同じページを開き直して配信し直すと別の ID になる。クエリ `?id=ABCD` で空いている ID を取ることもできる。使われていれば close `4409`。4 文字の英大文字でなければ `4400`。同時の配信は 8 本まで。接続元ごとに 2 本まで。どちらかを超えると `4429`。接続元は nginx が付ける `X-Real-IP` だけを信じる。そのヘッダが無いときは、接続の相手アドレスを使う。`X-Forwarded-For` は見ない。
 
-配信元は `ws(s)://<host>/djtube/api/live/publish`（コンテナでは `/api/live/publish`）。繋がるとサーバがテキストで `{"type":"id","id":"ABCD"}` を返す。そのあと任意で `{"type":"mime","mime":"audio/webm;codecs=opus"}`。省略時もこの MIME。`audio/webm` も同じものとして受ける。それ以外は close `1003`。バイナリは MediaRecorder の `dataavailable` を、そのまま 1 フレームずつ送る。`start(200)` 前後の短い塊を想定する。1 フレームが 1MB を超えると close `1009`。届いたバイトが 1 秒あたり 64KB を超えると close `1008`（最初の 1 秒分はそのまま受け、その後は平均）。初期化セグメントが 10 秒来ない配信、または初期化のあとデータが 30 秒止まった配信は close `4408` で切り、枠を空ける。MIME だけ送っても、初期化の 10 秒は延びない。
+配信元は `ws(s)://<host>/djtube/api/live/publish`（コンテナでは `/api/live/publish`）。繋がるとサーバがテキストで `{"type":"id","id":"ABCD"}` を返す。初期化セグメントの前に、`{"type":"mime","mime":"audio/webm;codecs=opus"}` を 1 回だけ受け取る。省略時もこの MIME。`audio/webm` も同じものとして受ける。それ以外は close `1003`。2 回目以降のテキストと、初期化のあとのテキストは無視する。無通信の 30 秒は、Cluster が完成したときだけ戻る。テキストや、Cluster にならないバイトでは戻らない。バイナリは MediaRecorder の `dataavailable` を、そのまま 1 フレームずつ送る。`start(200)` 前後の短い塊を想定する。1 フレームが 256KB を超えると close `1009`。平均は 1 秒あたり 64KB で、一度に溜められるのは 8 秒分（512KB）まで。それを超えると close `1008`。初期化セグメントが 10 秒来ない配信、または最後の Cluster から 30 秒止まった配信は close `4408` で切り、枠を空ける。MIME だけ送っても、初期化の 10 秒は延びない。イメージの uvicorn は `--ws-max-size 1048576` で、それより大きい WebSocket メッセージは読む前に切る。
 
 聴き手がソケットを閉じたら、配信が黙っていても待ちから外す。配信元が途中で切れたら、聴き手に `{"type":"end"}` を送ってから枠を空ける。
 
@@ -208,6 +208,7 @@ location /djtube/ {
     proxy_pass http://127.0.0.1:8098/;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header Upgrade $http_upgrade;
@@ -218,7 +219,7 @@ location /djtube/ {
 }
 ```
 
-すでに `/djtube/` を 8098 へ渡しているなら、その location に `Upgrade`、`Connection`、`proxy_http_version 1.1`、上のタイムアウトを足す。`map` が無ければ `http` に足す。
+すでに `/djtube/` を 8098 へ渡しているなら、その location に `Upgrade`、`Connection`、`proxy_http_version 1.1`、`X-Real-IP`、上のタイムアウトを足す。`map` が無ければ `http` に足す。`X-Real-IP` は `$remote_addr` にする。配信の本数はここだけを見る。
 
 切れた配信のログは標準エラーの `djtube.live`（`publish ABCD` と `end ABCD`）。塊の中身は出さない。
 

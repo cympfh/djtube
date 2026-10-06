@@ -37,4 +37,4 @@ ENV PATH="/app/.venv/bin:$PATH" \
     DJTUBE_COOKIES=/app/data/cookies.txt
 USER appuser
 EXPOSE 8098
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8098"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8098", "--ws-max-size", "1048576"]

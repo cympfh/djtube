@@ -23,10 +23,13 @@ from djtube.live import (
     CODE_TAKEN,
     CODE_TIMEOUT,
     CODE_TOO_BIG,
+    BURST_SECONDS,
     IDLE_TIMEOUT,
     INIT_TIMEOUT,
     MAX_BYTES_PER_SECOND,
     MAX_CLUSTER,
+    MAX_FRAME,
+    MAX_PER_IP,
     MAX_STREAMS,
     LiveHub,
     _Listener,
@@ -296,10 +299,16 @@ def test_a_slow_listener_is_disconnected_and_a_full_queue_drops_old_clusters():
 def test_relay_caps_match_the_publisher_budget():
     hub = LiveHub()
     assert hub.max_streams == MAX_STREAMS == 8
+    assert hub.max_per_ip == MAX_PER_IP == 2
     assert hub.max_bytes_per_second == MAX_BYTES_PER_SECOND == 64 * 1024
+    assert hub.burst_seconds == BURST_SECONDS == 8
+    assert hub.max_bytes_per_second * hub.burst_seconds == 512 * 1024
     assert hub.max_cluster == MAX_CLUSTER == 256 * 1024
+    assert hub.max_frame == MAX_FRAME == 256 * 1024
     assert hub.init_timeout == INIT_TIMEOUT == 10
     assert hub.idle_timeout == IDLE_TIMEOUT == 30
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert '--ws-max-size", "1048576"' in dockerfile
 
 
 def test_a_silent_publisher_loses_its_slot_and_a_quiet_one_does_too():
@@ -358,12 +367,32 @@ def test_mime_alone_does_not_postpone_the_init_deadline():
         assert hub.get("MIME") is None
 
 
-def test_rate_and_cluster_limits_close_with_their_own_reasons():
+def test_small_garbage_a_large_frame_and_a_burst_close_for_different_reasons():
+    small = LiveHub(max_bytes_per_second=1024)
+    with TestClient(create_app(live=small)) as client:
+        with client.websocket_connect("/api/live/publish?id=TINY") as publisher:
+            publisher.receive_json()
+            publisher.send_bytes(b"x" * 3000)
+            with pytest.raises(WebSocketDisconnect) as bad:
+                publisher.receive_json()
+            assert bad.value.code == CODE_BAD_MEDIA
+        assert small.get("TINY") is None
+
+    framed = LiveHub(max_frame=128, max_cluster=10_000, max_bytes_per_second=10_000)
+    with TestClient(create_app(live=framed)) as client:
+        with client.websocket_connect("/api/live/publish?id=FRAM") as publisher:
+            publisher.receive_json()
+            publisher.send_bytes(b"x" * 200)
+            with pytest.raises(WebSocketDisconnect) as too_big:
+                publisher.receive_json()
+            assert too_big.value.code == CODE_TOO_BIG
+        assert framed.get("FRAM") is None
+
     rate = LiveHub(max_bytes_per_second=1024)
     with TestClient(create_app(live=rate)) as client:
         with client.websocket_connect("/api/live/publish?id=RATE") as publisher:
             publisher.receive_json()
-            publisher.send_bytes(b"x" * 2048)
+            publisher.send_bytes(b"x" * 9000)
             with pytest.raises(WebSocketDisconnect) as too_fast:
                 publisher.receive_json()
             assert too_fast.value.code == CODE_RATE
@@ -376,11 +405,84 @@ def test_rate_and_cluster_limits_close_with_their_own_reasons():
             with client.websocket_connect("/api/live/HUGE") as listener:
                 assert listener.receive_json()["type"] == "start"
                 publisher.send_bytes(b"x" * 128)
-                with pytest.raises(WebSocketDisconnect) as too_big:
+                with pytest.raises(WebSocketDisconnect) as cluster:
                     publisher.receive_json()
-                assert too_big.value.code == CODE_TOO_BIG
+                assert cluster.value.code == CODE_TOO_BIG
                 assert listener.receive_json() == {"type": "end"}
         assert huge.get("HUGE") is None
+
+
+def test_text_after_a_cluster_does_not_refresh_the_idle_timer():
+    cluster = cluster_known(0, b"wave")
+    head, _data = document([cluster])
+    hub = LiveHub(init_timeout=2, idle_timeout=0.4)
+    with TestClient(create_app(live=hub)) as client:
+        with client.websocket_connect("/api/live/publish?id=KEEP") as publisher:
+            publisher.receive_json()
+            publisher.send_json({"type": "mime", "mime": "audio/webm"})
+            publisher.send_bytes(head + cluster)
+            sent = time.monotonic()
+            time.sleep(0.25)
+            publisher.send_json({"type": "mime", "mime": "audio/webm"})
+            publisher.send_text("still here")
+            publisher.send_bytes(cluster[:2])
+            with pytest.raises(WebSocketDisconnect) as quiet:
+                publisher.receive_json()
+            assert quiet.value.code == CODE_TIMEOUT
+            assert time.monotonic() - sent < 0.58
+        assert hub.get("KEEP") is None
+
+
+def test_a_second_mime_is_ignored_and_the_first_one_sticks():
+    cluster = cluster_known(0, b"wave")
+    head, _data = document([cluster])
+    with TestClient(create_app()) as client:
+        with client.websocket_connect("/api/live/publish?id=ONCE") as publisher:
+            publisher.receive_json()
+            publisher.send_json({"type": "mime", "mime": "audio/webm"})
+            publisher.send_json({"type": "mime", "mime": "text/html"})
+            publisher.send_bytes(head + cluster)
+            with client.websocket_connect("/api/live/ONCE") as listener:
+                assert listener.receive_json()["mime"] == "audio/webm;codecs=opus"
+                assert listener.receive_bytes() == head
+
+
+def test_one_address_may_publish_twice_and_forwarded_for_does_not_count():
+    hub = LiveHub()
+    with TestClient(create_app(live=hub)) as client:
+        first = {"x-real-ip": "203.0.113.8", "x-forwarded-for": "198.51.100.1"}
+        second = {"x-real-ip": "203.0.113.8", "x-forwarded-for": "198.51.100.2"}
+        spoofed = {"x-forwarded-for": "203.0.113.50"}
+        with client.websocket_connect("/api/live/publish?id=IPAA", headers=first) as held:
+            assert held.receive_json()["id"] == "IPAA"
+            with client.websocket_connect("/api/live/publish?id=IPAB", headers=second) as also:
+                assert also.receive_json()["id"] == "IPAB"
+                with pytest.raises(WebSocketDisconnect) as full:
+                    with client.websocket_connect("/api/live/publish?id=IPAC", headers=first) as extra:
+                        extra.receive_json()
+                assert full.value.code == CODE_FULL
+                with client.websocket_connect(
+                    "/api/live/publish?id=IPBA",
+                    headers={"x-real-ip": "203.0.113.9", "x-forwarded-for": "198.51.100.1"},
+                ) as other:
+                    assert other.receive_json()["id"] == "IPBA"
+            with client.websocket_connect("/api/live/publish?id=FFAA", headers=spoofed) as forwarded:
+                assert forwarded.receive_json()["id"] == "FFAA"
+                with client.websocket_connect(
+                    "/api/live/publish?id=FFAB",
+                    headers={"x-forwarded-for": "203.0.113.51"},
+                ) as forwarded_again:
+                    assert forwarded_again.receive_json()["id"] == "FFAB"
+                    with pytest.raises(WebSocketDisconnect) as shared:
+                        with client.websocket_connect(
+                            "/api/live/publish?id=FFAC",
+                            headers={"x-forwarded-for": "203.0.113.52"},
+                        ) as forwarded_full:
+                            forwarded_full.receive_json()
+                    assert shared.value.code == CODE_FULL
+        assert hub.get("IPAA") is None
+        with client.websocket_connect("/api/live/publish?id=IPAA", headers=first) as again:
+            assert again.receive_json()["id"] == "IPAA"
 
 
 def test_a_listener_who_leaves_during_silence_is_dropped():
