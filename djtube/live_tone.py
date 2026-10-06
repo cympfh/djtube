@@ -124,7 +124,21 @@ def _close_code(exc: Exception) -> int | None:
     return fallback if isinstance(fallback, int) else None
 
 
-async def publish_webm(url: str, webm: bytes, pace: bool, stream_id: str | None = None) -> str:
+def parse_now_arg(value: str) -> dict[str, object]:
+    """``VIDEOID`` or ``VIDEOID:GAIN``. A missing gain is 1."""
+
+    video, sep, gain_text = value.partition(":")
+    gain = 1.0 if sep == "" or gain_text == "" else float(gain_text)
+    return {"video": video, "gain": gain}
+
+
+async def publish_webm(
+    url: str,
+    webm: bytes,
+    pace: bool,
+    now: list[dict[str, object]] | None = None,
+    stream_id: str | None = None,
+) -> str:
     import websockets
 
     init, clusters = split_webm(webm)
@@ -149,6 +163,8 @@ async def publish_webm(url: str, webm: bytes, pace: bool, stream_id: str | None 
             raise _connect_error(exc) from exc
         stream_id = str(hello["id"])
         _announce(stream_id, url)
+        if now:
+            await connection.send(json.dumps({"type": "now", "decks": now}))
         sent = 0
         previous = 0
         mark = 0
@@ -197,6 +213,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seconds", type=float, default=30)
     parser.add_argument("--id", default="", help="4 文字の英大文字。空ならサーバが振る")
     parser.add_argument("--no-pace", action="store_true", help="待たずに全部送る")
+    parser.add_argument(
+        "--now",
+        action="append",
+        default=[],
+        metavar="ID:GAIN",
+        help="再生中のデッキ。11 文字の動画 ID。gain を省くと 1。繰り返すと 2 件まで",
+    )
     args = parser.parse_args(argv)
     if args.seconds <= 0:
         print("秒数を 0 より大きくしてください", file=sys.stderr)
@@ -209,7 +232,16 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print("440 Hz と 880 Hz を 2 秒ごとに交互に送ります", flush=True)
     try:
-        asyncio.run(publish_webm(publish_url, webm, pace=not args.no_pace, stream_id=args.id.strip() or None))
+        decks = [parse_now_arg(item) for item in args.now]
+        asyncio.run(
+            publish_webm(
+                publish_url,
+                webm,
+                pace=not args.no_pace,
+                now=decks,
+                stream_id=args.id.strip() or None,
+            )
+        )
     except ToneError as exc:
         print(str(exc), file=sys.stderr)
         return 1

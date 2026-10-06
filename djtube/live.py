@@ -21,6 +21,13 @@ frame is the same close code, logged as ``timeout claim``. MIME text and
 bytes that never start a Cluster do not extend the init clock. An unfinished
 Cluster does not refresh the idle clock. Byte rate and Cluster size are
 capped the same way.
+
+``GET /stream/{ID}?thumbnail=1`` is the same broadcast with a picture. The
+browser only says which videos are audible. One ffmpeg process per stream
+draws their thumbnails and muxes MPEG-TS while a video listener is connected.
+The query without that value is audio only, as above. Reclaiming an id ends
+that picture and its ffmpeg with the old listeners. The old socket's cleanup
+does not drop the stream the new socket is publishing.
 """
 
 from __future__ import annotations
@@ -31,6 +38,7 @@ import hmac
 import ipaddress
 import json
 import logging
+import math
 import secrets
 import string
 import threading
@@ -41,6 +49,21 @@ from collections.abc import Awaitable, Callable
 from fastapi import FastAPI, Request, Response, WebSocket
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 
+from djtube.ids import is_video_id
+from djtube.thumbs import ThumbCache
+from djtube.video import (
+    AUDIO_QUEUE_MAX,
+    MAX_VIDEO_ENCODERS,
+    MAX_VIDEO_PER_IP,
+    OUTPUT_STALL,
+    RESTART_BACKOFF,
+    VIDEO_FPS,
+    VIDEO_HEIGHT,
+    VIDEO_LINGER,
+    VIDEO_MIME,
+    VIDEO_WIDTH,
+    FfmpegRelay,
+)
 from djtube.webm import DEFAULT_MAX_BUFFER, WebmError, WebmSplitter, WebmTooBig
 
 log = logging.getLogger(__name__)
@@ -60,6 +83,13 @@ MAX_CLUSTER = DEFAULT_MAX_BUFFER
 MAX_BYTES_PER_SECOND = 64 * 1024
 BURST_SECONDS = 8
 LISTENER_QUEUE = 8
+# A now-playing JSON is a few dozen bytes. 4/s matches the browser, which
+# samples the decks on that cadence and sends only when the picture changed.
+# The bucket holds one second of messages. A stutter can deliver several at
+# once; the extras are dropped and the newest one is applied when a token
+# returns. The publisher is not closed.
+NOW_PER_SECOND = 4
+VIDEO_LISTENER_QUEUE = 32
 # Starts when the ASGI send is awaited. The kernel accepts writes until the
 # socket buffer fills, so a congested listener is not cut until then and keeps
 # that much delay.
@@ -261,6 +291,63 @@ class _Meter:
         return True
 
 
+class _NowMeter:
+    """`per_second` now-playing messages, with a burst of the same number."""
+
+    def __init__(self, per_second: int = NOW_PER_SECOND) -> None:
+        self.per_second = per_second
+        self.capacity = float(per_second)
+        self.tokens = self.capacity
+        self.at = time.monotonic()
+
+    def take(self) -> bool:
+        now = time.monotonic()
+        elapsed = now - self.at
+        self.at = now
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.per_second)
+        if self.tokens < 1:
+            return False
+        self.tokens -= 1
+        return True
+
+
+# A now-playing message that is not applied. The audio publisher stays up.
+NOW_IGNORED = object()
+
+
+def parse_now(payload: object) -> tuple[tuple[str, float], ...] | None | object:
+    """Decks from a now-playing object.
+
+    None when this is not that message. ``NOW_IGNORED`` when it says it is,
+    but the decks are not usable. The publisher is left open either way.
+    """
+
+    if not isinstance(payload, dict) or payload.get("type") != "now":
+        return None
+    decks = payload.get("decks")
+    if not isinstance(decks, list) or len(decks) > 2:
+        return NOW_IGNORED
+    parsed: list[tuple[str, float]] = []
+    for item in decks:
+        if not isinstance(item, dict):
+            return NOW_IGNORED
+        video = item.get("video")
+        gain = item.get("gain")
+        if not isinstance(video, str) or not is_video_id(video):
+            return NOW_IGNORED
+        # bool is an int. A JSON true must not pass as gain 1.
+        if isinstance(gain, bool) or not isinstance(gain, (int, float)):
+            return NOW_IGNORED
+        try:
+            gain_value = float(gain)
+        except (OverflowError, ValueError):
+            return NOW_IGNORED
+        if not math.isfinite(gain_value) or gain_value < 0 or gain_value > 1:
+            return NOW_IGNORED
+        parsed.append((video, gain_value))
+    return tuple(parsed)
+
+
 class _Hold:
     """Secret that keeps an id out of the free pool after the publisher stops."""
 
@@ -283,10 +370,20 @@ class _Stream:
         self.mime_announced = False
         self.init: bytes | None = None
         self.latest: bytes | None = None
+        # AAC will not start on the short tail Cluster alone. Keep the recent
+        # ones so a listener who arrives at the end of a burst still has audio.
+        self.recent: deque[bytes] = deque(maxlen=8)
         self.closed = False
         self.generation = 0
         self.websocket: WebSocket | None = None
         self.listeners: set[_Listener] = set()
+        self.video_listeners: set[_Listener] = set()
+        self.decks: tuple[tuple[str, float], ...] = ()
+        self.now_meter = _NowMeter()
+        self.pending_now: tuple[tuple[str, float], ...] | None = None
+        self.now_timer: threading.Timer | None = None
+        self.relay: FfmpegRelay | None = None
+        self.video_hold = False
         self.splitter = WebmSplitter(max_cluster)
         self.meter = _Meter(bytes_per_second, burst_seconds)
 
@@ -312,6 +409,17 @@ class LiveHub:
         reservation_max: int = RESERVATION_MAX,
         reservation_per_ip: int = RESERVATION_PER_IP,
         clock: Callable[[], float] | None = None,
+        max_video_encoders: int = MAX_VIDEO_ENCODERS,
+        max_video_per_ip: int = MAX_VIDEO_PER_IP,
+        video_linger: float = VIDEO_LINGER,
+        output_stall: float = OUTPUT_STALL,
+        restart_backoff: float = RESTART_BACKOFF,
+        audio_queue_max: int = AUDIO_QUEUE_MAX,
+        video_size: tuple[int, int] = (VIDEO_WIDTH, VIDEO_HEIGHT),
+        video_fps: int = VIDEO_FPS,
+        video_listener_queue: int = VIDEO_LISTENER_QUEUE,
+        ffmpeg: str = "ffmpeg",
+        thumbs: ThumbCache | None = None,
     ) -> None:
         self.send_timeout = send_timeout
         self.listener_queue = listener_queue
@@ -329,6 +437,17 @@ class LiveHub:
         self.reservation_ttl = reservation_ttl
         self.reservation_max = reservation_max
         self.reservation_per_ip = reservation_per_ip
+        self.max_video_encoders = max_video_encoders
+        self.max_video_per_ip = max_video_per_ip
+        self.video_linger = video_linger
+        self.output_stall = output_stall
+        self.restart_backoff = restart_backoff
+        self.audio_queue_max = audio_queue_max
+        self.video_size = video_size
+        self.video_fps = video_fps
+        self.video_listener_queue = video_listener_queue
+        self.ffmpeg = ffmpeg
+        self.thumbs = thumbs if thumbs is not None else ThumbCache()
         self._clock = clock or time.monotonic
         self._lock = threading.Lock()
         self._streams: dict[str, _Stream] = {}
@@ -341,8 +460,8 @@ class LiveHub:
                 return None
             return stream
 
-    def stream_status(self, stream_id: str) -> tuple[int, str | None]:
-        """HEAD. Does not take a listener slot. The type is None when nothing is live."""
+    def stream_status(self, stream_id: str, *, video: bool = False, address: str = "") -> tuple[int, str | None]:
+        """HEAD. Does not take a listener slot or start ffmpeg. The type is None when nothing is live."""
 
         if not is_stream_id(stream_id):
             return 404, None
@@ -350,6 +469,10 @@ class LiveHub:
             stream = self._streams.get(stream_id)
             if stream is None or stream.closed:
                 return 404, None
+            if video:
+                if self._video_blocked(stream, address):
+                    return 429, None
+                return 200, VIDEO_MIME
             return 200, content_type(stream.mime)
 
     async def publish(self, websocket: WebSocket) -> None:
@@ -365,7 +488,7 @@ class LiveHub:
                 normalized = normalize_mime(claim.mime)
                 if normalized is None:
                     raise LiveClose(CODE_BAD_MEDIA)
-            stream, generation, token, replaced, ended = self._open(
+            stream, generation, token, replaced, ended, video_ended, old_relay = self._open(
                 claim.requested,
                 claim.token,
                 _publisher_address(websocket),
@@ -384,12 +507,18 @@ class LiveHub:
                     stream.mime_announced = True
         for listener in ended:
             listener.offer_end()
+        for listener in video_ended:
+            listener.offer_end()
         if replaced is not None:
             # The previous publisher is still inside receive(). Closing it from
             # this task deadlocks the test portal, so the close runs after the
             # next await. 4410 tells that socket it was replaced.
             log.info("end %s", stream.id)
             asyncio.create_task(_close(replaced, CODE_REPLACED))
+        if old_relay is not None:
+            # kill/wait stays off this loop. The old generation must not run it
+            # later, or it could reap the ffmpeg this socket is about to start.
+            asyncio.create_task(asyncio.to_thread(old_relay.close))
         log.info("publish %s", stream.id)
         try:
             await websocket.send_json({"type": "id", "id": stream.id, "token": token})
@@ -401,7 +530,19 @@ class LiveHub:
         except WebSocketDisconnect:
             pass
         finally:
-            if self._end(stream, generation):
+            # close() waits on ffmpeg. Keep that off the event loop, and do not
+            # let a cancelled handler skip the reap. A generation mismatch
+            # returns without touching the stream the replacement is using.
+            closing: list[FfmpegRelay] = []
+            if self._end(stream, generation, closing):
+                relay = closing[0] if closing else None
+                if relay is not None:
+                    task = asyncio.ensure_future(asyncio.to_thread(relay.close))
+                    while not task.done():
+                        try:
+                            await asyncio.shield(task)
+                        except asyncio.CancelledError:
+                            continue
                 log.info("end %s", stream.id)
 
     async def _read_claim(self, websocket: WebSocket, connected: float) -> "_Claim":
@@ -437,11 +578,11 @@ class LiveHub:
             stream = self._streams.get(stream_id)
             if stream is None or stream.closed:
                 return 404, None, None
-            if len(stream.listeners) >= self.max_listeners:
+            if self._listeners_of(stream) >= self.max_listeners:
                 return 429, None, None
-            if sum(item.address == address for item in stream.listeners) >= self.max_listeners_per_ip:
+            if self._listeners_at(stream, address) >= self.max_listeners_per_ip:
                 return 429, None, None
-            if sum(len(item.listeners) for item in self._streams.values()) >= self.max_listeners_total:
+            if self._listeners_total() >= self.max_listeners_total:
                 return 429, None, None
             listener = _Listener(self.listener_queue, address)
             stream.listeners.add(listener)
@@ -457,6 +598,97 @@ class LiveHub:
         listener.mark_closed()
         with self._lock:
             stream.listeners.discard(listener)
+
+    def prepare_video(
+        self, stream_id: str, address: str
+    ) -> tuple[int, "_Listener | None", "_Stream | None", tuple | None]:
+        """Reserve a video listener. Popen happens in ``open_video``, off the event loop."""
+
+        if not is_stream_id(stream_id):
+            return 404, None, None, None
+        with self._lock:
+            stream = self._streams.get(stream_id)
+            if stream is None or stream.closed:
+                return 404, None, None, None
+            if self._listeners_of(stream) >= self.max_listeners:
+                return 429, None, None, None
+            if self._listeners_at(stream, address) >= self.max_listeners_per_ip:
+                return 429, None, None, None
+            if self._listeners_total() >= self.max_listeners_total:
+                return 429, None, None, None
+            needs_slot = not self._encoder_busy(stream)
+            if needs_slot and self._video_blocked(stream, address):
+                return 429, None, None, None
+            listener = _Listener(self.video_listener_queue, address)
+            stream.video_listeners.add(listener)
+            if needs_slot:
+                stream.video_hold = True
+            if stream.relay is None:
+                stream.relay = self._make_relay(stream)
+            relay = stream.relay
+            init = stream.init
+            recent = tuple(stream.recent)
+            generation = stream.generation
+        return 200, listener, stream, (relay, needs_slot, init, recent, generation)
+
+    def open_video(
+        self,
+        stream: _Stream,
+        listener: _Listener,
+        relay: FfmpegRelay,
+        needs_slot: bool,
+        init,
+        recent,
+        generation: int,
+    ) -> None:
+        with self._lock:
+            # A reclaim between prepare and Popen removed this listener. Do not
+            # attach it to a relay, and do not clear a newer encoder hold.
+            if stream.generation != generation or listener not in stream.video_listeners or stream.closed:
+                listener.mark_closed()
+                return
+        started = False
+        try:
+            if needs_slot:
+                relay.prime(init, recent)
+                started = True
+            relay.attach(listener)
+        except OSError:
+            log.exception("video %s start", stream.id)
+            listener.mark_closed()
+            with self._lock:
+                stream.video_listeners.discard(listener)
+                if needs_slot and stream.generation == generation:
+                    stream.video_hold = False
+            raise
+        with self._lock:
+            current = stream.generation == generation and listener in stream.video_listeners and not stream.closed
+            if stream.generation == generation and needs_slot and (current or listener not in stream.video_listeners):
+                stream.video_hold = False
+        if current:
+            return
+        # attach can restart a process that reclaim already stopped. Close this
+        # relay again. It is not the one the new generation will publish.
+        listener.mark_closed()
+        if started or relay.occupies():
+            relay.close()
+
+    def drop_video(self, stream: _Stream, listener: _Listener, relay: FfmpegRelay | None = None) -> None:
+        """Detach from the relay this listener opened.
+
+        The stream may already be on a newer ffmpeg. Detaching from
+        ``stream.relay`` would then stop that new process when this old
+        response finishes.
+        """
+
+        with self._lock:
+            stream.video_listeners.discard(listener)
+            if relay is None:
+                relay = stream.relay
+        if relay is not None:
+            relay.detach(listener)
+        else:
+            listener.mark_closed()
 
     def _timeout(self, stream: _Stream, kind: str) -> None:
         """Close 4408. ``kind`` is ``init`` or ``idle`` and is the log word."""
@@ -498,18 +730,30 @@ class LiveHub:
                 last_cluster = time.monotonic()
 
     def _on_text(self, stream: _Stream, text: str, generation: int) -> None:
+        if len(text.encode("utf-8")) > MAX_TEXT:
+            raise LiveClose(CODE_TOO_BIG)
         with self._lock:
             if stream.closed or stream.generation != generation:
                 return
-            if stream.init is not None:
-                raise LiveClose(CODE_BAD_MEDIA)
-            if stream.mime_announced:
-                return
-        if len(text.encode("utf-8")) > MAX_TEXT:
-            raise LiveClose(CODE_TOO_BIG)
+            started = stream.init is not None
+            announced = stream.mime_announced
         try:
             payload = json.loads(text)
         except json.JSONDecodeError:
+            payload = None
+        # now is optional picture state. A bad one is dropped. It never closes
+        # the audio, before or after the initialization segment.
+        if isinstance(payload, dict) and payload.get("type") == "now":
+            parsed = parse_now(payload)
+            if parsed is None or parsed is NOW_IGNORED:
+                return
+            self._accept_now(stream, parsed, generation)
+            return
+        if started:
+            raise LiveClose(CODE_BAD_MEDIA)
+        # A second MIME, including a bad one, does not replace the first and
+        # does not close the socket. The claim may already have announced it.
+        if announced:
             return
         if not isinstance(payload, dict):
             return
@@ -555,9 +799,15 @@ class LiveHub:
                 stream.init = splitter.init
                 fresh_init = stream.init
                 listeners = list(stream.listeners)
+        relay: FfmpegRelay | None = None
         if stream.generation == generation and fresh_init is not None:
             for listener in listeners:
                 listener.offer_init(fresh_init)
+            with self._lock:
+                if stream.generation == generation:
+                    relay = stream.relay
+            if relay is not None:
+                relay.note_init(fresh_init)
         if stream.generation != generation:
             return False
         for cluster in clusters:
@@ -569,13 +819,17 @@ class LiveHub:
             if stream.closed or stream.generation != generation:
                 return
             stream.latest = cluster
+            stream.recent.append(cluster)
             listeners = list(stream.listeners)
+            relay = stream.relay
         for listener in listeners:
             listener.offer_media(cluster)
+        if relay is not None:
+            relay.feed(cluster)
 
     def _open(
         self, requested: str | None, token: str | None, address: str, seq: int | None = None
-    ) -> tuple[_Stream, int, str, WebSocket | None, list[_Listener]]:
+    ) -> tuple[_Stream, int, str, WebSocket | None, list[_Listener], list[_Listener], FfmpegRelay | None]:
         if requested is not None and requested.strip() == "":
             requested = None
         if token is not None and token.strip() == "":
@@ -584,6 +838,8 @@ class LiveHub:
             self._expire_locked()
             replaced: WebSocket | None = None
             ended: list[_Listener] = []
+            video_ended: list[_Listener] = []
+            old_relay: FfmpegRelay | None = None
             if requested is not None:
                 if not is_stream_id(requested):
                     raise LiveClose(CODE_BAD_ID)
@@ -597,7 +853,7 @@ class LiveHub:
                         raise LiveClose(CODE_REPLACED)
                     if current is not None:
                         self._ensure_room_locked(address, current)
-                        replaced, ended = self._displace_locked(current, address)
+                        replaced, ended, video_ended, old_relay = self._displace_locked(current, address)
                         stream = current
                     else:
                         self._ensure_room_locked(address, None)
@@ -617,14 +873,16 @@ class LiveHub:
                 stream_id = self._fresh_id_locked()
                 stream = self._start_locked(stream_id, address)
                 issued = self._remember_locked(stream_id, address, seq)
-            return stream, stream.generation, issued, replaced, ended
+            return stream, stream.generation, issued, replaced, ended, video_ended, old_relay
 
     def _start_locked(self, stream_id: str, address: str) -> _Stream:
         stream = _Stream(stream_id, address, self.max_cluster, self.max_bytes_per_second, self.burst_seconds)
         self._streams[stream_id] = stream
         return stream
 
-    def _displace_locked(self, stream: _Stream, address: str) -> tuple[WebSocket | None, list[_Listener]]:
+    def _displace_locked(
+        self, stream: _Stream, address: str
+    ) -> tuple[WebSocket | None, list[_Listener], list[_Listener], FfmpegRelay | None]:
         """Keep the id. A new MediaRecorder document cannot extend the old one."""
 
         stream.generation += 1
@@ -632,7 +890,20 @@ class LiveHub:
         stream.websocket = None
         stream.address = address
         ended = list(stream.listeners)
+        video_ended = list(stream.video_listeners)
         stream.listeners.clear()
+        stream.video_listeners.clear()
+        relay = stream.relay
+        stream.relay = None
+        stream.video_hold = False
+        stream.decks = ()
+        stream.recent.clear()
+        stream.pending_now = None
+        stream.now_meter = _NowMeter()
+        timer = stream.now_timer
+        stream.now_timer = None
+        if timer is not None:
+            timer.cancel()
         stream.mime = DEFAULT_MIME
         stream.mime_announced = False
         stream.init = None
@@ -640,7 +911,7 @@ class LiveHub:
         stream.closed = False
         stream.splitter = WebmSplitter(self.max_cluster)
         stream.meter = _Meter(self.max_bytes_per_second, self.burst_seconds)
-        return replaced, ended
+        return replaced, ended, video_ended, relay
 
     def _ensure_room_locked(self, address: str, existing: _Stream | None) -> None:
         streams = [stream for stream in self._streams.values() if stream is not existing]
@@ -707,8 +978,10 @@ class LiveHub:
                 return candidate
         raise LiveClose(CODE_FULL)
 
-    def _end(self, stream: _Stream, generation: int) -> bool:
+    def _end(self, stream: _Stream, generation: int, closing: list[FfmpegRelay] | None = None) -> bool:
         with self._lock:
+            # The replacement already owns this object. Do not pop it or stop
+            # the ffmpeg it started.
             if stream.generation != generation or stream.closed:
                 return False
             stream.closed = True
@@ -719,8 +992,18 @@ class LiveHub:
             if hold is not None:
                 hold.at = self._clock()
             listeners = list(stream.listeners)
+            video_listeners = list(stream.video_listeners)
             stream.listeners.clear()
+            stream.video_listeners.clear()
+            relay = stream.relay
+            stream.relay = None
+            stream.video_hold = False
+            stream.pending_now = None
+            now_timer = stream.now_timer
+            stream.now_timer = None
             init = stream.init
+        if now_timer is not None:
+            now_timer.cancel()
         tail: list[bytes] = []
         try:
             tail = stream.splitter.finish()
@@ -734,10 +1017,111 @@ class LiveHub:
             for cluster in tail:
                 listener.offer_media(cluster)
             listener.offer_end()
+        if relay is not None:
+            if init is not None:
+                relay.note_init(init)
+            for cluster in tail:
+                relay.feed(cluster)
+            if closing is not None:
+                closing.append(relay)
+            else:
+                relay.close()
+        for listener in video_listeners:
+            listener.offer_end()
         stream.init = None
         stream.latest = None
+        stream.recent.clear()
         stream.splitter.clear()
         return True
+
+    def _listeners_of(self, stream: _Stream) -> int:
+        return len(stream.listeners) + len(stream.video_listeners)
+
+    def _listeners_at(self, stream: _Stream, address: str) -> int:
+        audio = sum(item.address == address for item in stream.listeners)
+        video = sum(item.address == address for item in stream.video_listeners)
+        return audio + video
+
+    def _listeners_total(self) -> int:
+        return sum(self._listeners_of(item) for item in self._streams.values())
+
+    def _accept_now(self, stream: _Stream, decks: tuple[tuple[str, float], ...], generation: int) -> None:
+        with self._lock:
+            if stream.closed or stream.generation != generation:
+                return
+            if stream.now_meter.take():
+                stream.decks = decks
+                stream.pending_now = None
+                return
+            stream.pending_now = decks
+            if stream.now_timer is not None:
+                return
+            timer = threading.Timer(1.0 / NOW_PER_SECOND, self._apply_pending_now, args=(stream, generation))
+            timer.daemon = True
+            stream.now_timer = timer
+            timer.start()
+
+    def _apply_pending_now(self, stream: _Stream, generation: int) -> None:
+        with self._lock:
+            if stream.generation != generation or stream.closed:
+                return
+            stream.now_timer = None
+            pending = stream.pending_now
+            if pending is None:
+                return
+            if not stream.now_meter.take():
+                timer = threading.Timer(1.0 / NOW_PER_SECOND, self._apply_pending_now, args=(stream, generation))
+                timer.daemon = True
+                stream.now_timer = timer
+                timer.start()
+                return
+            stream.decks = pending
+            stream.pending_now = None
+
+    def _video_blocked(self, stream: _Stream, address: str) -> bool:
+        """A new encoder would exceed a cap. The caller holds ``_lock``."""
+
+        if self._encoder_busy(stream):
+            return False
+        if self._encoder_count() >= self.max_video_encoders:
+            return True
+        return bool(address) and self._encoders_held_by(address) >= self.max_video_per_ip
+
+    def _encoders_held_by(self, address: str) -> int:
+        count = 0
+        for item in self._streams.values():
+            if not self._encoder_busy(item):
+                continue
+            if any(listener.address == address for listener in item.video_listeners):
+                count += 1
+        return count
+
+    def _encoder_busy(self, stream: _Stream) -> bool:
+        if stream.video_hold:
+            return True
+        return stream.relay is not None and stream.relay.occupies()
+
+    def _encoder_count(self) -> int:
+        return sum(1 for item in self._streams.values() if self._encoder_busy(item))
+
+    def _make_relay(self, stream: _Stream) -> FfmpegRelay:
+        def decks() -> tuple[tuple[str, float], ...]:
+            return stream.decks
+
+        width, height = self.video_size
+        return FfmpegRelay(
+            stream.id,
+            decks,
+            self.thumbs,
+            width=width,
+            height=height,
+            fps=self.video_fps,
+            linger=self.video_linger,
+            ffmpeg=self.ffmpeg,
+            output_stall=self.output_stall,
+            restart_backoff=self.restart_backoff,
+            audio_queue_max=self.audio_queue_max,
+        )
 
 
 class _Claim:
@@ -802,14 +1186,22 @@ class _AudioResponse(Response):
 
     media_type = "audio/webm"
 
-    def __init__(self, hub: LiveHub, listener: _Listener, stream: _Stream) -> None:
+    def __init__(
+        self,
+        hub: LiveHub,
+        listener: _Listener,
+        stream: _Stream,
+        media_type: str | None = None,
+        on_close: Callable[[], None] | None = None,
+    ) -> None:
         self.status_code = 200
-        self.media_type = content_type(stream.mime)
+        self.media_type = media_type if media_type is not None else content_type(stream.mime)
         self.background = None
         self.init_headers(_STREAM_HEADERS)
         self.hub = hub
         self.listener = listener
         self.stream = stream
+        self._on_close = on_close
 
     async def __call__(
         self, scope: dict, receive: Callable[[], Awaitable[dict]], send: Callable[[dict], Awaitable[None]]
@@ -818,7 +1210,10 @@ class _AudioResponse(Response):
             await send({"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers})
             await self._body(receive, send)
         finally:
-            self.hub.drop_listener(self.stream, self.listener)
+            if self._on_close is not None:
+                self._on_close()
+            else:
+                self.hub.drop_listener(self.stream, self.listener)
 
     async def _body(self, receive: Callable[[], Awaitable[dict]], send: Callable[[dict], Awaitable[None]]) -> None:
         incoming = asyncio.create_task(_until_http_disconnect(receive))
@@ -872,12 +1267,30 @@ def mount_live(app: FastAPI, hub: LiveHub) -> None:
 
     @app.api_route("/stream/{stream_id}", methods=["GET", "HEAD"])
     async def stream_audio(stream_id: str, request: Request) -> Response:
+        video = request.query_params.get("thumbnail") == "1"
+        address = _publisher_address(request)
         if request.method == "HEAD":
-            status, mime = hub.stream_status(stream_id)
+            status, mime = hub.stream_status(stream_id, video=video, address=address)
             if mime is None:
                 return Response(status_code=status, headers=_STREAM_HEADERS)
             return _HeaderOnly(status, mime)
-        status, listener, stream = await hub.attach_listener(stream_id, _publisher_address(request))
+        if video:
+            status, listener, stream, opener = hub.prepare_video(stream_id, address)
+            if listener is None or stream is None or opener is None:
+                return Response(status_code=status, headers=_STREAM_HEADERS)
+            owned = opener[0]
+            try:
+                await asyncio.to_thread(hub.open_video, stream, listener, *opener)
+            except OSError:
+                return Response(status_code=500, headers=_STREAM_HEADERS)
+            return _AudioResponse(
+                hub,
+                listener,
+                stream,
+                media_type=VIDEO_MIME,
+                on_close=lambda: hub.drop_video(stream, listener, owned),
+            )
+        status, listener, stream = await hub.attach_listener(stream_id, address)
         if listener is None or stream is None:
             return Response(status_code=status, headers=_STREAM_HEADERS)
         return _AudioResponse(hub, listener, stream)

@@ -279,6 +279,7 @@ def test_readme_and_docker_contract():
     assert "クロスフェーダーとは別" in readme
     assert "DJTUBE_PLAYLISTS" not in readme
     assert "DJTUBE_COOKIES" not in readme
+    assert "DJTUBE_THUMB_DIR" not in readme
     assert "data/playlists.json" not in readme
     assert "data/cookies.txt" not in readme
     assert "cookiefile" not in readme
@@ -286,6 +287,7 @@ def test_readme_and_docker_contract():
     assert "AIza" not in agent
     assert "DJTUBE_PLAYLISTS" in agent
     assert "DJTUBE_COOKIES" in agent
+    assert "DJTUBE_THUMB_DIR" in agent
     assert "cookiefile" in agent
     assert "djtube-data" in agent
     assert "djtube.audio" in agent
@@ -303,7 +305,11 @@ def test_readme_and_docker_contract():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "8098" in dockerfile
     assert "YOUTUBE_API_KEY=" not in dockerfile
-    assert "ffmpeg" not in dockerfile
+    assert "apt-get install -y --no-install-recommends ffmpeg" in dockerfile
+    runtime = dockerfile.split("FROM base AS runtime", 1)[1]
+    assert runtime.index("apt-get install -y --no-install-recommends ffmpeg") < runtime.index(
+        "COPY --chown=appuser:appuser djtube"
+    )
     assert "/app/data" in dockerfile
     compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
     assert "127.0.0.1:8098:8098" in compose

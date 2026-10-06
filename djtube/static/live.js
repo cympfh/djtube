@@ -1,6 +1,8 @@
 // Publish the master mix to /api/live/publish.
-// The server assigns the id. One mime text frame goes out before any
-// MediaRecorder blob. A socket the server closes is not opened again.
+// The first text frame is the claim: mime, and id, token, and seq when known.
+// The token is not placed in the URL. After the server returns an id,
+// now-playing JSON goes out when the decks change. A socket the server
+// closes is not opened again.
 
 import { openAudioBus } from "./master.js";
 
@@ -30,6 +32,11 @@ export const LIVE_OUTPUT_STALLED = "音声出力が動いていません（出�
 // How often to sample AudioContext.currentTime. The page does not stop
 // itself from this timer. A 4408 uses the samples only to choose hover text.
 export const LIVE_RENDER_WATCH_MS = 3000;
+// The server accepts four now-playing messages a second. Sampling twice as
+// often, and sending only when the JSON changed, stays inside that.
+export const NOW_INTERVAL_MS = 250;
+
+const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 
 const CLOSE_TEXT = {
   4408: "音声が届かなくなったため、配信を止めました",
@@ -44,6 +51,27 @@ const SOCKET_OPEN = 1;
 
 export function mimeMessage() {
   return JSON.stringify({ type: "mime", mime: LIVE_MIME });
+}
+
+export function nowMessage(decks) {
+  return JSON.stringify({ type: "now", decks });
+}
+
+/** Playing decks only. Gain is the level already applied toward the master. */
+export function deckSnapshot(audios) {
+  const decks = [];
+  for (const name of ["A", "B"]) {
+    const player = audios?.[name];
+    if (!player || player.paused !== false) continue;
+    if (typeof player.offMaster === "function" && player.offMaster()) continue;
+    const video = player.videoId;
+    if (typeof video !== "string" || !VIDEO_ID.test(video)) continue;
+    let gain = Number(player.volume);
+    if (!Number.isFinite(gain)) gain = 0;
+    gain = Math.min(1, Math.max(0, gain));
+    decks.push({ video, gain: Math.round(gain * 1000) / 1000 });
+  }
+  return decks;
 }
 
 /** First text frame. The id and token stay out of the URL nginx logs. */
@@ -226,6 +254,17 @@ export function createLiveControl(options) {
   const clearTimer = options.clearTimer || ((id) => clearTimeout(id));
   const root = options.root;
   const doc = options.document ?? (typeof document === "undefined" ? undefined : document);
+  const nowPlaying = options.nowPlaying;
+  const clock = options.clock || (() => Date.now());
+  // setInterval. setTimer/clearTimer above are one-shot and must stay separate.
+  const schedule =
+    options.schedule ||
+    ((fn, ms) => {
+      const id = setInterval(fn, ms);
+      if (typeof id.unref === "function") id.unref();
+      return id;
+    });
+  const unschedule = options.unschedule || ((id) => clearInterval(id));
   let session = null;
   // Why the panel is open. null while it is closed.
   let openBy = null;
@@ -446,6 +485,10 @@ export function createLiveControl(options) {
     const recorder = mine.recorder;
     const socket = mine.socket;
     const dest = mine.dest;
+    if (mine.nowTimer != null) {
+      unschedule(mine.nowTimer);
+      mine.nowTimer = null;
+    }
     const silence = mine.silence;
     mine.recorder = null;
     mine.socket = null;
@@ -631,6 +674,35 @@ export function createLiveControl(options) {
     mine.url = url;
     paint(liveStatus(mine));
     deliverCopy(mine, url);
+    startNow(mine);
+  }
+
+  function startNow(mine) {
+    if (typeof nowPlaying !== "function") return;
+    let lastSent = "";
+    let lastAt = -Infinity;
+    const tick = () => {
+      if (mine.ended || mine.socket?.readyState !== SOCKET_OPEN) return;
+      let decks = null;
+      try {
+        decks = nowPlaying();
+      } catch {
+        return;
+      }
+      if (!Array.isArray(decks)) return;
+      const text = nowMessage(decks);
+      const at = clock();
+      if (text === lastSent || at - lastAt < NOW_INTERVAL_MS) return;
+      try {
+        mine.socket.send(text);
+      } catch {
+        return;
+      }
+      lastSent = text;
+      lastAt = at;
+    };
+    tick();
+    mine.nowTimer = schedule(tick, NOW_INTERVAL_MS);
   }
 
   function sendClaim(socket) {
@@ -917,5 +989,6 @@ export function bindLive(options) {
     copyText: options.copyText || ((url) => copyLiveUrl(url)),
     menu: options.menu,
     root: options.root || (typeof document === "undefined" ? null : document),
+    nowPlaying: options.nowPlaying ?? (() => deckSnapshot(options.audios)),
   });
 }

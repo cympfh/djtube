@@ -36,8 +36,11 @@ import {
   liveSupported,
   armClipboard,
   claimMessage,
+  deckSnapshot,
   masterGapNote,
   mimeMessage,
+  nowMessage,
+  NOW_INTERVAL_MS,
 } from "../../djtube/static/live.js";
 
 function flush() {
@@ -357,6 +360,10 @@ function setup(extra = {}) {
         copies.push(url);
       }),
     armCopy: extra.armCopy,
+    nowPlaying: extra.nowPlaying,
+    schedule: extra.schedule,
+    unschedule: extra.unschedule,
+    clock: extra.clock,
     sleep: extra.sleep,
     menu,
     setTimer: extra.setTimer,
@@ -1932,5 +1939,64 @@ test("the header button matches the MIDI control and the page tells a DJ how to 
     readme,
     /右上の配信の印を押すと配信が始まり、聴くための URL がコピーされる。VLC などにその URL を入れると聴ける。もう一度押すと止まる。/,
   );
+  assert.match(readme, /動画で見せたいときは、その URL の末尾に \?thumbnail=1 を付ける。/);
   assert.equal(readme.includes("おもちゃ"), false);
+});
+
+test("deckSnapshot keeps the decks that are actually in the master", () => {
+  const audios = {
+    A: { paused: false, videoId: "abcdefghijk", volume: 0.5, offMaster: () => false },
+    B: { paused: true, videoId: "bbbbbbbbbbb", volume: 1, offMaster: () => false },
+  };
+  assert.deepEqual(deckSnapshot(audios), [{ video: "abcdefghijk", gain: 0.5 }]);
+  audios.B.paused = false;
+  audios.B.offMaster = () => true;
+  assert.deepEqual(deckSnapshot(audios), [{ video: "abcdefghijk", gain: 0.5 }]);
+  audios.A.videoId = "not-an-id";
+  assert.deepEqual(deckSnapshot(audios), []);
+  audios.A.videoId = "abcdefghijk";
+  audios.A.volume = 2;
+  assert.equal(deckSnapshot(audios)[0].gain, 1);
+  audios.A.volume = 0.3339;
+  assert.equal(deckSnapshot(audios)[0].gain, 0.334);
+  audios.B.offMaster = () => false;
+  audios.B.volume = 0;
+  assert.deepEqual(deckSnapshot(audios), [
+    { video: "abcdefghijk", gain: 0.334 },
+    { video: "bbbbbbbbbbb", gain: 0 },
+  ]);
+});
+
+test("now playing is sent when the picture changes, and not faster than four a second", async () => {
+  assert.equal(NOW_INTERVAL_MS, 250);
+  let now = 1000;
+  const timers = [];
+  let decks = [{ video: "abcdefghijk", gain: 1 }];
+  const harness = setup({
+    nowPlaying: () => decks,
+    clock: () => now,
+    schedule(fn) {
+      timers.push(fn);
+      return timers.length;
+    },
+    unschedule(id) {
+      timers[id - 1] = null;
+    },
+  });
+  await goLive(harness);
+  const first = nowMessage(decks);
+  assert.deepEqual(harness.sockets[0].sent, [openedClaim(), first]);
+  decks = [{ video: "abcdefghijk", gain: 0.5 }];
+  now = 1100;
+  timers[0]();
+  assert.equal(harness.sockets[0].sent.length, 2);
+  now = 1000 + NOW_INTERVAL_MS;
+  timers[0]();
+  assert.equal(harness.sockets[0].sent.at(-1), nowMessage(decks));
+  assert.equal(harness.sockets[0].sent.length, 3);
+  timers[0]();
+  assert.equal(harness.sockets[0].sent.length, 3);
+  harness.ui.button.click();
+  await flush();
+  assert.equal(timers[0], null);
 });
