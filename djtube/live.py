@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import ipaddress
 import json
 import logging
@@ -64,7 +65,20 @@ IDLE_TIMEOUT = 30.0
 CODE_BAD_ID = 4400
 CODE_TIMEOUT = 4408
 CODE_TAKEN = 4409
+# The previous publisher socket for this id was replaced by a newer one that
+# presented the same secret. The new socket keeps the id.
+CODE_REPLACED = 4410
 CODE_FULL = 4429
+# A stopped id stays reserved so it is not handed to anyone else and a
+# stranger cannot publish on the public URL. 26**4 is 456976 ids. Holds must
+# stay far below that or _fresh_id runs out. 4096 is under one percent of the
+# space. 32 per address covers a DJ reloading, or a small NAT, without letting
+# one source pin the pool. The oldest idle hold is dropped when a cap is hit.
+# A hold whose stream is still publishing is not dropped. The clock starts
+# again when the publisher disconnects, and a live stream is never expired.
+RESERVATION_TTL = 12 * 60 * 60
+RESERVATION_MAX = 4096
+RESERVATION_PER_IP = 32
 CODE_BAD_MEDIA = 1003
 CODE_RATE = 1008
 CODE_TOO_BIG = 1009
@@ -241,6 +255,18 @@ class _Meter:
         return True
 
 
+class _Hold:
+    """Secret that keeps an id out of the free pool after the publisher stops."""
+
+    def __init__(self, token: str, address: str, at: float) -> None:
+        self.token = token
+        self.address = address
+        self.at = at
+        # The page increases this on every attempt. A delayed older attempt
+        # must not replace the attempt that already won.
+        self.seq: int | None = None
+
+
 class _Stream:
     def __init__(
         self, stream_id: str, address: str, max_cluster: int, bytes_per_second: int, burst_seconds: float
@@ -252,6 +278,8 @@ class _Stream:
         self.init: bytes | None = None
         self.latest: bytes | None = None
         self.closed = False
+        self.generation = 0
+        self.websocket: WebSocket | None = None
         self.listeners: set[_Listener] = set()
         self.splitter = WebmSplitter(max_cluster)
         self.meter = _Meter(bytes_per_second, burst_seconds)
@@ -274,6 +302,10 @@ class LiveHub:
         burst_seconds: float = BURST_SECONDS,
         init_timeout: float = INIT_TIMEOUT,
         idle_timeout: float = IDLE_TIMEOUT,
+        reservation_ttl: float = RESERVATION_TTL,
+        reservation_max: int = RESERVATION_MAX,
+        reservation_per_ip: int = RESERVATION_PER_IP,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self.send_timeout = send_timeout
         self.listener_queue = listener_queue
@@ -288,8 +320,13 @@ class LiveHub:
         self.burst_seconds = burst_seconds
         self.init_timeout = init_timeout
         self.idle_timeout = idle_timeout
+        self.reservation_ttl = reservation_ttl
+        self.reservation_max = reservation_max
+        self.reservation_per_ip = reservation_per_ip
+        self._clock = clock or time.monotonic
         self._lock = threading.Lock()
         self._streams: dict[str, _Stream] = {}
+        self._reservations: dict[str, _Hold] = {}
 
     def get(self, stream_id: str) -> _Stream | None:
         with self._lock:
@@ -311,23 +348,70 @@ class LiveHub:
 
     async def publish(self, websocket: WebSocket) -> None:
         _configure_log()
+        # The id and token arrive in the first text frame, never the URL.
+        # nginx logs $request, which is the path and query, not the frame.
         await websocket.accept()
         try:
-            stream = self._open(websocket.query_params.get("id"), _publisher_address(websocket))
+            claim = await self._read_claim(websocket)
+            normalized = None
+            if claim.mime_present:
+                normalized = normalize_mime(claim.mime)
+                if normalized is None:
+                    raise LiveClose(CODE_BAD_MEDIA)
+            stream, generation, token, replaced, ended = self._open(
+                claim.requested,
+                claim.token,
+                _publisher_address(websocket),
+                claim.seq,
+            )
         except LiveClose as exc:
             await _close(websocket, exc.code)
             return
+        except WebSocketDisconnect:
+            return
+        stream.websocket = websocket
+        if normalized is not None:
+            with self._lock:
+                if stream.generation == generation and not stream.closed:
+                    stream.mime = normalized
+                    stream.mime_announced = True
+        for listener in ended:
+            listener.offer_end()
+        if replaced is not None:
+            # The previous publisher is still inside receive(). Closing it from
+            # this task deadlocks the test portal, so the close runs after the
+            # next await. 4410 tells that socket it was replaced.
+            log.info("end %s", stream.id)
+            asyncio.create_task(_close(replaced, CODE_REPLACED))
         log.info("publish %s", stream.id)
         try:
-            await websocket.send_json({"type": "id", "id": stream.id})
-            await self._consume(websocket, stream)
+            await websocket.send_json({"type": "id", "id": stream.id, "token": token})
+            if claim.leading:
+                self._on_bytes(stream, claim.leading, generation)
+            await self._consume(websocket, stream, generation)
         except LiveClose as exc:
             await _close(websocket, exc.code)
         except WebSocketDisconnect:
             pass
         finally:
-            self._end(stream)
-            log.info("end %s", stream.id)
+            if self._end(stream, generation):
+                log.info("end %s", stream.id)
+
+    async def _read_claim(self, websocket: WebSocket) -> "_Claim":
+        try:
+            message = await asyncio.wait_for(websocket.receive(), self.init_timeout)
+        except TimeoutError:
+            raise LiveClose(CODE_TIMEOUT) from None
+        if message["type"] == "websocket.disconnect":
+            raise WebSocketDisconnect()
+        text = message.get("text")
+        if isinstance(text, str):
+            return _parse_claim(text)
+        claim = _Claim()
+        data = message.get("bytes")
+        if isinstance(data, (bytes, bytearray)) and data:
+            claim.leading = bytes(data)
+        return claim
 
     async def attach_listener(self, stream_id: str, address: str) -> tuple[int, "_Listener | None", "_Stream | None"]:
         """Join a live response. 404 when nothing is publishing. 429 when a listener cap is full."""
@@ -359,10 +443,12 @@ class LiveHub:
         with self._lock:
             stream.listeners.discard(listener)
 
-    async def _consume(self, websocket: WebSocket, stream: _Stream) -> None:
+    async def _consume(self, websocket: WebSocket, stream: _Stream, generation: int) -> None:
         opened = time.monotonic()
         last_cluster = opened
         while True:
+            if stream.generation != generation:
+                return
             now = time.monotonic()
             if stream.init is None:
                 remaining = self.init_timeout - (now - opened)
@@ -374,18 +460,20 @@ class LiveHub:
                 message = await asyncio.wait_for(websocket.receive(), remaining)
             except TimeoutError:
                 raise LiveClose(CODE_TIMEOUT) from None
+            if stream.generation != generation:
+                return
             if message["type"] == "websocket.disconnect":
                 return
             text = message.get("text")
             data = message.get("bytes")
             if text is not None:
-                self._on_text(stream, text)
-            elif data and self._on_bytes(stream, data):
+                self._on_text(stream, text, generation)
+            elif data and self._on_bytes(stream, data, generation):
                 last_cluster = time.monotonic()
 
-    def _on_text(self, stream: _Stream, text: str) -> None:
+    def _on_text(self, stream: _Stream, text: str, generation: int) -> None:
         with self._lock:
-            if stream.closed:
+            if stream.closed or stream.generation != generation:
                 return
             if stream.init is not None:
                 raise LiveClose(CODE_BAD_MEDIA)
@@ -407,7 +495,7 @@ class LiveHub:
         if mime is None:
             raise LiveClose(CODE_BAD_MEDIA)
         with self._lock:
-            if stream.closed:
+            if stream.closed or stream.generation != generation:
                 return
             if stream.init is not None:
                 raise LiveClose(CODE_BAD_MEDIA)
@@ -416,76 +504,194 @@ class LiveHub:
             stream.mime = mime
             stream.mime_announced = True
 
-    def _on_bytes(self, stream: _Stream, data: bytes) -> bool:
+    def _on_bytes(self, stream: _Stream, data: bytes, generation: int) -> bool:
+        with self._lock:
+            if stream.closed or stream.generation != generation:
+                return False
+            splitter = stream.splitter
+            meter = stream.meter
         if len(data) > self.max_frame:
             raise LiveClose(CODE_TOO_BIG)
-        if not stream.meter.take(len(data)):
+        if not meter.take(len(data)):
             raise LiveClose(CODE_RATE)
         try:
-            clusters = stream.splitter.feed(data)
+            clusters = splitter.feed(data)
         except WebmTooBig as exc:
             raise LiveClose(CODE_TOO_BIG) from exc
         except WebmError as exc:
             raise LiveClose(CODE_BAD_MEDIA) from exc
         with self._lock:
-            if stream.closed:
-                return bool(clusters)
+            if stream.closed or stream.generation != generation or stream.splitter is not splitter:
+                return False
             fresh_init = None
             listeners: list[_Listener] = []
-            if stream.init is None and stream.splitter.init is not None:
-                stream.init = stream.splitter.init
+            if stream.init is None and splitter.init is not None:
+                stream.init = splitter.init
                 fresh_init = stream.init
                 listeners = list(stream.listeners)
-        if fresh_init is not None:
+        if stream.generation == generation and fresh_init is not None:
             for listener in listeners:
                 listener.offer_init(fresh_init)
+        if stream.generation != generation:
+            return False
         for cluster in clusters:
-            self._fanout(stream, cluster)
+            self._fanout(stream, cluster, generation)
         return bool(clusters)
 
-    def _fanout(self, stream: _Stream, cluster: bytes) -> None:
+    def _fanout(self, stream: _Stream, cluster: bytes, generation: int) -> None:
         with self._lock:
-            if stream.closed:
+            if stream.closed or stream.generation != generation:
                 return
             stream.latest = cluster
             listeners = list(stream.listeners)
         for listener in listeners:
             listener.offer_media(cluster)
 
-    def _open(self, requested: str | None, address: str) -> _Stream:
+    def _open(
+        self, requested: str | None, token: str | None, address: str, seq: int | None = None
+    ) -> tuple[_Stream, int, str, WebSocket | None, list[_Listener]]:
         if requested is not None and requested.strip() == "":
             requested = None
+        if token is not None and token.strip() == "":
+            token = None
         with self._lock:
+            self._expire_locked()
+            replaced: WebSocket | None = None
+            ended: list[_Listener] = []
             if requested is not None:
                 if not is_stream_id(requested):
                     raise LiveClose(CODE_BAD_ID)
-                if requested in self._streams:
+                hold = self._reservations.get(requested)
+                current = self._streams.get(requested)
+                matched = hold is not None and token is not None and _token_ok(hold.token, token)
+                if matched:
+                    assert hold is not None
+                    if not _seq_allows(hold.seq, seq):
+                        # The newer attempt is already recorded. Do not touch it.
+                        raise LiveClose(CODE_REPLACED)
+                    if current is not None:
+                        self._ensure_room_locked(address, current)
+                        replaced, ended = self._displace_locked(current, address)
+                        stream = current
+                    else:
+                        self._ensure_room_locked(address, None)
+                        stream = self._start_locked(requested, address)
+                    self._touch_locked(hold, address, seq)
+                    issued = hold.token
+                elif hold is not None or current is not None:
                     raise LiveClose(CODE_TAKEN)
-                stream_id = requested
+                else:
+                    # Restart, or the hold was evicted. The id is free, so keep
+                    # the listener URL and mint a new token.
+                    self._ensure_room_locked(address, None)
+                    stream = self._start_locked(requested, address)
+                    issued = self._remember_locked(requested, address, seq)
             else:
-                stream_id = self._fresh_id()
-            if len(self._streams) >= self.max_streams:
-                raise LiveClose(CODE_FULL)
-            if sum(stream.address == address for stream in self._streams.values()) >= self.max_per_ip:
-                raise LiveClose(CODE_FULL)
-            stream = _Stream(stream_id, address, self.max_cluster, self.max_bytes_per_second, self.burst_seconds)
-            self._streams[stream_id] = stream
-            return stream
+                self._ensure_room_locked(address, None)
+                stream_id = self._fresh_id_locked()
+                stream = self._start_locked(stream_id, address)
+                issued = self._remember_locked(stream_id, address, seq)
+            return stream, stream.generation, issued, replaced, ended
 
-    def _fresh_id(self) -> str:
-        for _ in range(32):
+    def _start_locked(self, stream_id: str, address: str) -> _Stream:
+        stream = _Stream(stream_id, address, self.max_cluster, self.max_bytes_per_second, self.burst_seconds)
+        self._streams[stream_id] = stream
+        return stream
+
+    def _displace_locked(self, stream: _Stream, address: str) -> tuple[WebSocket | None, list[_Listener]]:
+        """Keep the id. A new MediaRecorder document cannot extend the old one."""
+
+        stream.generation += 1
+        replaced = stream.websocket
+        stream.websocket = None
+        stream.address = address
+        ended = list(stream.listeners)
+        stream.listeners.clear()
+        stream.mime = DEFAULT_MIME
+        stream.mime_announced = False
+        stream.init = None
+        stream.latest = None
+        stream.closed = False
+        stream.splitter = WebmSplitter(self.max_cluster)
+        stream.meter = _Meter(self.max_bytes_per_second, self.burst_seconds)
+        return replaced, ended
+
+    def _ensure_room_locked(self, address: str, existing: _Stream | None) -> None:
+        streams = [stream for stream in self._streams.values() if stream is not existing]
+        if len(streams) >= self.max_streams:
+            raise LiveClose(CODE_FULL)
+        if sum(stream.address == address for stream in streams) >= self.max_per_ip:
+            raise LiveClose(CODE_FULL)
+
+    def _expire_locked(self) -> None:
+        now = self._clock()
+        stale = [
+            stream_id
+            for stream_id, hold in self._reservations.items()
+            if stream_id not in self._streams and now - hold.at >= self.reservation_ttl
+        ]
+        for stream_id in stale:
+            del self._reservations[stream_id]
+
+    def _remember_locked(self, stream_id: str, address: str, seq: int | None = None) -> str:
+        self._make_room_locked(address)
+        token = secrets.token_urlsafe(32)
+        hold = _Hold(token, address, self._clock())
+        hold.seq = seq
+        self._reservations[stream_id] = hold
+        return token
+
+    def _touch_locked(self, hold: _Hold, address: str, seq: int | None = None) -> None:
+        hold.address = address
+        hold.at = self._clock()
+        if seq is not None:
+            hold.seq = seq
+
+    def _make_room_locked(self, address: str) -> None:
+        """Drop oldest idle holds. A hold whose stream is still publishing stays."""
+
+        while sum(hold.address == address for hold in self._reservations.values()) >= self.reservation_per_ip:
+            if not self._drop_oldest_idle_locked(address):
+                break
+        while len(self._reservations) >= self.reservation_max:
+            if not self._drop_oldest_idle_locked(None):
+                break
+
+    def _drop_oldest_idle_locked(self, address: str | None) -> bool:
+        oldest_id: str | None = None
+        oldest_key: tuple[float, str] | None = None
+        for stream_id, hold in self._reservations.items():
+            if stream_id in self._streams:
+                continue
+            if address is not None and hold.address != address:
+                continue
+            key = (hold.at, stream_id)
+            if oldest_key is None or key < oldest_key:
+                oldest_key = key
+                oldest_id = stream_id
+        if oldest_id is None:
+            return False
+        del self._reservations[oldest_id]
+        return True
+
+    def _fresh_id_locked(self) -> str:
+        for _ in range(64):
             candidate = "".join(secrets.choice(STREAM_ALPHABET) for _ in range(STREAM_ID_LENGTH))
-            if candidate not in self._streams:
+            if candidate not in self._streams and candidate not in self._reservations:
                 return candidate
         raise LiveClose(CODE_FULL)
 
-    def _end(self, stream: _Stream) -> None:
+    def _end(self, stream: _Stream, generation: int) -> bool:
         with self._lock:
-            if stream.closed:
-                return
+            if stream.generation != generation or stream.closed:
+                return False
             stream.closed = True
+            stream.websocket = None
             if self._streams.get(stream.id) is stream:
                 self._streams.pop(stream.id, None)
+            hold = self._reservations.get(stream.id)
+            if hold is not None:
+                hold.at = self._clock()
             listeners = list(stream.listeners)
             stream.listeners.clear()
             init = stream.init
@@ -505,6 +711,64 @@ class LiveHub:
         stream.init = None
         stream.latest = None
         stream.splitter.clear()
+        return True
+
+
+class _Claim:
+    def __init__(self) -> None:
+        self.requested: str | None = None
+        self.token: str | None = None
+        self.seq: int | None = None
+        self.mime: object = None
+        self.mime_present = False
+        self.leading: bytes | None = None
+
+
+def _parse_claim(text: str) -> _Claim:
+    claim = _Claim()
+    if len(text.encode("utf-8")) > MAX_TEXT:
+        raise LiveClose(CODE_TOO_BIG)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return claim
+    if not isinstance(payload, dict):
+        return claim
+    raw_id = payload.get("id")
+    if isinstance(raw_id, str):
+        claim.requested = raw_id
+    raw_token = payload.get("token")
+    if isinstance(raw_token, str):
+        claim.token = raw_token
+    raw_seq = payload.get("seq")
+    if isinstance(raw_seq, int) and not isinstance(raw_seq, bool) and raw_seq >= 1:
+        claim.seq = raw_seq
+    if "mime" in payload and payload.get("type") in {None, "mime"}:
+        claim.mime_present = True
+        claim.mime = payload.get("mime")
+    return claim
+
+
+def _seq_allows(recorded: int | None, seq: int | None) -> bool:
+    """True when this claim may take an id that already has a matching token.
+
+    A missing seq still replaces a hold that also has no seq. After any seq is
+    stored, only a greater seq may replace it, so a delayed older socket cannot
+    close the newer one with 4410.
+    """
+
+    if recorded is None:
+        return True
+    return seq is not None and seq > recorded
+
+
+def _token_ok(expected: str, presented: str) -> bool:
+    try:
+        left = expected.encode("ascii")
+        right = presented.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return hmac.compare_digest(left, right)
 
 
 class _AudioResponse(Response):

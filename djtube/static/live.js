@@ -15,11 +15,12 @@ export const LIVE_CONNECT_FAILED = "音声を配信に接続できませんで�
 export const LIVE_DROPPED = "配信が切れました";
 export const LIVE_COPY_FAILED = "URL をコピーできませんでした";
 export const LIVE_SEND_BACKLOG = "送信が追いつかないため、配信を止めました";
+export const LIVE_TAKEN = "この配信 ID は他の人が使っています。もう一度押すと新しい ID で配信します";
 export const LIVE_BUFFER_LIMIT = 1024 * 1024;
 
 const CLOSE_TEXT = {
   4408: "音声が届かなくなったため、配信を止めました",
-  4409: "その ID は使われています",
+  4409: LIVE_TAKEN,
   4429: "配信の上限に達しました",
   1003: "配信の形式が受け付けられませんでした",
   1008: "送信の上限に達しました",
@@ -30,6 +31,14 @@ const SOCKET_OPEN = 1;
 
 export function mimeMessage() {
   return JSON.stringify({ type: "mime", mime: LIVE_MIME });
+}
+
+/** First text frame. The id and token stay out of the URL nginx logs. */
+export function claimMessage(id, token, seq) {
+  const payload = { type: "mime", mime: LIVE_MIME, seq };
+  if (typeof id === "string" && id) payload.id = id;
+  if (typeof token === "string" && token) payload.token = token;
+  return JSON.stringify(payload);
 }
 
 export function liveSupported(scope = globalThis) {
@@ -180,6 +189,9 @@ export function createLiveControl(options) {
   const copyText = options.copyText;
   const armCopy = options.armCopy;
   let session = null;
+  let pinnedId = "";
+  let pinnedToken = "";
+  let claimSeq = 0;
 
   function markCopyFailed(mine) {
     if (mine.ended || mine.copyFailed) return;
@@ -284,15 +296,15 @@ export function createLiveControl(options) {
     };
   }
 
-  function begin(mine, id) {
+  function begin(mine, id, token) {
     if (mine.ended || mine.recorder) return;
-    const url = listenerUrl(prefix, id, origin);
-    try {
-      mine.socket.send(mimeMessage());
-    } catch {
-      finish(mine, { state: "error", reason: LIVE_DROPPED });
+    if (pinnedId && id !== pinnedId) {
+      finish(mine, { state: "error", reason: LIVE_TAKEN });
       return;
     }
+    if (!pinnedId) pinnedId = id;
+    if (typeof token === "string" && token) pinnedToken = token;
+    const url = listenerUrl(prefix, id, origin);
     let recorder = null;
     try {
       recorder = createRecorder(mine.dest.stream, {
@@ -333,8 +345,24 @@ export function createLiveControl(options) {
     deliverCopy(mine, url);
   }
 
+  function sendClaim(socket) {
+    claimSeq += 1;
+    socket.send(claimMessage(pinnedId, pinnedToken, claimSeq));
+  }
+
   function bindSocket(mine, socket) {
     mine.socket = socket;
+    const deliver = () => {
+      if (mine.ended || mine.claimed) return;
+      mine.claimed = true;
+      try {
+        sendClaim(socket);
+      } catch {
+        finish(mine, { state: "error", reason: LIVE_DROPPED });
+      }
+    };
+    socket.onopen = deliver;
+    if (socket.readyState === SOCKET_OPEN) deliver();
     socket.onmessage = (event) => {
       if (mine.ended || mine.recorder || typeof event?.data !== "string") return;
       let payload = null;
@@ -344,12 +372,33 @@ export function createLiveControl(options) {
         return;
       }
       if (!payload || payload.type !== "id" || typeof payload.id !== "string" || !payload.id) return;
-      begin(mine, payload.id);
+      if (typeof payload.token !== "string" || !payload.token) return;
+      begin(mine, payload.id, payload.token);
     };
     socket.onclose = (event) => {
       if (mine.ended) return;
-      finish(mine, { state: "error", reason: closeReason(event?.code) });
+      const code = event?.code;
+      if (code === 4409) {
+        pinnedId = "";
+        pinnedToken = "";
+      }
+      finish(mine, { state: "error", reason: closeReason(code) });
     };
+  }
+
+  function openPublish(mine) {
+    let socket = null;
+    try {
+      socket = connectSocket(livePublishUrl(prefix, origin));
+    } catch {
+      finish(mine, { state: "error", reason: LIVE_DROPPED });
+      return;
+    }
+    if (mine.ended) {
+      closeSocket(socket);
+      return;
+    }
+    bindSocket(mine, socket);
   }
 
   async function start() {
@@ -395,18 +444,7 @@ export function createLiveControl(options) {
       return;
     }
     if (mine.ended) return;
-    let socket = null;
-    try {
-      socket = connectSocket(livePublishUrl(prefix, origin));
-    } catch {
-      finish(mine, { state: "error", reason: LIVE_DROPPED });
-      return;
-    }
-    if (mine.ended) {
-      closeSocket(socket);
-      return;
-    }
-    bindSocket(mine, socket);
+    openPublish(mine);
   }
 
   function onClick() {

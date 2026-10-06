@@ -85,18 +85,19 @@ def alternating_tone(seconds: float, step: float = 2.0) -> list[tuple[float, flo
     return parts
 
 
-def endpoints(base: str, stream_id: str | None = None) -> tuple[str, str]:
-    """Return (websocket publish URL, audio URL without the id)."""
+def endpoints(base: str) -> tuple[str, str]:
+    """Return (websocket publish URL, audio URL without the id).
+
+    The id, when the caller has one, goes in the first text frame. The URL
+    stays free of it so a token is never written into an access log.
+    """
 
     raw = base.strip().rstrip("/")
     suffix = PUBLIC_PREFIX
     origin = raw[: -len(suffix)] if raw.endswith(suffix) else raw
     http = origin + suffix
     ws = http.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
-    publish = f"{ws}/api/live/publish"
-    if stream_id:
-        publish = f"{publish}?id={stream_id}"
-    return publish, f"{http}/stream/"
+    return f"{ws}/api/live/publish", f"{http}/stream/"
 
 
 def misaligned_slices(data: bytes) -> list[bytes]:
@@ -123,7 +124,7 @@ def _close_code(exc: Exception) -> int | None:
     return fallback if isinstance(fallback, int) else None
 
 
-async def publish_webm(url: str, webm: bytes, pace: bool) -> str:
+async def publish_webm(url: str, webm: bytes, pace: bool, stream_id: str | None = None) -> str:
     import websockets
 
     init, clusters = split_webm(webm)
@@ -137,8 +138,12 @@ async def publish_webm(url: str, webm: bytes, pace: bool) -> str:
         connection = await websockets.connect(url, max_size=2 * 1024 * 1024)
     except Exception as exc:
         raise _connect_error(exc) from exc
+    claim: dict[str, object] = {"type": "mime", "mime": "audio/webm;codecs=opus"}
+    if stream_id:
+        claim["id"] = stream_id
     async with connection:
         try:
+            await connection.send(json.dumps(claim))
             hello = json.loads(await connection.recv())
         except Exception as exc:
             raise _connect_error(exc) from exc
@@ -196,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.seconds <= 0:
         print("秒数を 0 より大きくしてください", file=sys.stderr)
         return 2
-    publish_url, _listen_root = endpoints(args.base, args.id.strip() or None)
+    publish_url, _listen_root = endpoints(args.base)
     try:
         webm = render_webm(alternating_tone(args.seconds))
     except ToneError as exc:
@@ -204,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print("440 Hz と 880 Hz を 2 秒ごとに交互に送ります", flush=True)
     try:
-        asyncio.run(publish_webm(publish_url, webm, pace=not args.no_pace))
+        asyncio.run(publish_webm(publish_url, webm, pace=not args.no_pace, stream_id=args.id.strip() or None))
     except ToneError as exc:
         print(str(exc), file=sys.stderr)
         return 1
