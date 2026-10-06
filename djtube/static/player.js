@@ -4,12 +4,13 @@
 import { EQ_BANDS, EQ_FILTERS, connectEqGraph } from "./eq.js";
 import { FILTER_CENTER, applyFilter, clampFilterUnit, connectDeckFilter } from "./filter.js";
 import { clampSpinRate } from "./jogspin.js";
+import { createAudioBus, openAudioBus } from "./master.js";
 import { createScratchVoice } from "./scratch.js";
 import { publicPrefix } from "./prefix.js";
 import { clampRate } from "./rate.js";
 import { commandedSeekLanded } from "./seekland.js";
 
-export function createDeckPlayer(deck, elementId) {
+export function createDeckPlayer(deck, elementId, bus = createAudioBus()) {
   const audio = typeof document === "undefined" ? null : document.createElement("audio");
   if (audio) {
     audio.className = "deck-audio";
@@ -35,7 +36,9 @@ export function createDeckPlayer(deck, elementId) {
     _scratch: null,
     _eqDb: { high: 0, mid: 0, low: 0 },
     _filterUnit: FILTER_CENTER,
+    _bus: bus,
     _context: null,
+    _level: null,
     _filters: null,
     _color: null,
     _graphFailed: false,
@@ -92,7 +95,7 @@ export function createDeckPlayer(deck, elementId) {
     set volume(value) {
       const numeric = Number(value);
       this._volume = Number.isFinite(numeric) ? Math.min(1, Math.max(0, numeric)) : 0;
-      if (this.audio) this.audio.volume = this._volume;
+      this._applyLevel();
     },
     get playbackRate() {
       return this._rate;
@@ -120,7 +123,10 @@ export function createDeckPlayer(deck, elementId) {
         if (!this._context) this._ensureGraph();
         if (!this._context) return;
         if (this._context.state === "suspended") this._context.resume?.();
-        if (!this._scratch) this._scratch = createScratchVoice(this._context);
+        if (!this._scratch) {
+          const output = this._bus?.master || this._context.destination;
+          this._scratch = createScratchVoice(this._context, output);
+        }
         const level = Number(this.volume);
         this._scratch.update(scratch, Number.isFinite(level) ? level : 1);
       } catch {
@@ -130,6 +136,14 @@ export function createDeckPlayer(deck, elementId) {
     stopScratch() {
       this._scratch?.stop();
       this._scratch = null;
+    },
+    _applyLevel() {
+      if (this._level) {
+        this._level.gain.value = this._volume;
+        if (this.audio) this.audio.volume = 1;
+        return;
+      }
+      if (this.audio) this.audio.volume = this._volume;
     },
     _applyRate() {
       if (!this.audio) return;
@@ -143,30 +157,31 @@ export function createDeckPlayer(deck, elementId) {
     },
     _ensureGraph() {
       if (this._graphFailed || !this.audio) return false;
-      if (typeof window === "undefined") {
+      if (!openAudioBus(this._bus)) {
         this._graphFailed = true;
         return false;
       }
-      const Ctx = window.AudioContext || window.webkitAudioContext;
-      if (!Ctx) {
-        this._graphFailed = true;
-        return false;
-      }
+      this._context = this._bus.context;
       try {
-        if (!this._context) this._context = new Ctx();
         if (this._context.state === "suspended") this._context.resume();
         if (!this._filters) {
           const source = this._context.createMediaElementSource(this.audio);
-          // Channel volume and the crossfader are already audio.volume.
+          // The element stays at unity so the deck gain is the only level.
           // Leave LOW unconnected so the filter is the next node, not a second graph.
+          this.audio.volume = 1;
           this._filters = connectEqGraph(source, this._context, null);
-          this._color = connectDeckFilter(this._filters.low, this._context);
+          const level = this._context.createGain();
+          level.gain.value = this._volume;
+          this._level = level;
+          this._color = connectDeckFilter(this._filters.low, this._context, level);
+          level.connect(this._bus.master);
           for (const band of EQ_BANDS) this._filters[band].gain.value = this._eqDb[band] || 0;
           applyFilter(this._color, this._filterUnit);
         }
         return true;
       } catch {
         this._graphFailed = true;
+        if (!this._level) this._applyLevel();
         return false;
       }
     },

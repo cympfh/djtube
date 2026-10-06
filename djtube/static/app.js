@@ -15,6 +15,7 @@ import { formatTime } from "./format.js";
 import { bpmText, tempoValueText } from "./bpm.js";
 import { formatRate } from "./rate.js";
 import { handleKeydown, isSearchTarget, isTypingTarget, legendGroups } from "./keys.js";
+import { createAudioBus } from "./master.js";
 import { createDeckPlayer, startDeckAudio } from "./player.js";
 import { bindCookies, cookiePanelOpen } from "./cookies.js";
 import { discRotationDegrees, discSpinning, discVisible } from "./disc.js";
@@ -22,9 +23,10 @@ import { publicPrefix } from "./prefix.js";
 
 const prefix = publicPrefix();
 const state = freshState();
+const mix = createAudioBus();
 const audios = {
-  A: createDeckPlayer("A", "player-A"),
-  B: createDeckPlayer("B", "player-B"),
+  A: createDeckPlayer("A", "player-A", mix),
+  B: createDeckPlayer("B", "player-B", mix),
 };
 audios.A.onSeekLanded = () => {
   state.decks.A.jogCommand = null;

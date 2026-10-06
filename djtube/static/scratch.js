@@ -20,7 +20,7 @@ export function fillScratchBuffer(channel, sampleRate) {
   }
 }
 
-export function createScratchVoice(context) {
+export function createScratchVoice(context, output = context.destination) {
   let source = null;
   let filter = null;
   let gain = null;
@@ -39,7 +39,7 @@ export function createScratchVoice(context) {
     gain = context.createGain();
     source.connect(filter);
     filter.connect(gain);
-    gain.connect(context.destination);
+    gain.connect(output);
     source.start();
   }
 
