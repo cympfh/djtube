@@ -133,6 +133,7 @@ button:hover { border-color: #5c564b; }
 
 .live-button {
   -webkit-touch-callout: none;
+  -webkit-user-select: none;
   user-select: none;
 }
 

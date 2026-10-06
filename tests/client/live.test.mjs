@@ -84,6 +84,10 @@ function fakeButton() {
     addEventListener(type, fn) {
       listeners[type] = fn;
     },
+    focusVisible: false,
+    matches(selector) {
+      return selector === ":focus-visible" && this.focusVisible === true;
+    },
     click() {
       return listeners.click();
     },
@@ -1155,15 +1159,16 @@ test("the live menu opens from the pointer and closes after it has left", async 
 test("a mouse click does not open the menu, and a keyboard focus does", async () => {
   const harness = setup();
   await goLive(harness);
-  harness.ui.button.emit("pointerdown");
-  harness.menu.anchor.emit("focusin");
+  harness.ui.button.emit("pointerdown", { pointerType: "mouse" });
+  harness.menu.anchor.emit("focusin", { target: harness.ui.button });
   harness.ui.button.emit("pointerup");
   assert.equal(harness.menu.anchor.dataset.menu, undefined);
-  harness.menu.anchor.emit("focusin");
+  harness.ui.button.focusVisible = true;
+  harness.menu.anchor.emit("focusin", { target: harness.ui.button });
   assert.equal(harness.menu.anchor.dataset.menu, "open");
   harness.menu.anchor.emit("focusout", { relatedTarget: { inside: true } });
   assert.equal(harness.menu.anchor.dataset.menu, "open");
-  harness.menu.anchor.emit("focusout", { relatedTarget: null });
+  harness.menu.anchor.emit("focusout", { relatedTarget: { inside: false } });
   assert.equal(harness.menu.anchor.dataset.menu, undefined);
 });
 
@@ -1172,9 +1177,11 @@ test("escape closes the live menu and does not reopen from the returned focus", 
   await goLive(harness);
   harness.ui.button.focus = () => {
     harness.ui.button.focused = true;
-    harness.menu.anchor.emit("focusin");
+    harness.ui.button.focusVisible = true;
+    harness.menu.anchor.emit("focusin", { target: harness.ui.button });
   };
-  harness.menu.anchor.emit("focusin");
+  harness.ui.button.focusVisible = true;
+  harness.menu.anchor.emit("focusin", { target: harness.ui.button });
   assert.equal(harness.menu.anchor.dataset.menu, "open");
   const event = {
     key: "Escape",
@@ -1198,7 +1205,7 @@ test("a long press opens the menu and the following click does not stop", async 
   const clock = fakeClock();
   const harness = setup({ schedule: clock.schedule, clearSchedule: clock.clear });
   await goLive(harness);
-  harness.ui.button.emit("pointerdown");
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
   clock.advance(LIVE_MENU_HOLD_MS - 1);
   assert.equal(harness.menu.anchor.dataset.menu, undefined);
   clock.advance(1);
@@ -1222,7 +1229,7 @@ test("lifting a touch long-press sends pointerleave and leaves the menu open", a
   };
   const harness = setup({ schedule: clock.schedule, clearSchedule: clock.clear, root });
   await goLive(harness);
-  harness.ui.button.emit("pointerdown");
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
   clock.advance(LIVE_MENU_HOLD_MS);
   assert.equal(harness.menu.anchor.dataset.menu, "open");
   harness.ui.button.emit("pointerup");
@@ -1237,7 +1244,7 @@ test("a long-press that ends without a click does not swallow the next tap", asy
   const clock = fakeClock();
   const harness = setup({ schedule: clock.schedule, clearSchedule: clock.clear });
   await goLive(harness);
-  harness.ui.button.emit("pointerdown");
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
   clock.advance(LIVE_MENU_HOLD_MS);
   assert.equal(harness.menu.anchor.dataset.menu, "open");
   harness.ui.button.emit("pointercancel");
@@ -1248,7 +1255,7 @@ test("a long-press that ends without a click does not swallow the next tap", asy
 
   const early = setup({ schedule: clock.schedule, clearSchedule: clock.clear });
   await goLive(early);
-  early.ui.button.emit("pointerdown");
+  early.ui.button.emit("pointerdown", { pointerType: "touch" });
   clock.advance(LIVE_MENU_HOLD_MS - 1);
   early.ui.button.emit("pointercancel");
   clock.advance(1);
@@ -1262,10 +1269,10 @@ test("pointerdown clears a leftover long-press so the next click stops", async (
   const clock = fakeClock();
   const harness = setup({ schedule: clock.schedule, clearSchedule: clock.clear });
   await goLive(harness);
-  harness.ui.button.emit("pointerdown");
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
   clock.advance(LIVE_MENU_HOLD_MS);
   assert.equal(harness.ui.painted().face, "on");
-  harness.ui.button.emit("pointerdown");
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
   harness.ui.button.click();
   await flush();
   assert.equal(harness.ui.painted().face, "off");
@@ -1301,7 +1308,7 @@ test("stopping closes the menu and drops a pending long-press", async () => {
   await goLive(harness);
   harness.menu.anchor.emit("pointerenter", { pointerType: "mouse" });
   assert.equal(harness.menu.anchor.dataset.menu, "open");
-  harness.ui.button.emit("pointerdown");
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
   harness.ui.button.click();
   await flush();
   assert.equal(harness.menu.anchor.dataset.menu, undefined);
@@ -1336,7 +1343,7 @@ test("a second copy extends the note, and a touch copy closes the menu when it f
   assert.equal(harness.menu.result.dataset.result, undefined);
   assert.equal(harness.menu.anchor.dataset.menu, "open");
 
-  harness.ui.button.emit("pointerdown");
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
   clock.advance(LIVE_MENU_HOLD_MS);
   assert.equal(harness.menu.anchor.dataset.menu, "open");
   await harness.menu.audio.click();
@@ -1393,6 +1400,207 @@ test("a tap outside closes the menu and stopping clears the copy note", async ()
   assert.equal(harness.ui.painted().title, LIVE_IDLE);
 });
 
+function outsidePointer() {
+  return {
+    target: { inside: false },
+    prevented: false,
+    stopped: false,
+    preventDefault() {
+      this.prevented = true;
+    },
+    stopPropagation() {
+      this.stopped = true;
+    },
+  };
+}
+
+function rootHarness(clock) {
+  const root = {
+    listener: null,
+    addEventListener(_type, fn) {
+      this.listener = fn;
+    },
+    emit(event) {
+      this.listener?.(event);
+    },
+  };
+  const harness = setup({ schedule: clock.schedule, clearSchedule: clock.clear, root });
+  return { root, harness };
+}
+
+test("pressing the url text does not close the menu", async () => {
+  const { root, harness } = rootHarness(fakeClock());
+  await goLive(harness);
+  harness.menu.anchor.emit("pointerenter", { pointerType: "mouse" });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  const head = harness.menu.head.textContent;
+  root.emit({ target: { inside: true } });
+  harness.menu.anchor.emit("focusout", { relatedTarget: null });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  assert.equal(harness.menu.head.textContent, head);
+  assert.equal(head.includes("配信中："), true);
+});
+
+test("closing clears the copy note so a reopened menu stays up", async () => {
+  const clock = fakeClock();
+  const { root, harness } = rootHarness(clock);
+  await goLive(harness);
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS);
+  await harness.menu.audio.click();
+  await flush();
+  assert.equal(harness.menu.result.textContent, LIVE_COPIED);
+  root.emit(outsidePointer());
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  assert.equal(harness.menu.result.textContent, "");
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS);
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  assert.equal(harness.menu.result.textContent, "");
+  clock.advance(LIVE_MENU_NOTE_MS);
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  assert.equal(harness.menu.result.textContent, "");
+});
+
+test("a mouse after a touch open keeps the menu up, and a mouse hold still stops", async () => {
+  const clock = fakeClock();
+  const harness = setup({ schedule: clock.schedule, clearSchedule: clock.clear });
+  await goLive(harness);
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS);
+  harness.menu.anchor.emit("pointerdown", { pointerType: "mouse" });
+  await harness.menu.audio.click();
+  await flush();
+  clock.advance(LIVE_MENU_NOTE_MS);
+  assert.equal(harness.menu.result.textContent, "");
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  assert.equal(harness.ui.painted().face, "on");
+
+  harness.ui.button.emit("pointerdown", { pointerType: "mouse" });
+  clock.advance(700);
+  harness.ui.button.click();
+  await flush();
+  assert.equal(harness.ui.painted().face, "off");
+  assert.equal(harness.sockets[0].closed, 1000);
+});
+
+test("closing a touch menu clears the touch state so the next outside tap is not swallowed", async () => {
+  const clock = fakeClock();
+  const { root, harness } = rootHarness(clock);
+  await goLive(harness);
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS);
+  const first = outsidePointer();
+  root.emit(first);
+  assert.equal(first.prevented, true);
+  assert.equal(first.stopped, true);
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  const second = outsidePointer();
+  root.emit(second);
+  assert.equal(second.prevented, false);
+  assert.equal(second.stopped, false);
+});
+
+test("a touch tap that leaves :hover does not open the menu when the broadcast starts", async () => {
+  const clock = fakeClock();
+  const harness = setup({ schedule: clock.schedule, clearSchedule: clock.clear });
+  harness.menu.anchor.hover = true;
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
+  harness.ui.button.emit("pointerup");
+  await goLive(harness);
+  clock.advance(60);
+  harness.menu.anchor.emit("focusin", { target: harness.ui.button });
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  assert.equal(harness.ui.painted().face, "on");
+});
+
+test("enter from the keyboard opens the menu when the broadcast starts", async () => {
+  const harness = setup();
+  harness.ui.button.focusVisible = true;
+  harness.ui.button.emit("keydown", { key: "Enter" });
+  await goLive(harness);
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  assert.equal(harness.ui.painted().face, "on");
+});
+
+test("escape stays closed until the pointer leaves and comes back", async () => {
+  const harness = setup();
+  await goLive(harness);
+  harness.menu.anchor.hover = true;
+  harness.menu.anchor.emit("pointerenter", { pointerType: "mouse" });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+  harness.ui.button.focus = () => {
+    harness.ui.button.focused = true;
+    harness.ui.button.focusVisible = true;
+    harness.menu.anchor.emit("focusin", { target: harness.ui.button });
+  };
+  harness.menu.anchor.emit("keydown", {
+    key: "Escape",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  harness.menu.anchor.emit("pointermove", { pointerType: "mouse" });
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  harness.control.refresh();
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  harness.menu.anchor.emit("pointerleave", { pointerType: "mouse" });
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  harness.menu.anchor.emit("pointerenter", { pointerType: "mouse" });
+  assert.equal(harness.menu.anchor.dataset.menu, "open");
+});
+
+test("a socket drop during a long-press does not start another broadcast on the lift click", async () => {
+  const clock = fakeClock();
+  const during = setup({ schedule: clock.schedule, clearSchedule: clock.clear });
+  await goLive(during);
+  during.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS - 1);
+  during.sockets[0].serverClose(1006);
+  await flush();
+  during.ui.button.emit("pointerup");
+  during.ui.button.click();
+  await flush();
+  assert.equal(during.sockets.length, 1);
+  assert.equal(during.ui.painted().face, "off");
+
+  const after = setup({ schedule: clock.schedule, clearSchedule: clock.clear });
+  await goLive(after);
+  after.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS);
+  assert.equal(after.menu.anchor.dataset.menu, "open");
+  after.sockets[0].serverClose(1006);
+  await flush();
+  after.ui.button.emit("pointerup");
+  after.ui.button.click();
+  await flush();
+  assert.equal(after.sockets.length, 1);
+  assert.equal(after.menu.anchor.dataset.menu, undefined);
+  assert.equal(after.ui.painted().face, "off");
+});
+
+test("a touch outside tap is swallowed and a mouse outside tap is not", async () => {
+  const clock = fakeClock();
+  const { root, harness } = rootHarness(clock);
+  await goLive(harness);
+  harness.ui.button.emit("pointerdown", { pointerType: "touch" });
+  clock.advance(LIVE_MENU_HOLD_MS);
+  const touch = outsidePointer();
+  root.emit(touch);
+  assert.equal(touch.prevented, true);
+  assert.equal(touch.stopped, true);
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  assert.equal(harness.ui.painted().face, "on");
+
+  harness.menu.anchor.emit("pointerenter", { pointerType: "mouse" });
+  const mouse = outsidePointer();
+  root.emit(mouse);
+  assert.equal(mouse.prevented, false);
+  assert.equal(mouse.stopped, false);
+  assert.equal(harness.menu.anchor.dataset.menu, undefined);
+  assert.equal(harness.ui.painted().face, "on");
+});
+
 test("the header button matches the MIDI control and the page tells a DJ how to start", () => {
   const app = readFileSync(new URL("../../djtube/static/app.js", import.meta.url), "utf8");
   const css = readFileSync(new URL("../../djtube/static/app.css", import.meta.url), "utf8");
@@ -1421,6 +1629,7 @@ test("the header button matches the MIDI control and the page tells a DJ how to 
   assert.match(css, /\.live-menu\s*\{[^}]*padding-top:\s*8px/);
   assert.match(html, /id="live-button"[^>]*aria-describedby="live-menu-head"/);
   assert.match(css, /\.live-button\s*\{[^}]*-webkit-touch-callout:\s*none/);
+  assert.match(css, /\.live-button\s*\{[^}]*-webkit-user-select:\s*none/);
   assert.match(css, /\.live-button\s*\{[^}]*user-select:\s*none/);
   assert.equal(/id="live-button"[^>]*aria-expanded/.test(html), false);
   assert.equal(/id="live-button"[^>]*aria-controls/.test(html), false);

@@ -220,13 +220,17 @@ export function createLiveControl(options) {
   const clearSchedule = options.clearSchedule || ((id) => clearTimeout(id));
   const root = options.root;
   let session = null;
+  // Why the panel is open. null while it is closed.
+  let openBy = null;
+  let lastPointer = "";
+  let blockPointer = false;
+  let ignoreNextFocus = false;
+  let swallowClick = false;
+  let handlingClick = false;
+  let wasLive = false;
   let closeTimer = 0;
   let noteTimer = 0;
   let holdTimer = 0;
-  let fromPointer = false;
-  let ignoreFocus = false;
-  let suppressClick = false;
-  let touchOpen = false;
   let pinnedId = "";
   let pinnedToken = "";
   let claimSeq = 0;
@@ -271,17 +275,19 @@ export function createLiveControl(options) {
 
   function paint(status) {
     applyLiveStatus(button, live, status, menu?.head);
-    if (status?.state !== "live") {
-      clearHold();
-      clearMenuResult();
-      cancelClose();
-      setMenuOpen(false);
+    const liveNow = status?.state === "live";
+    if (!liveNow) {
+      if (clearHold() && !handlingClick) swallowClick = true;
+      closeMenu();
+      wasLive = false;
       return;
     }
-    if (menuIsHovered()) {
-      cancelClose();
-      setMenuOpen(true);
-    }
+    const becameLive = !wasLive;
+    wasLive = true;
+    if (!becameLive) return;
+    // A tap leaves :hover on Chrome's mobile emulation and on WebKit.
+    if (lastPointer !== "touch" && menuIsHovered()) openAs("pointer");
+    if (focusVisible(button)) openAs("focus");
   }
 
   function menuIsHovered() {
@@ -294,6 +300,20 @@ export function createLiveControl(options) {
     }
   }
 
+  function focusVisible(node) {
+    if (!node || typeof node.matches !== "function") return false;
+    try {
+      return node.matches(":focus-visible") === true;
+    } catch {
+      return false;
+    }
+  }
+
+  function rememberPointer(event) {
+    const type = event?.pointerType;
+    if (type === "mouse" || type === "pen" || type === "touch") lastPointer = type;
+  }
+
   function clearMenuResult() {
     if (noteTimer) {
       clearSchedule(noteTimer);
@@ -304,28 +324,38 @@ export function createLiveControl(options) {
     if (menu.result.dataset?.result) delete menu.result.dataset.result;
   }
 
-  function setMenuOpen(open) {
-    const anchor = menu?.anchor;
-    if (!anchor) return;
-    if (open && button.dataset.live === "on") {
-      if (anchor.dataset.menu !== "open") anchor.dataset.menu = "open";
-      return;
-    }
-    touchOpen = false;
-    if (anchor.dataset.menu) delete anchor.dataset.menu;
-  }
-
   function cancelClose() {
     if (!closeTimer) return;
     clearSchedule(closeTimer);
     closeTimer = 0;
   }
 
+  function closeMenu(kind) {
+    openBy = null;
+    cancelClose();
+    clearMenuResult();
+    if (kind === "esc") {
+      blockPointer = true;
+      ignoreNextFocus = true;
+    }
+    const anchor = menu?.anchor;
+    if (anchor?.dataset?.menu) delete anchor.dataset.menu;
+  }
+
+  function openAs(reason) {
+    const anchor = menu?.anchor;
+    if (!anchor || button.dataset.live !== "on") return;
+    if (reason === "pointer" && blockPointer) return;
+    openBy = reason;
+    cancelClose();
+    if (anchor.dataset.menu !== "open") anchor.dataset.menu = "open";
+  }
+
   function scheduleClose() {
     cancelClose();
     closeTimer = schedule(() => {
       closeTimer = 0;
-      setMenuOpen(false);
+      closeMenu();
     }, LIVE_MENU_CLOSE_MS);
   }
 
@@ -339,12 +369,9 @@ export function createLiveControl(options) {
     if (menu.result.dataset) menu.result.dataset.result = kind;
     noteTimer = schedule(() => {
       noteTimer = 0;
-      const closeTouch = touchOpen;
+      const viaTouch = openBy === "touch";
       clearMenuResult();
-      if (closeTouch) {
-        cancelClose();
-        setMenuOpen(false);
-      }
+      if (viaTouch) closeMenu();
     }, LIVE_MENU_NOTE_MS);
   }
 
@@ -624,57 +651,63 @@ export function createLiveControl(options) {
     };
     menu.audio.addEventListener("click", copyClick("audio"));
     menu.video.addEventListener("click", copyClick("video"));
-    const pointerOpens = (event) => event?.pointerType !== "touch" && button.dataset.live === "on";
-    menu.anchor.addEventListener("pointerenter", (event) => {
-      if (!pointerOpens(event)) return;
-      cancelClose();
-      setMenuOpen(true);
-    });
-    menu.anchor.addEventListener("pointermove", (event) => {
-      if (!pointerOpens(event)) return;
-      cancelClose();
-      setMenuOpen(true);
+    const pointerArrived = (event) => {
+      rememberPointer(event);
+      const type = event?.pointerType;
+      if (type !== "mouse" && type !== "pen") return;
+      openAs("pointer");
+    };
+    menu.anchor.addEventListener("pointerenter", pointerArrived);
+    menu.anchor.addEventListener("pointermove", pointerArrived);
+    menu.anchor.addEventListener("pointerdown", (event) => {
+      rememberPointer(event);
+      const type = event?.pointerType;
+      if (type !== "mouse" && type !== "pen") return;
+      if (openBy === "touch") openBy = "pointer";
     });
     menu.anchor.addEventListener("pointerleave", (event) => {
+      blockPointer = false;
       if (event?.pointerType === "touch" || button.dataset.live !== "on") return;
+      if (openBy === "touch" || menu.anchor.dataset.menu !== "open") return;
       scheduleClose();
     });
-    menu.anchor.addEventListener("focusin", () => {
-      if (ignoreFocus) {
-        ignoreFocus = false;
+    menu.anchor.addEventListener("focusin", (event) => {
+      if (ignoreNextFocus) {
+        ignoreNextFocus = false;
         return;
       }
-      if (fromPointer) {
-        fromPointer = false;
-        return;
-      }
-      if (button.dataset.live !== "on") return;
-      cancelClose();
-      setMenuOpen(true);
+      if (button.dataset.live !== "on" || !focusVisible(event?.target)) return;
+      openAs("focus");
     });
     menu.anchor.addEventListener("focusout", (event) => {
       const next = event?.relatedTarget;
-      if (next && typeof menu.anchor.contains === "function" && menu.anchor.contains(next)) return;
-      cancelClose();
-      setMenuOpen(false);
+      if (next == null) return;
+      if (typeof menu.anchor.contains === "function" && menu.anchor.contains(next)) return;
+      closeMenu();
     });
     menu.anchor.addEventListener("keydown", (event) => {
       if (event.key !== "Escape" || menu.anchor.dataset.menu !== "open") return;
       event.preventDefault?.();
       event.stopPropagation?.();
-      cancelClose();
-      ignoreFocus = true;
-      setMenuOpen(false);
+      closeMenu("esc");
       button.focus?.();
     });
     if (root && typeof root.addEventListener === "function") {
-      root.addEventListener("pointerdown", (event) => {
-        if (menu.anchor.dataset.menu !== "open") return;
-        const target = event?.target;
-        if (target && typeof menu.anchor.contains === "function" && menu.anchor.contains(target)) return;
-        cancelClose();
-        setMenuOpen(false);
-      });
+      root.addEventListener(
+        "pointerdown",
+        (event) => {
+          const shown = menu.anchor.dataset.menu === "open";
+          if (!shown && openBy !== "touch") return;
+          const target = event?.target;
+          if (target && typeof menu.anchor.contains === "function" && menu.anchor.contains(target)) return;
+          if (openBy === "touch") {
+            event?.preventDefault?.();
+            event?.stopPropagation?.();
+          }
+          closeMenu();
+        },
+        true,
+      );
     }
   }
 
@@ -688,42 +721,56 @@ export function createLiveControl(options) {
   }
 
   function clearHold() {
-    if (!holdTimer) return;
+    if (!holdTimer) return false;
     clearSchedule(holdTimer);
     holdTimer = 0;
+    return true;
   }
-  button.addEventListener("pointerdown", () => {
-    suppressClick = false;
-    fromPointer = true;
-    schedule(() => {
-      fromPointer = false;
-    }, 0);
-    if (button.dataset.live !== "on") return;
+  button.addEventListener("pointerdown", (event) => {
+    rememberPointer(event);
+    const type = event?.pointerType;
+    if (type === "mouse" || type === "pen") {
+      if (openBy === "touch") openBy = "pointer";
+      swallowClick = false;
+      clearHold();
+      return;
+    }
+    if (type !== "touch") {
+      swallowClick = false;
+      return;
+    }
+    swallowClick = false;
     clearHold();
+    if (button.dataset.live !== "on") return;
     holdTimer = schedule(() => {
       holdTimer = 0;
-      suppressClick = true;
-      touchOpen = true;
-      cancelClose();
-      setMenuOpen(true);
+      swallowClick = true;
+      openAs("touch");
     }, LIVE_MENU_HOLD_MS);
   });
-  button.addEventListener("pointerup", clearHold);
+  button.addEventListener("pointerup", () => {
+    clearHold();
+  });
   button.addEventListener("pointercancel", () => {
     clearHold();
-    suppressClick = false;
+    swallowClick = false;
   });
   button.addEventListener("contextmenu", (event) => {
     event?.preventDefault?.();
   });
   button.addEventListener("click", (event) => {
-    if (suppressClick) {
-      suppressClick = false;
+    if (swallowClick) {
+      swallowClick = false;
       event?.preventDefault?.();
       event?.stopPropagation?.();
       return;
     }
-    Promise.resolve(onClick()).catch(() => {});
+    handlingClick = true;
+    try {
+      Promise.resolve(onClick()).catch(() => {});
+    } finally {
+      handlingClick = false;
+    }
   });
 
   paint(supported ? { state: "idle" } : { state: "unsupported" });
