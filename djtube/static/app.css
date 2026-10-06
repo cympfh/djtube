@@ -161,15 +161,19 @@ button:hover { border-color: #5c564b; }
   padding-top: 8px;
 }
 
-.live-anchor:hover > .live-button[data-live="on"] + .live-menu,
-.live-anchor:focus-within > .live-button[data-live="on"] + .live-menu {
+.live-anchor[data-menu="open"] > .live-menu {
   display: block;
 }
 
-.live-anchor[data-menu="closed"] > .live-menu,
-.live-anchor[data-menu="closed"]:hover > .live-button[data-live="on"] + .live-menu,
-.live-anchor[data-menu="closed"]:focus-within > .live-button[data-live="on"] + .live-menu {
-  display: none;
+/* The card hangs left of the icon. This covers the first diagonal step
+   without reaching the MIDI button 16px to the left. */
+.live-menu::before {
+  content: "";
+  position: absolute;
+  top: -36px;
+  right: 36px;
+  width: 14px;
+  height: 44px;
 }
 
 .live-menu-card {

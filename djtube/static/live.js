@@ -16,6 +16,9 @@ export const LIVE_DROPPED = "配信が切れました";
 export const LIVE_COPY_FAILED = "URL をコピーできませんでした";
 export const LIVE_COPIED = "コピーしました";
 export const LIVE_MENU_COPY_FAILED = "コピーできませんでした";
+export const LIVE_MENU_CLOSE_MS = 250;
+export const LIVE_MENU_NOTE_MS = 4000;
+export const LIVE_MENU_HOLD_MS = 500;
 export const LIVE_COPY_AUDIO = "音声ストリーミングURLをコピー";
 export const LIVE_COPY_VIDEO = "動画ストリーミングURLをコピー";
 export const LIVE_SEND_BACKLOG = "送信が追いつかないため、配信を止めました";
@@ -209,7 +212,20 @@ export function createLiveControl(options) {
   const copyText = options.copyText;
   const armCopy = options.armCopy;
   const menu = readyMenu(options.menu);
+  const schedule = options.schedule || ((fn, ms) => {
+    const id = setTimeout(fn, ms);
+    if (id && typeof id.unref === "function") id.unref();
+    return id;
+  });
+  const clearSchedule = options.clearSchedule || ((id) => clearTimeout(id));
+  const root = options.root;
   let session = null;
+  let closeTimer = 0;
+  let noteTimer = 0;
+  let holdTimer = 0;
+  let fromPointer = false;
+  let ignoreFocus = false;
+  let suppressClick = false;
   let pinnedId = "";
   let pinnedToken = "";
   let claimSeq = 0;
@@ -254,33 +270,59 @@ export function createLiveControl(options) {
 
   function paint(status) {
     applyLiveStatus(button, live, status, menu?.head);
-    if (status?.state !== "live") clearMenuResult();
-    syncExpanded();
+    if (status?.state !== "live") {
+      clearMenuResult();
+      cancelClose();
+      setMenuOpen(false);
+    }
   }
 
   function clearMenuResult() {
+    if (noteTimer) {
+      clearSchedule(noteTimer);
+      noteTimer = 0;
+    }
     if (!menu?.result) return;
     if (menu.result.textContent) menu.result.textContent = "";
     if (menu.result.dataset?.result) delete menu.result.dataset.result;
-    if (menu.anchor?.dataset?.menu) delete menu.anchor.dataset.menu;
   }
 
-  function syncExpanded() {
-    if (typeof button.getAttribute !== "function" || typeof button.setAttribute !== "function") return;
+  function setMenuOpen(open) {
     const anchor = menu?.anchor;
-    const hovering = typeof anchor?.matches === "function" && (anchor.matches(":hover") || anchor.matches(":focus-within"));
-    const open = button.dataset.live === "on" && anchor?.dataset?.menu !== "closed" && hovering;
-    const value = open ? "true" : "false";
-    if (button.getAttribute("aria-expanded") !== value) button.setAttribute("aria-expanded", value);
+    if (!anchor) return;
+    if (open && button.dataset.live === "on") {
+      if (anchor.dataset.menu !== "open") anchor.dataset.menu = "open";
+      return;
+    }
+    if (anchor.dataset.menu) delete anchor.dataset.menu;
+  }
+
+  function cancelClose() {
+    if (!closeTimer) return;
+    clearSchedule(closeTimer);
+    closeTimer = 0;
+  }
+
+  function scheduleClose() {
+    cancelClose();
+    closeTimer = schedule(() => {
+      closeTimer = 0;
+      setMenuOpen(false);
+    }, LIVE_MENU_CLOSE_MS);
   }
 
   function showMenuResult(text, kind) {
-    if (!menu?.result || menu.result.textContent === text) {
-      if (menu?.result?.dataset) menu.result.dataset.result = kind;
-      return;
+    if (!menu?.result) return;
+    if (noteTimer) {
+      clearSchedule(noteTimer);
+      noteTimer = 0;
     }
-    menu.result.textContent = text;
+    if (menu.result.textContent !== text) menu.result.textContent = text;
     if (menu.result.dataset) menu.result.dataset.result = kind;
+    noteTimer = schedule(() => {
+      noteTimer = 0;
+      clearMenuResult();
+    }, LIVE_MENU_NOTE_MS);
   }
 
   async function copyMenu(kind) {
@@ -559,26 +601,52 @@ export function createLiveControl(options) {
     };
     menu.audio.addEventListener("click", copyClick("audio"));
     menu.video.addEventListener("click", copyClick("video"));
+    menu.anchor.addEventListener("pointerenter", (event) => {
+      if (event?.pointerType === "touch" || button.dataset.live !== "on") return;
+      cancelClose();
+      setMenuOpen(true);
+    });
+    menu.anchor.addEventListener("pointerleave", () => {
+      if (button.dataset.live !== "on") return;
+      scheduleClose();
+    });
+    menu.anchor.addEventListener("focusin", () => {
+      if (ignoreFocus) {
+        ignoreFocus = false;
+        return;
+      }
+      if (fromPointer) {
+        fromPointer = false;
+        return;
+      }
+      if (button.dataset.live !== "on") return;
+      cancelClose();
+      setMenuOpen(true);
+    });
+    menu.anchor.addEventListener("focusout", (event) => {
+      const next = event?.relatedTarget;
+      if (next && typeof menu.anchor.contains === "function" && menu.anchor.contains(next)) return;
+      cancelClose();
+      setMenuOpen(false);
+    });
     menu.anchor.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape" || button.dataset.live !== "on") return;
+      if (event.key !== "Escape" || menu.anchor.dataset.menu !== "open") return;
       event.preventDefault?.();
       event.stopPropagation?.();
-      menu.anchor.dataset.menu = "closed";
+      cancelClose();
+      ignoreFocus = true;
+      setMenuOpen(false);
       button.focus?.();
-      syncExpanded();
     });
-    menu.anchor.addEventListener("mouseleave", () => {
-      if (menu.anchor.dataset.menu) delete menu.anchor.dataset.menu;
-      syncExpanded();
-    });
-    menu.anchor.addEventListener("mouseenter", syncExpanded);
-    menu.anchor.addEventListener("focusin", syncExpanded);
-    menu.anchor.addEventListener("focusout", (event) => {
-      const next = event.relatedTarget;
-      if (next && typeof menu.anchor.contains === "function" && menu.anchor.contains(next)) return;
-      if (menu.anchor.dataset.menu) delete menu.anchor.dataset.menu;
-      syncExpanded();
-    });
+    if (root && typeof root.addEventListener === "function") {
+      root.addEventListener("pointerdown", (event) => {
+        if (menu.anchor.dataset.menu !== "open") return;
+        const target = event?.target;
+        if (target && typeof menu.anchor.contains === "function" && menu.anchor.contains(target)) return;
+        cancelClose();
+        setMenuOpen(false);
+      });
+    }
   }
 
   function onClick() {
@@ -590,7 +658,34 @@ export function createLiveControl(options) {
     return start();
   }
 
-  button.addEventListener("click", () => {
+  button.addEventListener("pointerdown", () => {
+    fromPointer = true;
+    schedule(() => {
+      fromPointer = false;
+    }, 0);
+    if (button.dataset.live !== "on") return;
+    if (holdTimer) clearSchedule(holdTimer);
+    holdTimer = schedule(() => {
+      holdTimer = 0;
+      suppressClick = true;
+      cancelClose();
+      setMenuOpen(true);
+    }, LIVE_MENU_HOLD_MS);
+  });
+  const endHold = () => {
+    if (!holdTimer) return;
+    clearSchedule(holdTimer);
+    holdTimer = 0;
+  };
+  button.addEventListener("pointerup", endHold);
+  button.addEventListener("pointercancel", endHold);
+  button.addEventListener("click", (event) => {
+    if (suppressClick) {
+      suppressClick = false;
+      event?.preventDefault?.();
+      event?.stopPropagation?.();
+      return;
+    }
     Promise.resolve(onClick()).catch(() => {});
   });
 
@@ -622,5 +717,6 @@ export function bindLive(options) {
     createRecorder: options.createRecorder || ((stream, recorderOptions) => new MediaRecorder(stream, recorderOptions)),
     copyText: options.copyText || ((url) => copyLiveUrl(url)),
     menu: options.menu,
+    root: options.root || (typeof document === "undefined" ? null : document),
   });
 }
