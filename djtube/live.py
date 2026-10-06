@@ -31,7 +31,7 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 
-from fastapi import FastAPI, Response, WebSocket
+from fastapi import FastAPI, Request, Response, WebSocket
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 from djtube.webm import DEFAULT_MAX_BUFFER, WebmError, WebmSplitter, WebmTooBig
@@ -47,10 +47,15 @@ MAX_TEXT = 1024
 MAX_STREAMS = 8
 MAX_PER_IP = 2
 MAX_LISTENERS = 200
+MAX_LISTENERS_PER_IP = 4
+MAX_LISTENERS_TOTAL = 400
 MAX_CLUSTER = DEFAULT_MAX_BUFFER
 MAX_BYTES_PER_SECOND = 64 * 1024
 BURST_SECONDS = 8
 LISTENER_QUEUE = 8
+# Starts when the ASGI send is awaited. The kernel accepts writes until the
+# socket buffer fills, so a congested listener is not cut until then and keeps
+# that much delay.
 SEND_TIMEOUT = 2.0
 INIT_TIMEOUT = 10.0
 IDLE_TIMEOUT = 30.0
@@ -98,20 +103,30 @@ def _address_key(value: str) -> str:
     return network.network_address.compressed
 
 
-def _publisher_address(websocket: WebSocket) -> str:
+def _publisher_address(connection: WebSocket | Request) -> str:
     """The address nginx put in X-Real-IP, or the socket peer when that header is absent.
 
     X-Forwarded-For is not read. A client can put anything there. 8098 is meant
     to be reachable only from that nginx, which is what makes X-Real-IP true.
+    Publishers and listeners use the same value.
     """
 
-    raw = websocket.headers.get("x-real-ip")
+    raw = connection.headers.get("x-real-ip")
     if isinstance(raw, str) and raw.strip():
         return _address_key(raw)
-    client = websocket.client
+    client = connection.client
     if client is not None and client.host:
         return _address_key(client.host)
     return ""
+
+
+def content_type(mime: str) -> str:
+    """Only the MIME values we accept. A publisher cannot choose an arbitrary type."""
+
+    normalized = normalize_mime(mime)
+    if normalized is None:
+        return "audio/webm"
+    return normalized
 
 
 def normalize_mime(value: object) -> str | None:
@@ -138,8 +153,9 @@ def _configure_log() -> None:
 class _Listener:
     """Thread-safe queue. The publisher and the listener may sit on different loops in tests."""
 
-    def __init__(self, limit: int) -> None:
+    def __init__(self, limit: int, address: str = "") -> None:
         self.limit = limit
+        self.address = address
         self.saw_init = False
         self._closed = False
         self._items: deque[tuple[str, bytes]] = deque()
@@ -250,6 +266,8 @@ class LiveHub:
         max_streams: int = MAX_STREAMS,
         max_per_ip: int = MAX_PER_IP,
         max_listeners: int = MAX_LISTENERS,
+        max_listeners_per_ip: int = MAX_LISTENERS_PER_IP,
+        max_listeners_total: int = MAX_LISTENERS_TOTAL,
         max_frame: int = MAX_FRAME,
         max_cluster: int = MAX_CLUSTER,
         max_bytes_per_second: int = MAX_BYTES_PER_SECOND,
@@ -262,6 +280,8 @@ class LiveHub:
         self.max_streams = max_streams
         self.max_per_ip = max_per_ip
         self.max_listeners = max_listeners
+        self.max_listeners_per_ip = max_listeners_per_ip
+        self.max_listeners_total = max_listeners_total
         self.max_frame = max_frame
         self.max_cluster = max_cluster
         self.max_bytes_per_second = max_bytes_per_second
@@ -278,8 +298,16 @@ class LiveHub:
                 return None
             return stream
 
-    def active(self, stream_id: str) -> bool:
-        return self.get(stream_id) is not None
+    def stream_status(self, stream_id: str) -> tuple[int, str | None]:
+        """HEAD. Does not take a listener slot. The type is None when nothing is live."""
+
+        if not is_stream_id(stream_id):
+            return 404, None
+        with self._lock:
+            stream = self._streams.get(stream_id)
+            if stream is None or stream.closed:
+                return 404, None
+            return 200, content_type(stream.mime)
 
     async def publish(self, websocket: WebSocket) -> None:
         _configure_log()
@@ -301,8 +329,8 @@ class LiveHub:
             self._end(stream)
             log.info("end %s", stream.id)
 
-    async def attach_listener(self, stream_id: str) -> tuple[int, "_Listener | None", "_Stream | None"]:
-        """Join a live response. 404 when nothing is publishing. 429 when the listener cap is full."""
+    async def attach_listener(self, stream_id: str, address: str) -> tuple[int, "_Listener | None", "_Stream | None"]:
+        """Join a live response. 404 when nothing is publishing. 429 when a listener cap is full."""
 
         if not is_stream_id(stream_id):
             return 404, None, None
@@ -312,7 +340,11 @@ class LiveHub:
                 return 404, None, None
             if len(stream.listeners) >= self.max_listeners:
                 return 429, None, None
-            listener = _Listener(self.listener_queue)
+            if sum(item.address == address for item in stream.listeners) >= self.max_listeners_per_ip:
+                return 429, None, None
+            if sum(len(item.listeners) for item in self._streams.values()) >= self.max_listeners_total:
+                return 429, None, None
+            listener = _Listener(self.listener_queue, address)
             stream.listeners.add(listener)
             init = stream.init
             latest = stream.latest
@@ -482,7 +514,7 @@ class _AudioResponse(Response):
 
     def __init__(self, hub: LiveHub, listener: _Listener, stream: _Stream) -> None:
         self.status_code = 200
-        self.media_type = "audio/webm"
+        self.media_type = content_type(stream.mime)
         self.background = None
         self.init_headers(_STREAM_HEADERS)
         self.hub = hub
@@ -527,14 +559,35 @@ class _AudioResponse(Response):
                 await incoming
 
 
+class _HeaderOnly(Response):
+    """Same headers as the live GET, with no body and no Content-Length."""
+
+    def __init__(self, status_code: int, mime: str) -> None:
+        self.status_code = status_code
+        self.media_type = mime
+        self.background = None
+        self.init_headers(_STREAM_HEADERS)
+
+    async def __call__(
+        self, scope: dict, receive: Callable[[], Awaitable[dict]], send: Callable[[dict], Awaitable[None]]
+    ) -> None:
+        await send({"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+
 def mount_live(app: FastAPI, hub: LiveHub) -> None:
     @app.websocket("/api/live/publish")
     async def publish(websocket: WebSocket) -> None:
         await hub.publish(websocket)
 
-    @app.get("/stream/{stream_id}")
-    async def stream_audio(stream_id: str) -> Response:
-        status, listener, stream = await hub.attach_listener(stream_id)
+    @app.api_route("/stream/{stream_id}", methods=["GET", "HEAD"])
+    async def stream_audio(stream_id: str, request: Request) -> Response:
+        if request.method == "HEAD":
+            status, mime = hub.stream_status(stream_id)
+            if mime is None:
+                return Response(status_code=status, headers=_STREAM_HEADERS)
+            return _HeaderOnly(status, mime)
+        status, listener, stream = await hub.attach_listener(stream_id, _publisher_address(request))
         if listener is None or stream is None:
             return Response(status_code=status, headers=_STREAM_HEADERS)
         return _AudioResponse(hub, listener, stream)

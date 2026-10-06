@@ -110,6 +110,19 @@ def test_garbage_is_rejected():
         splitter.feed(b"this is not a webm stream")
 
 
+def test_a_file_larger_than_the_buffer_still_splits():
+    body = b"A" * 4096
+    clusters = [cluster_known(index * 200, body) for index in range(80)]
+    head, data = document(clusters)
+    assert len(data) > 256 * 1024
+    splitter = WebmSplitter()
+    with pytest.raises(WebmTooBig):
+        splitter.feed(data)
+    init, found = split_webm(data)
+    assert init == head
+    assert found == clusters
+
+
 def test_ffmpeg_live_webm_round_trips_through_odd_slices():
     if shutil.which("ffmpeg") is None:
         pytest.skip("ffmpeg is required to build the test tone")

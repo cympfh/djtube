@@ -31,6 +31,10 @@ from djtube.live import (
     MAX_FRAME,
     MAX_PER_IP,
     MAX_STREAMS,
+    DEFAULT_MIME,
+    MAX_LISTENERS,
+    MAX_LISTENERS_PER_IP,
+    MAX_LISTENERS_TOTAL,
     LiveHub,
     _AudioResponse,
     _Listener,
@@ -120,9 +124,10 @@ def _dominant(samples: array.array, skip: float, take: float = 0.35, rate: int =
 class _Audio:
     """One chunked GET, read while a publisher socket on the same TestClient stays open."""
 
-    def __init__(self, client: TestClient, path: str) -> None:
+    def __init__(self, client: TestClient, path: str, headers: dict[str, str] | None = None) -> None:
         self._client = client
         self._path = path
+        self._extra = headers or {}
         self.status_code = 0
         self.headers: dict[str, str] = {}
 
@@ -160,7 +165,7 @@ class _Audio:
             "path": self._path,
             "raw_path": self._path.encode(),
             "query_string": b"",
-            "headers": [],
+            "headers": [(key.lower().encode("latin-1"), value.encode("latin-1")) for key, value in self._extra.items()],
             "client": ("127.0.0.1", 50000),
             "server": ("testserver", 80),
             "root_path": "",
@@ -229,6 +234,101 @@ def test_full_hub_and_full_listener_list_refuse_another_connection():
                 assert overflow.headers["cache-control"] == "no-store"
 
 
+def test_one_source_may_listen_only_so_many_times_on_one_stream():
+    hub = LiveHub(max_listeners_per_ip=2, max_listeners=10, max_listeners_total=50, init_timeout=5, idle_timeout=5)
+    same = {"x-real-ip": "203.0.113.8"}
+    other = {"x-real-ip": "203.0.113.9"}
+    with TestClient(create_app(live=hub)) as client:
+        with client.websocket_connect("/api/live/publish?id=LIMS") as publisher:
+            assert publisher.receive_json()["id"] == "LIMS"
+            with _Audio(client, "/stream/LIMS", same) as first:
+                with _Audio(client, "/stream/LIMS", same) as second:
+                    assert first.status_code == second.status_code == 200
+                    blocked = client.get("/stream/LIMS", headers=same)
+                    assert blocked.status_code == 429
+                    with _Audio(client, "/stream/LIMS", other) as third:
+                        assert third.status_code == 200
+                        stream = hub.get("LIMS")
+                        assert stream is not None
+                        assert len(stream.listeners) == 3
+            with _Audio(client, "/stream/LIMS") as peer:
+                with _Audio(client, "/stream/LIMS") as peer_again:
+                    assert peer.status_code == peer_again.status_code == 200
+                    with _Audio(client, "/stream/LIMS", {"x-forwarded-for": "198.51.100.50"}) as spoofed:
+                        assert spoofed.status_code == 429
+            with _Audio(client, "/stream/LIMS", same) as again:
+                assert again.status_code == 200
+
+
+def test_ipv6_listeners_share_a_64_on_one_stream():
+    hub = LiveHub(max_listeners_per_ip=2, max_listeners=10, max_listeners_total=50, init_timeout=5, idle_timeout=5)
+    with TestClient(create_app(live=hub)) as client:
+        with client.websocket_connect("/api/live/publish?id=VLSA") as publisher:
+            publisher.receive_json()
+            first = {"x-real-ip": "2001:db8:1:2::1"}
+            second = {"x-real-ip": "2001:db8:1:2:ffff::9"}
+            third = {"x-real-ip": "2001:db8:1:3::1"}
+            with _Audio(client, "/stream/VLSA", first) as held:
+                with _Audio(client, "/stream/VLSA", second) as also:
+                    assert held.status_code == also.status_code == 200
+                    blocked = client.get("/stream/VLSA", headers={"x-real-ip": "2001:0db8:0001:0002::abcd"})
+                    assert blocked.status_code == 429
+                    with _Audio(client, "/stream/VLSA", third) as other:
+                        assert other.status_code == 200
+
+
+def test_listeners_across_streams_share_one_cap():
+    hub = LiveHub(max_listeners_total=2, max_listeners_per_ip=10, max_listeners=10, init_timeout=5, idle_timeout=5)
+    with TestClient(create_app(live=hub)) as client:
+        with client.websocket_connect("/api/live/publish?id=AAAA", headers={"x-real-ip": "203.0.113.1"}) as first:
+            first.receive_json()
+            with client.websocket_connect("/api/live/publish?id=AAAB", headers={"x-real-ip": "203.0.113.2"}) as second:
+                second.receive_json()
+                with _Audio(client, "/stream/AAAA", {"x-real-ip": "198.51.100.1"}) as left:
+                    with _Audio(client, "/stream/AAAB", {"x-real-ip": "198.51.100.2"}) as right:
+                        assert left.status_code == right.status_code == 200
+                        blocked = client.get("/stream/AAAA", headers={"x-real-ip": "198.51.100.3"})
+                        assert blocked.status_code == 429
+                        other = client.get("/stream/AAAB", headers={"x-real-ip": "198.51.100.4"})
+                        assert other.status_code == 429
+                        assert hub.get("AAAA") is not None
+                        assert hub.get("AAAB") is not None
+                    with _Audio(client, "/stream/AAAB", {"x-real-ip": "198.51.100.4"}) as opened:
+                        assert opened.status_code == 200
+
+
+def test_head_reports_a_live_stream_without_taking_a_listener():
+    hub = LiveHub(max_listeners=1, init_timeout=5, idle_timeout=5)
+    with TestClient(create_app(live=hub)) as client:
+        missing = client.head("/stream/NONE")
+        invalid = client.head("/stream/nope")
+        assert missing.status_code == invalid.status_code == 404
+        assert missing.content == invalid.content == b""
+        with client.websocket_connect("/api/live/publish?id=LIVE") as publisher:
+            publisher.receive_json()
+            head = client.head("/stream/LIVE")
+            prefixed = client.head(f"{PUBLIC_PREFIX}/stream/LIVE")
+            for response in (head, prefixed):
+                assert response.status_code == 200
+                assert response.headers["content-type"] == DEFAULT_MIME
+                assert response.headers["cache-control"] == "no-store"
+                assert response.headers["x-accel-buffering"] == "no"
+                assert "content-length" not in response.headers
+                assert response.content == b""
+            stream = hub.get("LIVE")
+            assert stream is not None
+            assert stream.listeners == set()
+            with _Audio(client, "/stream/LIVE") as listener:
+                assert listener.status_code == 200
+                again = client.head("/stream/LIVE")
+                assert again.status_code == 200
+                assert again.headers["content-type"] == listener.headers["content-type"]
+                assert len(stream.listeners) == 1
+                blocked = client.get("/stream/LIVE")
+                assert blocked.status_code == 429
+                assert len(stream.listeners) == 1
+
+
 def test_missing_and_invalid_ids_are_404_and_a_live_one_is_audio():
     with TestClient(create_app()) as client:
         missing = client.get("/stream/ABCD")
@@ -243,7 +343,7 @@ def test_missing_and_invalid_ids_are_404_and_a_live_one_is_audio():
             assert publisher.receive_json()["id"] == "LIVE"
             with _Audio(client, "/stream/LIVE") as audio:
                 assert audio.status_code == 200
-                assert audio.headers["content-type"] == "audio/webm"
+                assert audio.headers["content-type"] == DEFAULT_MIME
                 assert audio.headers["cache-control"] == "no-store"
                 assert audio.headers["x-accel-buffering"] == "no"
                 assert "content-length" not in audio.headers
@@ -350,6 +450,9 @@ def test_a_slow_listener_is_dropped_and_a_full_queue_drops_old_clusters():
 
 def test_relay_caps_match_the_publisher_budget():
     hub = LiveHub()
+    assert hub.max_listeners == MAX_LISTENERS == 200
+    assert hub.max_listeners_per_ip == MAX_LISTENERS_PER_IP == 4
+    assert hub.max_listeners_total == MAX_LISTENERS_TOTAL == 400
     assert hub.max_streams == MAX_STREAMS == 8
     assert hub.max_per_ip == MAX_PER_IP == 2
     assert hub.max_bytes_per_second == MAX_BYTES_PER_SECOND == 64 * 1024
@@ -535,7 +638,7 @@ def test_a_second_mime_is_ignored_and_the_first_one_sticks():
             publisher.send_json({"type": "mime", "mime": "text/html"})
             publisher.send_bytes(head + cluster)
             with _Audio(client, "/stream/ONCE") as listener:
-                assert listener.headers["content-type"] == "audio/webm"
+                assert listener.headers["content-type"] == DEFAULT_MIME
                 assert listener.read() == head
 
 
