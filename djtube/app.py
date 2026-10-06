@@ -11,6 +11,7 @@ from djtube.audio import AudioError, audio_needs_cookies, clear_audio_cache, ope
 from djtube.cookies import MAX_COOKIE_BYTES, CookieError, CookieStore, cookie_path, install_store
 from djtube.ids import is_video_id
 from djtube.live import LiveHub, mount_live
+from djtube.thumbs import thumb_cache
 from djtube.paths import INDEX_PATH, PUBLIC_PREFIX, STATIC_DIR
 from djtube.playlists import PlaylistError, PlaylistStore, playlist_path
 from djtube.search import SearchError, search_mode, search_tracks
@@ -68,7 +69,7 @@ def create_app(
     store = playlist_store if playlist_store is not None else PlaylistStore(playlist_path())
     jar = cookies if cookies is not None else CookieStore(cookie_path())
     install_store(jar)
-    mount_live(app, live if live is not None else LiveHub())
+    mount_live(app, live if live is not None else LiveHub(thumbs=thumb_cache()))
 
     def raise_playlist(exc: PlaylistError) -> None:
         raise HTTPException(exc.status, str(exc)) from None

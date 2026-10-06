@@ -103,6 +103,43 @@ def cluster_timecode(cluster: bytes) -> int | None:
     return None
 
 
+def rebase_cluster(cluster: bytes, base_ms: int) -> bytes:
+    """Subtract `base_ms` from the Cluster timecode, keeping the element's width.
+
+    SimpleBlock timestamps are relative to that timecode, so the blocks stay
+    valid. The video muxer starts its own timeline at zero and re-encodes the
+    Opus mix to AAC-LC, so a listener who joins later would otherwise see
+    audio timestamps from the start of the broadcast and video timestamps
+    from zero.
+    """
+
+    if base_ms <= 0:
+        return cluster
+    header = _read_header(cluster, 0)
+    if header is None or header[0] != CLUSTER_ID:
+        return cluster
+    _, header_end, size = header
+    end = len(cluster) if size is None else min(len(cluster), header_end + size)
+    pos = header_end
+    while pos < end:
+        child = _read_header(cluster, pos)
+        if child is None:
+            return cluster
+        element_id, child_header, child_size = child
+        if child_size is None or child_header + child_size > len(cluster):
+            return cluster
+        if element_id == TIMECODE_ID:
+            current = int.from_bytes(cluster[child_header : child_header + child_size], "big")
+            updated = max(0, current - base_ms)
+            if updated >= 1 << (child_size * 8):
+                return cluster
+            out = bytearray(cluster)
+            out[child_header : child_header + child_size] = updated.to_bytes(child_size, "big")
+            return bytes(out)
+        pos = child_header + child_size
+    return cluster
+
+
 class WebmSplitter:
     """Keep only the initialization segment and the Cluster that is still open."""
 

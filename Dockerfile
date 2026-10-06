@@ -22,6 +22,11 @@ COPY main.py ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 FROM base AS runtime
+# ffmpeg encodes the ?thumbnail=1 picture. Install it before the app source so
+# a code change does not rebuild this layer. The wheels already include Pillow.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 COPY --chown=appuser:appuser djtube ./djtube
 COPY --chown=appuser:appuser main.py ./

@@ -168,9 +168,10 @@ def _dominant(samples: array.array, skip: float, take: float = 0.35, rate: int =
 class _Audio:
     """One chunked GET, read while a publisher socket on the same TestClient stays open."""
 
-    def __init__(self, client: TestClient, path: str, headers: dict[str, str] | None = None) -> None:
+    def __init__(self, client: TestClient, path: str, headers: dict[str, str] | None = None, query: str = "") -> None:
         self._client = client
         self._path = path
+        self._query = query.encode()
         self._extra = headers or {}
         self.status_code = 0
         self.headers: dict[str, str] = {}
@@ -208,7 +209,7 @@ class _Audio:
             "scheme": "http",
             "path": self._path,
             "raw_path": self._path.encode(),
-            "query_string": b"",
+            "query_string": self._query,
             "headers": [(key.lower().encode("latin-1"), value.encode("latin-1")) for key, value in self._extra.items()],
             "client": ("127.0.0.1", 50000),
             "server": ("testserver", 80),
@@ -290,6 +291,7 @@ def test_full_hub_and_full_listener_list_refuse_another_connection():
                 overflow = client.get(f"{PUBLIC_PREFIX}/stream/{stream_id}")
                 assert overflow.status_code == 429
                 assert overflow.headers["cache-control"] == "no-store"
+                assert "retry-after" not in overflow.headers
 
 
 def test_one_source_may_listen_only_so_many_times_on_one_stream():
@@ -483,7 +485,9 @@ def test_a_slow_listener_is_dropped_and_a_full_queue_drops_old_clusters():
         assert listener.pending_kinds()[0] == "init"
 
         hub = LiveHub(send_timeout=0.05, max_streams=2)
-        stream, _generation, _token, _replaced, _ended = hub._open("SLOW", None, "203.0.113.8")
+        stream, _generation, _token, _replaced, _ended, _video_ended, _old_relay = hub._open(
+            "SLOW", None, "203.0.113.8"
+        )
         waiting = _Listener(limit=4)
         stream.listeners.add(waiting)
         waiting.offer_init(b"i")
@@ -733,7 +737,8 @@ def test_ipv6_publishers_share_a_64():
                     with _ws(client, "/api/live/publish?id=VAAC", headers={"x-real-ip": same[2]}) as third:
                         third.receive_json()
                 assert full.value.code == CODE_FULL
-                with _ws(client, 
+                with _ws(
+                    client,
                     "/api/live/publish?id=VBAA",
                     headers={"x-real-ip": "2001:db8:1:3::1"},
                 ) as other:
@@ -771,20 +776,23 @@ def test_one_address_may_publish_twice_and_forwarded_for_does_not_count():
                     with _ws(client, "/api/live/publish?id=IPAC", headers=first) as extra:
                         extra.receive_json()
                 assert full.value.code == CODE_FULL
-                with _ws(client, 
+                with _ws(
+                    client,
                     "/api/live/publish?id=IPBA",
                     headers={"x-real-ip": "203.0.113.9", "x-forwarded-for": "198.51.100.1"},
                 ) as other:
                     assert other.receive_json()["id"] == "IPBA"
             with _ws(client, "/api/live/publish?id=FFAA", headers=spoofed) as forwarded:
                 assert forwarded.receive_json()["id"] == "FFAA"
-                with _ws(client, 
+                with _ws(
+                    client,
                     "/api/live/publish?id=FFAB",
                     headers={"x-forwarded-for": "203.0.113.51"},
                 ) as forwarded_again:
                     assert forwarded_again.receive_json()["id"] == "FFAB"
                     with pytest.raises(WebSocketDisconnect) as shared:
-                        with _ws(client, 
+                        with _ws(
+                            client,
                             "/api/live/publish?id=FFAC",
                             headers={"x-forwarded-for": "203.0.113.52"},
                         ) as forwarded_full:
@@ -1071,12 +1079,14 @@ def test_reservations_expire_and_idle_holds_are_capped():
 
 def test_old_cleanup_does_not_drop_the_replacement_and_reclaim_ignores_its_own_slot():
     hub = LiveHub(max_per_ip=2, max_streams=2)
-    first, generation, token, _replaced, _ended = hub._open("AAAA", None, "203.0.113.8", 1)
+    first, generation, token, _replaced, _ended, _video_ended, _old_relay = hub._open("AAAA", None, "203.0.113.8", 1)
     hub._open("AAAB", None, "203.0.113.8")
     with pytest.raises(LiveClose) as full:
         hub._open("AAAC", None, "203.0.113.8")
     assert full.value.code == CODE_FULL
-    reclaimed, new_generation, same, replaced, _ended = hub._open("AAAA", token, "203.0.113.8", 2)
+    reclaimed, new_generation, same, replaced, _ended, _video_ended, _old_relay = hub._open(
+        "AAAA", token, "203.0.113.8", 2
+    )
     assert reclaimed is first
     assert same == token
     assert replaced is None or replaced is first.websocket
