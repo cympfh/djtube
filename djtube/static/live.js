@@ -48,6 +48,8 @@ const CLOSE_TEXT = {
   4408: "音声が届かなくなったため、配信を止めました",
   4409: LIVE_TAKEN,
   4429: "配信の上限に達しました",
+  4430: "配信の記録を保存できませんでした",
+  4431: "配信の記録を読めませんでした",
   1003: "配信の形式が受け付けられませんでした",
   1008: "送信の上限に達しました",
   1009: "データが大きすぎるため、配信を止めました",
@@ -103,6 +105,13 @@ export function liveSupported(scope = globalThis) {
   } catch {
     return false;
   }
+}
+
+/** Page-lifetime attempt counter. It stops at the largest integer JSON keeps exact. */
+export function nextClaimSeq(current) {
+  if (typeof current !== "number" || !Number.isFinite(current) || current < 0) return 1;
+  if (current >= Number.MAX_SAFE_INTEGER) return Number.MAX_SAFE_INTEGER;
+  return current + 1;
 }
 
 export function livePublishUrl(prefix, origin) {
@@ -295,7 +304,10 @@ export function createLiveControl(options) {
   let holdTimer = 0;
   let pinnedId = "";
   let pinnedToken = "";
-  let claimSeq = 0;
+  // The attempt that still owns the pinned id. A stop does not clear it, so a
+  // 4409 on that socket still drops the id. A newer attempt replaces it.
+  let claimMine = null;
+  let claimSeq = Number.isFinite(options.initialSeq) ? options.initialSeq : 0;
 
   function markCopyFailed(mine) {
     if (mine.ended || mine.copyFailed) return;
@@ -573,7 +585,12 @@ export function createLiveControl(options) {
   }
 
   function finish(mine, status) {
-    if (mine.ended) return;
+    // A second call still paints. onclose returns first when the attempt
+    // already ended, so a late close does not replace the idle hover.
+    if (mine.ended) {
+      paint(status);
+      return;
+    }
     mine.ended = true;
     if (session === mine) session = null;
     if (!mine.url && mine.clip) {
@@ -695,12 +712,13 @@ export function createLiveControl(options) {
   }
 
   function sendClaim(socket) {
-    claimSeq += 1;
+    claimSeq = nextClaimSeq(claimSeq);
     socket.send(claimMessage(pinnedId, pinnedToken, claimSeq));
   }
 
   function bindSocket(mine, socket) {
     mine.socket = socket;
+    if (session === mine) claimMine = mine;
     const deliver = () => {
       if (mine.ended || mine.claimed) return;
       mine.claimed = true;
@@ -713,6 +731,8 @@ export function createLiveControl(options) {
     socket.onopen = deliver;
     if (socket.readyState === SOCKET_OPEN) deliver();
     socket.onmessage = (event) => {
+      // After the recorder starts, later text is not a new token. A `now`
+      // frame from a video publisher must not replace the token either.
       if (mine.ended || mine.recorder || typeof event?.data !== "string") return;
       let payload = null;
       try {
@@ -725,12 +745,19 @@ export function createLiveControl(options) {
       begin(mine, payload.id, payload.token);
     };
     socket.onclose = (event) => {
-      if (mine.ended) return;
       const code = event?.code;
-      if (code === 4409) {
+      // 4410 drops the id only while this socket is still the page session.
+      // 4409 drops it for the attempt that still owns the id, including after
+      // that attempt has stopped. An older socket does not.
+      const current = session === mine && mine.socket === socket;
+      if ((code === 4409 && mine === claimMine) || (code === 4410 && current)) {
         pinnedId = "";
         pinnedToken = "";
       }
+      // Stop already painted idle and set ended. A late close must not replace
+      // that hover with the stall or drop text. finish() also returns once
+      // ended; this return is what runs first, before the stall check.
+      if (mine.ended) return;
       const stalled = code === 4408 && outputStalled(mine);
       finish(mine, { state: "error", reason: stalled ? LIVE_OUTPUT_STALLED : closeReason(code) });
     };

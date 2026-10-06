@@ -25,6 +25,7 @@ def test_health_and_public_prefix():
     assert body["flx4"] == "mapped"
     assert body["playback"] == "ytdlp-stream"
     assert body["search"] in {"youtube", "ytdlp"}
+    assert body["live"] == "on"
 
 
 def test_index_uses_public_asset_prefix():
@@ -280,6 +281,8 @@ def test_readme_and_docker_contract():
     assert "DJTUBE_PLAYLISTS" not in readme
     assert "DJTUBE_COOKIES" not in readme
     assert "DJTUBE_THUMB_DIR" not in readme
+    assert "DJTUBE_LIVE_SECRET" not in readme
+    assert "live-secret" not in readme
     assert "data/playlists.json" not in readme
     assert "data/cookies.txt" not in readme
     assert "cookiefile" not in readme
@@ -320,6 +323,14 @@ def test_readme_and_docker_contract():
     assert "djtube-data:/app/data" in compose
     assert "DJTUBE_COOKIES=/app/data/cookies.txt" in dockerfile
     assert "DJTUBE_COOKIES: /app/data/cookies.txt" in compose
+    assert "DJTUBE_LIVE_SECRET" not in dockerfile
+    assert "DJTUBE_LIVE_SECRET" not in compose
+    assert "DJTUBE_LIVE_SECRET" not in agent
+    assert "live-secret" not in agent
+    assert "live-seen.json" in agent
+    assert "token_urlsafe" in agent
+    assert "/56" in agent
+    assert "パーミッションは 600" in agent
     assert "/opt/djtube/deno" in dockerfile
     assert "/opt/djtube" not in dockerfile.split("ENV PATH=", 1)[1].split("\n", 1)[0]
 

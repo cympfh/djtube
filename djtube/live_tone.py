@@ -16,6 +16,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 
 from djtube.paths import PUBLIC_PREFIX
 from djtube.webm import cluster_timecode, split_webm
@@ -138,6 +139,7 @@ async def publish_webm(
     pace: bool,
     now: list[dict[str, object]] | None = None,
     stream_id: str | None = None,
+    token: str | None = None,
 ) -> str:
     import websockets
 
@@ -152,9 +154,7 @@ async def publish_webm(
         connection = await websockets.connect(url, max_size=2 * 1024 * 1024)
     except Exception as exc:
         raise _connect_error(exc) from exc
-    claim: dict[str, object] = {"type": "mime", "mime": "audio/webm;codecs=opus"}
-    if stream_id:
-        claim["id"] = stream_id
+    claim = claim_payload(stream_id, token)
     async with connection:
         try:
             await connection.send(json.dumps(claim))
@@ -162,7 +162,8 @@ async def publish_webm(
         except Exception as exc:
             raise _connect_error(exc) from exc
         stream_id = str(hello["id"])
-        _announce(stream_id, url)
+        heard = hello.get("token")
+        _announce(stream_id, url, heard if isinstance(heard, str) and heard else None)
         if now:
             await connection.send(json.dumps({"type": "now", "decks": now}))
         sent = 0
@@ -188,11 +189,28 @@ async def publish_webm(
     return stream_id
 
 
-def _announce(stream_id: str, publish_url: str) -> None:
+def claim_payload(
+    stream_id: str | None = None, token: str | None = None, *, now: float | None = None
+) -> dict[str, object]:
+    """First text. ``seq`` is required: a browser id reclaimed without one closes 4410."""
+
+    claim: dict[str, object] = {"type": "mime", "mime": "audio/webm;codecs=opus"}
+    claim["seq"] = max(1, int((time.time() if now is None else now) * 1000))
+    if stream_id:
+        claim["id"] = stream_id
+        if token:
+            claim["token"] = token
+    return claim
+
+
+def _announce(stream_id: str, publish_url: str, token: str | None = None) -> None:
     http = publish_url.replace("wss://", "https://", 1).replace("ws://", "http://", 1)
     root, _, _query = http.partition("?")
     listen = root[: -len("/api/live/publish")] + "/stream/" + stream_id
     print(f"ID: {stream_id}", flush=True)
+    if token:
+        # The operator's terminal, so --id and --token can be reused. The server does not log this.
+        print(f"token: {token}", flush=True)
     print(f"聴く: {listen}", flush=True)
 
 
@@ -211,7 +229,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="試験音を配信ソケットへ送る")
     parser.add_argument("--base", default="http://127.0.0.1:8098", help="サーバのオリジン。/djtube が付いていてもよい")
     parser.add_argument("--seconds", type=float, default=30)
-    parser.add_argument("--id", default="", help="4 文字の英大文字。空ならサーバが振る")
+    parser.add_argument("--id", default="", help="4 文字の英大文字。トークンと一緒のときだけ指定する")
+    parser.add_argument("--token", default="", help="その ID を取り戻すトークン。ログには出さない")
     parser.add_argument("--no-pace", action="store_true", help="待たずに全部送る")
     parser.add_argument(
         "--now",
@@ -225,6 +244,11 @@ def main(argv: list[str] | None = None) -> int:
         print("秒数を 0 より大きくしてください", file=sys.stderr)
         return 2
     publish_url, _listen_root = endpoints(args.base)
+    stream_id = args.id.strip() or None
+    token = args.token.strip() or None
+    if stream_id and not token:
+        print("ID を指定するときはトークンも要ります", file=sys.stderr)
+        return 2
     try:
         webm = render_webm(alternating_tone(args.seconds))
     except ToneError as exc:
@@ -239,7 +263,8 @@ def main(argv: list[str] | None = None) -> int:
                 webm,
                 pace=not args.no_pace,
                 now=decks,
-                stream_id=args.id.strip() or None,
+                stream_id=stream_id,
+                token=token,
             )
         )
     except ToneError as exc:
