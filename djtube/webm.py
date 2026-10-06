@@ -107,9 +107,10 @@ def rebase_cluster(cluster: bytes, base_ms: int) -> bytes:
     """Subtract `base_ms` from the Cluster timecode, keeping the element's width.
 
     SimpleBlock timestamps are relative to that timecode, so the blocks stay
-    valid. The video muxer starts its own timeline at zero and copies Opus, so
-    a listener who joins later would otherwise see audio timestamps from the
-    start of the broadcast and video timestamps from zero.
+    valid. The video muxer starts its own timeline at zero and re-encodes the
+    Opus mix to AAC-LC, so a listener who joins later would otherwise see
+    audio timestamps from the start of the broadcast and video timestamps
+    from zero.
     """
 
     if base_ms <= 0:

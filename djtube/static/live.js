@@ -32,8 +32,8 @@ export const LIVE_OUTPUT_STALLED = "音声出力が動いていません（出�
 // How often to sample AudioContext.currentTime. The page does not stop
 // itself from this timer. A 4408 uses the samples only to choose hover text.
 export const LIVE_RENDER_WATCH_MS = 3000;
-// The server accepts four now-playing messages a second. Sampling twice as
-// often, and sending only when the JSON changed, stays inside that.
+// The server accepts four now-playing messages a second. 250 ms is that
+// same rate. Unchanged JSON is not sent again.
 export const NOW_INTERVAL_MS = 250;
 
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;

@@ -141,9 +141,7 @@ class Composer:
             return target
         return Image.blend(self._from, target, min(1.0, max(0.0, span)))
 
-    def _layout(
-        self, shown: Sequence[tuple[str, float]], images: Mapping[str, Image.Image]
-    ) -> Image.Image:
+    def _layout(self, shown: Sequence[tuple[str, float]], images: Mapping[str, Image.Image]) -> Image.Image:
         if not shown:
             return self._title
         cards = [self._card(video, images[video]) for video, _gain in shown]
@@ -155,6 +153,6 @@ class Composer:
         if cached is None:
             cached = deck_card(image, self.size)
             self._cards[key] = cached
-            if len(self._cards) > 8:
+            if len(self._cards) > 4:
                 self._cards.pop(next(iter(self._cards)))
         return cached

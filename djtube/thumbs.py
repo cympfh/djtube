@@ -28,8 +28,10 @@ MIN_HEIGHT = 180
 MAX_BYTES = 2 * 1024 * 1024
 # Header size is known before pixels are decoded. A huge declared frame is a
 # decompression bomb, so it is rejected without load().
-MAX_EDGE = 4096
-MAX_PIXELS = 8_000_000
+# YouTube thumbnails are at most 1280x720. A 4096-wide JPEG is not one of
+# those, and decoding it peaks around 100MB, so the cap sits near two 720p frames.
+MAX_EDGE = 2048
+MAX_PIXELS = 1_843_200
 MAX_MISSING = 64
 MAX_QUEUED = 16
 # Eight decoded frames is about 22MB at 720p RGB (1280*720*3). That covers a
@@ -80,8 +82,11 @@ def _open_jpeg(body: bytes) -> Image.Image | None:
         image = Image.open(io.BytesIO(body))
         if not _dimensions_ok(image.width, image.height, minimum=True):
             return None
+        # Decode toward the size we actually draw. A full-resolution load of a
+        # large JPEG is the expensive part.
+        image.draft("RGB", (1280, 1280))
         image.load()
-    except (UnidentifiedImageError, OSError, ValueError):
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError):
         return None
     rgb = image.convert("RGB")
     edge = max(rgb.width, rgb.height)
@@ -133,7 +138,7 @@ def fetch_thumb_dir(directory: str):
                 if not _dimensions_ok(image.width, image.height, minimum=False):
                     return None
                 image.load()
-            except (UnidentifiedImageError, OSError, ValueError):
+            except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError):
                 return None
             return image.convert("RGB")
         return None
@@ -223,7 +228,10 @@ class ThumbCache:
         image = self.get(video_id)
         if image is not None:
             return image
-        loaded = self._fetch(video_id)
+        try:
+            loaded = self._fetch(video_id)
+        except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError):
+            loaded = None
         self._store(video_id, loaded)
         return loaded
 

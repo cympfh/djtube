@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import io
 import os
 import shutil
@@ -21,7 +23,9 @@ from djtube.compose import VIDEO_FPS, VIDEO_HEIGHT, VIDEO_WIDTH, Composer
 from djtube.live import CODE_REPLACED, CODE_TOO_BIG, MAX_TEXT, NOW_IGNORED, LiveHub, parse_now
 from djtube.thumbs import (
     MAX_BYTES,
+    MAX_EDGE,
     MAX_MISSING,
+    MAX_PIXELS,
     MAX_QUEUED,
     ThumbCache,
     _dimensions_ok,
@@ -316,6 +320,8 @@ def test_ffmpeg_command_encodes_aac_and_one_x264_thread():
     assert command[command.index("-ar") + 1] == "48000"
     assert command[command.index("-threads") + 1] == "1"
     assert "copy" not in command
+    assert command[command.index("-muxdelay") + 1] == "0"
+    assert command[command.index("-output_ts_offset") + 1] == "0.1"
     assert "mpegts" in command
     assert "pipe:7" in command
     assert "-nostdin" not in command
@@ -375,15 +381,45 @@ def _fake_ffmpeg(tmp_path: Path) -> str:
 
 def _hub(tmp_path: Path, **kwargs) -> LiveHub:
     options = {
-        "ffmpeg": _fake_ffmpeg(tmp_path),
         "video_size": (64, 36),
         "video_fps": 5,
         "video_linger": 0.2,
         "output_stall": 30.0,
         "thumbs": ThumbCache(lambda _video: None),
     }
+    if "ffmpeg" not in kwargs:
+        options["ffmpeg"] = _fake_ffmpeg(tmp_path)
     options.update(kwargs)
     return LiveHub(**options)
+
+
+def _assert_reaped(pid: int) -> None:
+    """The pid is gone. A zombie still has a /proc entry and still answers kill(pid, 0)."""
+
+    stat = Path(f"/proc/{pid}/stat")
+    if stat.exists():
+        state = stat.read_text(encoding="utf-8").rsplit(")", 1)[-1].split()[0]
+        raise AssertionError(f"pid {pid} is still state {state}")
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+@contextlib.contextmanager
+def _deadline(seconds: float, release: threading.Event | None = None):
+    """Fail the test instead of hanging when a listener or the event loop stalls."""
+
+    def _alarm(_signum, _frame):
+        if release is not None:
+            release.set()
+        raise AssertionError(f"timed out after {seconds}s")
+
+    previous = signal.signal(signal.SIGALRM, _alarm)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def test_encoder_starts_for_a_viewer_and_stops_when_the_last_one_leaves(tmp_path: Path):
@@ -454,8 +490,7 @@ def test_an_encoder_that_ignores_sigterm_is_still_stopped(tmp_path: Path):
                 pid = hub.get("KILL").relay._proc.pid
             time.sleep(0.8)
             assert hub.get("KILL").relay.occupies() is False
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    _assert_reaped(pid)
 
 
 def test_a_full_encoder_cap_returns_429_and_audio_still_plays(tmp_path: Path):
@@ -588,7 +623,9 @@ def test_thumbnail_fetch_does_not_follow_redirects_and_stops_reading(monkeypatch
     monkeypatch.setattr(Image.Image, "load", spy_load)
     monkeypatch.setattr(Image, "open", open_huge)
     assert _open_jpeg(_jpeg((320, 180))) is None
-    assert all(width <= 4096 and height <= 4096 for width, height in loaded)
+    assert all(width <= MAX_EDGE and height <= MAX_EDGE for width, height in loaded)
+    assert MAX_EDGE == 2048
+    assert MAX_PIXELS == 1_843_200
 
 
 def test_misses_and_fetch_jobs_are_capped():
@@ -619,6 +656,7 @@ def test_misses_and_fetch_jobs_are_capped():
     assert started.wait(1)
     for number in range(1, MAX_QUEUED + 40):
         limited.want(make_id(number))
+    assert limited._jobs.maxsize == MAX_QUEUED
     assert limited._jobs.qsize() <= MAX_QUEUED
     release.set()
 
@@ -740,8 +778,7 @@ def test_ending_the_publisher_reaps_the_encoder(tmp_path: Path):
         while time.monotonic() < deadline and relay.occupies():
             time.sleep(0.05)
         assert relay.occupies() is False
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+        _assert_reaped(pid)
         if video is not None:
             video.__exit__(None, None, None)
 
@@ -808,6 +845,7 @@ def test_reclaim_ends_video_and_old_cleanup_keeps_the_new_stream(tmp_path: Path)
                         time.sleep(0.05)
                     else:
                         raise AssertionError("old encoder was not reaped")
+                    _assert_reaped(pid)
                     current = hub.get("RCLM")
                     assert current is not None
                     assert current.generation == generation + 1
@@ -940,3 +978,457 @@ def test_now_changes_pixels_of_a_frame_taken_from_the_encoded_ts(tmp_path: Path)
     assert bias[0] > bias[2]
     assert bias[0] > even[0]
     assert bias[2] < even[2]
+
+
+def _ts_packet(pid: int, payload: bytes) -> bytes:
+    raw = bytearray(188)
+    raw[0] = 0x47
+    raw[1] = 0x40 | ((pid >> 8) & 0x1F)
+    raw[2] = pid & 0xFF
+    raw[3] = 0x10
+    raw[4 : 4 + len(payload)] = payload
+    return bytes(raw)
+
+
+def _pat_packet(pmt_pid: int) -> bytes:
+    body = bytearray(b"\x00\x01\xc1\x00\x00")
+    body += (1).to_bytes(2, "big")
+    body.append(0xE0 | ((pmt_pid >> 8) & 0x1F))
+    body.append(pmt_pid & 0xFF)
+    body += b"\x00\x00\x00\x00"
+    section = bytes([0x00, 0xB0 | ((len(body) >> 8) & 0x0F), len(body) & 0xFF]) + bytes(body)
+    return _ts_packet(0, bytes([0]) + section)
+
+
+def _psi_packet(pid: int, table_id: int) -> bytes:
+    return _ts_packet(pid, bytes([0, table_id]))
+
+
+def _write_script(tmp_path: Path, source: str) -> str:
+    path = tmp_path / "ffmpeg"
+    path.write_text(source)
+    path.chmod(0o755)
+    return str(path)
+
+
+_CONTINUOUS_FFMPEG = """#!/usr/bin/env python3
+import os
+import sys
+import threading
+import time
+
+packet = bytearray(188)
+packet[0] = 0x47
+packet[1] = 0x41
+packet[2] = 0x00
+packet[3] = 0x10
+packet[4:9] = b"\\x00\\x00\\x00\\x01\\x67"
+
+def drain(handle):
+    try:
+        while handle.read(4096):
+            pass
+    except Exception:
+        return
+
+threading.Thread(target=drain, args=(sys.stdin.buffer,), daemon=True).start()
+for arg in sys.argv[1:]:
+    if arg.startswith("pipe:"):
+        number = int(arg.split(":", 1)[1])
+        if number not in (0, 1):
+            threading.Thread(target=drain, args=(os.fdopen(number, "rb"),), daemon=True).start()
+while True:
+    sys.stdout.buffer.write(bytes(packet))
+    sys.stdout.buffer.flush()
+    time.sleep(0.05)
+"""
+
+
+def test_sync_buffer_prepends_pat_pmt_and_sdt():
+    pat = _pat_packet(0x100)
+    pmt = _psi_packet(0x100, 0x02)
+    sdt = _psi_packet(0x11, 0x42)
+    filler = _ts_packet(0x101, b"\x00\x00\x00\x01\x09")
+    sps = _ts_packet(0x101, b"\x00\x00\x00\x01\x67")
+    buf = TsSyncBuffer()
+    buf.append(pat + pmt + sdt + filler * 40 + sps + filler)
+    snap = buf.snapshot()
+    assert snap[:188] == pat
+    assert snap[188:376] == pmt
+    assert snap[376:564] == sdt
+    assert snap[564:752] == sps
+
+
+def test_a_malformed_now_is_dropped_and_the_audio_stays_up():
+    hub = LiveHub(init_timeout=2, idle_timeout=5)
+    cluster = cluster_known(0, b"wave")
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=BADJ") as publisher:
+            head, body = _publish_ready(publisher, cluster)
+            publisher.send_text('{"type":"now"')
+            publisher.send_text('{ "type" : "now" ,')
+            assert hub.get("BADJ") is not None
+            with _Audio(client, "/stream/BADJ") as listener:
+                assert listener.read() == head
+                assert listener.read() == body
+                nxt = cluster_known(1200, b"more")
+                publisher.send_bytes(nxt)
+                assert listener.read() == nxt
+            assert hub.get("BADJ") is not None
+
+
+def test_a_decompression_bomb_is_discarded(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1000)
+    assert _open_jpeg(_jpeg((320, 180))) is None
+    assert _open_jpeg(_jpeg((MAX_EDGE + 1, 180))) is None
+    assert _open_jpeg(_jpeg((1600, 1200))) is None
+
+    def boom(_video_id: str) -> Image.Image:
+        raise Image.DecompressionBombError("boom")
+
+    assert ThumbCache(boom).warm(VIDEO) is None
+
+    root = tmp_path / "thumbs"
+    root.mkdir()
+    monkeypatch.undo()
+    Image.new("RGB", (320, 180), (1, 2, 3)).save(root / f"{VIDEO}.jpg")
+
+    def opening(*_args, **_kwargs):
+        raise Image.DecompressionBombError("boom")
+
+    monkeypatch.setattr(Image, "open", opening)
+    assert fetch_thumb_dir(str(root))(VIDEO) is None
+
+
+def test_one_address_cannot_collect_encoders_during_linger(tmp_path: Path):
+    """The reported bypass: drop S1, drop S2, open S3, then rejoin S1 and S2 inside linger.
+
+    With one encoder per address, S2 and S3 are refused. Rejoining S1 is allowed.
+    A different address can still take a free encoder.
+    """
+
+    hub = _hub(tmp_path, max_video_encoders=3, max_video_per_ip=1, video_linger=5)
+    held = {"x-real-ip": "198.51.100.8"}
+    other = {"x-real-ip": "198.51.100.9"}
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=SAAA", headers={"x-real-ip": "192.0.2.1"}) as first:
+            _publish_ready(first)
+            with _ws(client, "/api/live/publish?id=SAAB", headers={"x-real-ip": "192.0.2.2"}) as second:
+                _publish_ready(second)
+                with _ws(client, "/api/live/publish?id=SAAC", headers={"x-real-ip": "192.0.2.3"}) as third:
+                    _publish_ready(third)
+                    with _Audio(client, "/stream/SAAA", query="thumbnail=1", headers=held) as video:
+                        assert video.read()[:1] == b"\x47"
+                    denied_b = client.get("/stream/SAAB?thumbnail=1", headers=held)
+                    assert denied_b.status_code == 429
+                    denied_c = client.head("/stream/SAAC?thumbnail=1", headers=held)
+                    assert denied_c.status_code == 429
+                    with _Audio(client, "/stream/SAAA", query="thumbnail=1", headers=held) as again:
+                        assert again.status_code == 200
+                        assert again.read()[:1] == b"\x47"
+                    rejoin_b = client.get("/stream/SAAB?thumbnail=1", headers=held)
+                    assert rejoin_b.status_code == 429
+                    with _Audio(client, "/stream/SAAB", query="thumbnail=1", headers=other) as theirs:
+                        assert theirs.status_code == 200
+                        assert theirs.read()[:1] == b"\x47"
+                        joined = client.get("/stream/SAAB?thumbnail=1", headers=held)
+                        assert joined.status_code == 429
+
+
+def test_steady_output_is_not_cut_at_the_stall_window(tmp_path: Path):
+    hub = _hub(tmp_path, ffmpeg=_write_script(tmp_path, _CONTINUOUS_FFMPEG), output_stall=0.5, video_linger=0.2)
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=STED") as publisher:
+            _publish_ready(publisher)
+            with _deadline(3):
+                with _Audio(client, "/stream/STED", query="thumbnail=1") as video:
+                    started = time.monotonic()
+                    while time.monotonic() - started < 1.2:
+                        piece = video.read()
+                        assert piece, "steady encoder was disconnected"
+                    assert hub.get("STED").relay.occupies()
+
+
+def test_a_listener_that_joins_during_linger_keeps_receiving(tmp_path: Path):
+    hub = _hub(tmp_path, ffmpeg=_write_script(tmp_path, _CONTINUOUS_FFMPEG), video_linger=0.35, output_stall=30)
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=LNGR") as publisher:
+            _publish_ready(publisher)
+            with _Audio(client, "/stream/LNGR", query="thumbnail=1") as first:
+                assert first.read()[:1] == b"\x47"
+            with _deadline(2):
+                with _Audio(client, "/stream/LNGR", query="thumbnail=1") as second:
+                    assert second.read()[:1] == b"\x47"
+                    time.sleep(0.5)
+                    assert second.read()
+                    assert hub.get("LNGR").relay.occupies()
+
+
+def test_a_crashed_encoder_answers_503_until_backoff_ends(tmp_path: Path):
+    script = _write_script(
+        tmp_path,
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "packet = bytearray(188)\n"
+        "packet[0] = 0x47\n"
+        "packet[1] = 0x41\n"
+        "packet[3] = 0x10\n"
+        "packet[4:9] = b'\\x00\\x00\\x00\\x01\\x67'\n"
+        "sys.stdout.buffer.write(bytes(packet) * 4)\n"
+        "sys.stdout.buffer.flush()\n"
+        "import os\n"
+        "os._exit(0)\n",
+    )
+    hub = _hub(tmp_path, ffmpeg=script, restart_backoff=2, output_stall=30, video_linger=2)
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=BACK") as publisher:
+            _publish_ready(publisher)
+            with _Audio(client, "/stream/BACK", query="thumbnail=1") as video:
+                assert video.read()[:1] == b"\x47"
+                assert video.read() is None
+            head = client.head("/stream/BACK?thumbnail=1")
+            body = client.get("/stream/BACK?thumbnail=1")
+    assert head.status_code == 503
+    assert body.status_code == 503
+    assert body.content == b""
+    assert int(head.headers["retry-after"]) >= 1
+    assert int(body.headers["retry-after"]) >= 1
+
+
+def test_audio_handed_to_ffmpeg_has_a_rebased_cluster(tmp_path: Path):
+    dump = tmp_path / "audio.bin"
+    script = _write_script(
+        tmp_path,
+        "#!/usr/bin/env python3\n"
+        "import os, select, sys, threading, time\n"
+        f"out = open({str(dump)!r}, 'wb')\n"
+        "packet = bytearray(188)\n"
+        "packet[0] = 0x47\n"
+        "packet[1] = 0x41\n"
+        "packet[3] = 0x10\n"
+        "packet[4:9] = b'\\x00\\x00\\x00\\x01\\x67'\n"
+        "sys.stdout.buffer.write(bytes(packet) * 4)\n"
+        "sys.stdout.buffer.flush()\n"
+        "def drain(handle):\n"
+        "    try:\n"
+        "        while handle.read(4096):\n"
+        "            pass\n"
+        "    except Exception:\n"
+        "        return\n"
+        "threading.Thread(target=drain, args=(sys.stdin.buffer,), daemon=True).start()\n"
+        "number = None\n"
+        "for arg in sys.argv[1:]:\n"
+        "    if arg.startswith('pipe:'):\n"
+        "        fd = int(arg.split(':', 1)[1])\n"
+        "        if fd not in (0, 1):\n"
+        "            number = fd\n"
+        "if number is not None:\n"
+        "    ready, _, _ = select.select([number], [], [], 1.5)\n"
+        "    if ready:\n"
+        "        out.write(os.read(number, 65536))\n"
+        "        out.flush()\n"
+        "time.sleep(30)\n",
+    )
+    hub = _hub(tmp_path, ffmpeg=script, video_linger=2)
+    cluster = cluster_known(5000, b"wave")
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=REBA") as publisher:
+            _publish_ready(publisher, cluster)
+            with _Audio(client, "/stream/REBA", query="thumbnail=1") as video:
+                assert video.read()[:1] == b"\x47"
+                deadline = time.monotonic() + 2
+                blob = b""
+                while time.monotonic() < deadline:
+                    if dump.exists():
+                        blob = dump.read_bytes()
+                        if b"\x1f\x43\xb6\x75" in blob:
+                            break
+                    time.sleep(0.05)
+                else:
+                    raise AssertionError("audio was not written")
+    marker = blob.find(b"\x1f\x43\xb6\x75")
+    assert cluster_timecode(blob[marker:]) == 0
+
+
+def test_a_late_clock_writes_the_duplicate_count():
+    relay = FfmpegRelay("COPY", lambda: (), ThumbCache(lambda _video: None), width=16, height=16, fps=5)
+    relay.composer = Composer((16, 16))
+
+    class _Stdin:
+        def __init__(self) -> None:
+            self.writes = 0
+
+        def write(self, _data: bytes) -> None:
+            self.writes += 1
+
+    class _Proc:
+        def __init__(self) -> None:
+            self.stdin = _Stdin()
+
+    relay._proc = _Proc()
+    calls = {"n": 0}
+
+    def clock() -> float:
+        calls["n"] += 1
+        if calls["n"] >= 3:
+            relay._stop.set()
+        return 0.0 if calls["n"] == 1 else 1.0
+
+    relay._clock = clock
+    relay._frame_loop()
+    assert relay._proc.stdin.writes == 6
+
+
+def test_a_scheduling_gap_is_not_counted_as_silence():
+    relay = FfmpegRelay("PAUS", lambda: (), ThumbCache(lambda _video: None), output_stall=0.5)
+    relay._started = True
+    relay._last_output = 0.0
+
+    class _Proc:
+        def poll(self):
+            return None
+
+    relay._proc = _Proc()
+    calls = {"n": 0}
+    sequence = (0.0, 5.0, 5.2, 5.4, 5.6, 5.8)
+    failed: list[int] = []
+
+    def clock() -> float:
+        index = calls["n"]
+        calls["n"] += 1
+        if index >= len(sequence):
+            relay._stop.set()
+            return sequence[-1]
+        return sequence[index]
+
+    def fail() -> None:
+        failed.append(calls["n"])
+        relay._started = False
+        relay._stop.set()
+
+    relay._clock = clock
+    relay._fail = fail
+    relay._watch_loop()
+    assert failed == [5]
+
+
+def test_open_video_does_not_start_after_the_generation_moves(tmp_path: Path):
+    calls = {"n": 0}
+
+    def counting_popen(*args, **kwargs):
+        calls["n"] += 1
+        return subprocess.Popen(*args, **kwargs)
+
+    hub = _hub(tmp_path, popen=counting_popen, video_linger=5)
+    with TestClient(create_app(live=hub)) as client:
+        with _ws(client, "/api/live/publish?id=GENV") as publisher:
+            _publish_ready(publisher)
+            portal = client.portal
+            assert portal is not None
+            status, listener, stream, opener = portal.call(hub.prepare_video, "GENV", "203.0.113.50")
+            assert status == 200 and stream is not None and opener is not None and listener is not None
+            stream.generation += 1
+            try:
+                with _deadline(2):
+                    hub.open_video(stream, listener, *opener)
+                assert calls["n"] == 0
+                assert stream.relay is not None
+                assert stream.relay.occupies() is False
+                assert stream.relay._proc is None
+            finally:
+                stream.relay.close()
+
+
+def _heartbeat(client: TestClient) -> dict[str, int]:
+    """A task on the server loop. It only advances while that loop is free."""
+
+    ticks = {"n": 0}
+
+    async def beat() -> None:
+        while True:
+            ticks["n"] += 1
+            await asyncio.sleep(0.02)
+
+    portal = client.portal
+    assert portal is not None
+
+    def start() -> None:
+        asyncio.get_running_loop().create_task(beat())
+
+    portal.call(start)
+    time.sleep(0.05)
+    return ticks
+
+
+def _loop_was_free(ticks: dict[str, int], pause: float = 0.25) -> bool:
+    before = ticks["n"]
+    time.sleep(pause)
+    return ticks["n"] > before + 2
+
+
+def test_popen_and_close_stay_off_the_event_loop(tmp_path: Path):
+    moved: list[bool] = []
+
+    def slow_popen(*args, **kwargs):
+        moved.append(_loop_was_free(ticks))
+        return subprocess.Popen(*args, **kwargs)
+
+    ticks: dict[str, int] = {}
+    hub = _hub(tmp_path, popen=slow_popen)
+    with TestClient(create_app(live=hub)) as client:
+        ticks = _heartbeat(client)
+        with _ws(client, "/api/live/publish?id=POPN") as publisher:
+            _publish_ready(publisher)
+            with _Audio(client, "/stream/POPN", query="thumbnail=1") as video:
+                assert video.read()[:1] == b"\x47"
+    assert moved == [True]
+
+    moved.clear()
+    hub = _hub(tmp_path, video_linger=5)
+    with TestClient(create_app(live=hub)) as client:
+        ticks = _heartbeat(client)
+        with _ws(client, "/api/live/publish?id=CLOS") as publisher:
+            _publish_ready(publisher)
+            with _Audio(client, "/stream/CLOS", query="thumbnail=1") as video:
+                assert video.read()[:1] == b"\x47"
+                relay = hub.get("CLOS").relay
+                original = relay.close
+
+                def slow_close() -> None:
+                    moved.append(_loop_was_free(ticks))
+                    original()
+
+                relay.close = slow_close
+    assert moved == [True]
+
+    moved.clear()
+    hub = _hub(tmp_path, video_linger=5)
+    cluster = cluster_known(0, b"wave")
+    head, _data = document([cluster])
+    with TestClient(create_app(live=hub)) as client:
+        ticks = _heartbeat(client)
+        with _ws(client, "/api/live/publish?id=DISP") as old:
+            token = _id_token(old.receive_json(), "DISP")
+            old.send_json({"type": "mime", "mime": "audio/webm"})
+            old.send_bytes(head + cluster)
+            with _Audio(client, "/stream/DISP", query="thumbnail=1") as video:
+                assert video.read()[:1] == b"\x47"
+                relay = hub.get("DISP").relay
+                original = relay.close
+
+                def slow_close() -> None:
+                    moved.append(_loop_was_free(ticks))
+                    original()
+
+                relay.close = slow_close
+                started = time.monotonic()
+                with _ws(client, _with_token("DISP", token), seq=2) as new:
+                    assert new.receive_json()["type"] == "id"
+                assert time.monotonic() - started < 0.15
+                deadline = time.monotonic() + 2
+                while not moved and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                assert moved == [True]
+                with pytest.raises(WebSocketDisconnect) as replaced:
+                    old.receive_json()
+                assert replaced.value.code == CODE_REPLACED

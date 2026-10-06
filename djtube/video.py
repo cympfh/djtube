@@ -59,6 +59,15 @@ VIDEO_AUDIO_RATE = "48000"
 _SYNC_PACKETS = 800
 _READ = 188 * 32
 _SPS = 7
+_PAT_PID = 0
+_SDT_PID = 0x11
+_PAT_TABLE = 0x00
+_PMT_TABLE = 0x02
+_SDT_TABLE = 0x42
+# A watchdog gap longer than this is the server process being paused, not a
+# muxer that stopped writing. Those gaps are not charged as silence.
+_WATCH_PERIOD = 0.2
+_WATCH_GAP = 1.0
 
 
 def ffmpeg_command(ffmpeg: str, width: int, height: int, fps: int, audio_fd: int) -> list[str]:
@@ -134,6 +143,10 @@ def ffmpeg_command(ffmpeg: str, width: int, height: int, fps: int, audio_fd: int
         "0",
         "-muxpreload",
         "0",
+        # Some hardware players dislike a stream whose PTS and PCR start at 0.
+        # The offset is small so it does not add a second of startup delay.
+        "-output_ts_offset",
+        "0.1",
         "-f",
         "mpegts",
         "-mpegts_flags",
@@ -177,14 +190,64 @@ def packet_pid_and_nals(packet: bytes) -> tuple[int, list[int]]:
     return pid, _nal_types(packet[offset:])
 
 
+def _table_id(packet: bytes) -> int | None:
+    """table_id of a payload-unit-start PSI packet, or None."""
+
+    if len(packet) < 188 or packet[0] != 0x47 or (packet[1] & 0x40) == 0:
+        return None
+    adapt = (packet[3] & 0x30) >> 4
+    offset = 4
+    if adapt in (2, 3):
+        offset = 5 + packet[4]
+    if adapt == 2 or offset >= 188:
+        return None
+    start = offset + 1 + packet[offset]
+    if start >= 188:
+        return None
+    return packet[start]
+
+
+def _pmt_pid(packet: bytes) -> int | None:
+    """Program-map PID from a PAT packet. None when the section is too short."""
+
+    if _table_id(packet) != _PAT_TABLE:
+        return None
+    adapt = (packet[3] & 0x30) >> 4
+    offset = 4
+    if adapt in (2, 3):
+        offset = 5 + packet[4]
+    start = offset + 1 + packet[offset]
+    section = packet[start:]
+    if len(section) < 12:
+        return None
+    section_length = ((section[1] & 0x0F) << 8) | section[2]
+    end = min(len(section), 3 + section_length - 4)
+    pos = 8
+    while pos + 4 <= end:
+        program = (section[pos] << 8) | section[pos + 1]
+        pid = ((section[pos + 2] & 0x1F) << 8) | section[pos + 3]
+        if program != 0 and pid != 0:
+            return pid
+        pos += 4
+    return None
+
+
 class TsSyncBuffer:
-    """Bytes since the last video SPS, so a late listener can decode immediately."""
+    """Bytes since the last video SPS, so a late listener can decode immediately.
+
+    The latest PAT, PMT, and SDT are kept even when they sit before that SPS,
+    and prepended. A player that starts at a keyframe still needs the tables.
+    """
 
     def __init__(self, limit: int = _SYNC_PACKETS) -> None:
         self.limit = limit
         self.packets: list[bytes] = []
         self.sync = 0
         self.video_pid: int | None = None
+        self.pat: bytes | None = None
+        self.pmt: bytes | None = None
+        self.sdt: bytes | None = None
+        self.pmt_pid: int | None = None
         self._partial = b""
 
     def append(self, data: bytes) -> None:
@@ -205,13 +268,35 @@ class TsSyncBuffer:
     def snapshot(self) -> bytes:
         if not self.packets:
             return b""
-        return b"".join(self.packets[self.sync :])
+        body = b"".join(self.packets[self.sync :])
+        prefix = b"".join(packet for packet in (self.pat, self.pmt, self.sdt) if packet)
+        if not prefix:
+            return body
+        return prefix + body
 
     def _push(self, packet: bytes) -> None:
         self.packets.append(packet)
+        self._remember(packet)
         if self._is_sync(packet):
             self.sync = len(self.packets) - 1
         self._trim()
+
+    def _remember(self, packet: bytes) -> None:
+        pid = ((packet[1] & 0x1F) << 8) | packet[2]
+        table = _table_id(packet)
+        if table is None:
+            return
+        if pid == _PAT_PID and table == _PAT_TABLE:
+            self.pat = packet
+            pmt_pid = _pmt_pid(packet)
+            if pmt_pid is not None:
+                self.pmt_pid = pmt_pid
+            return
+        if self.pmt_pid is not None and pid == self.pmt_pid and table == _PMT_TABLE:
+            self.pmt = packet
+            return
+        if pid == _SDT_PID and table == _SDT_TABLE:
+            self.sdt = packet
 
     def _is_sync(self, packet: bytes) -> bool:
         pid, types = packet_pid_and_nals(packet)
@@ -289,8 +374,12 @@ class FfmpegRelay:
         self._proc: subprocess.Popen | None = None
         self._audio_w = None
         self._audio_q: queue.Queue[bytes | None] = queue.Queue(maxsize=max(1, audio_queue_max))
-        self._last_output = time.monotonic()
+        self._clock = time.monotonic
+        self._last_output = self._clock()
+        self._last_frame = self._last_output
         self._backoff_until = 0.0
+        self._holder = ""
+        self._rgb = bytearray()
         self._init: bytes | None = None
         self._primed_ids: set[int] = set()
         self._base: int | None = None
@@ -303,6 +392,34 @@ class FfmpegRelay:
     def occupies(self) -> bool:
         with self._lock:
             return self._started
+
+    def claim(self, address: str) -> None:
+        """Remember who started this encoder. Counted until the process is gone."""
+
+        if not address:
+            return
+        with self._lock:
+            if not self._holder:
+                self._holder = address
+
+    def holder(self) -> str:
+        with self._lock:
+            return self._holder
+
+    def release_holder(self) -> None:
+        with self._lock:
+            self._holder = ""
+
+    def retry_after(self) -> float | None:
+        """Seconds until a crashed encoder may start again. None when it may start now."""
+
+        with self._lock:
+            if self._started:
+                return None
+            remaining = self._backoff_until - time.monotonic()
+        if remaining <= 0:
+            return None
+        return remaining
 
     def listener_count(self, address: str | None = None) -> int:
         with self._lock:
@@ -439,6 +556,7 @@ class FfmpegRelay:
         audio_w = self._audio_w
         self._proc = None
         self._audio_w = None
+        self._holder = ""
         timer = self._timer
         self._timer = None
         threads = list(self._threads)
@@ -563,15 +681,33 @@ class FfmpegRelay:
         self._fail()
 
     def _watch_loop(self) -> None:
-        while not self._stop.wait(0.2):
+        # Quiet time is the sum of ordinary ticks with no new output. A gap
+        # longer than a second means this process was paused (the wait itself
+        # did not return), so that gap is not silence from the muxer.
+        quiet = 0.0
+        previous_output: float | None = None
+        previous_tick: float | None = None
+        while not self._stop.wait(_WATCH_PERIOD):
+            now = self._clock()
             with self._lock:
                 proc = self._proc
                 started = self._started
-                quiet_for = time.monotonic() - self._last_output
+                last_output = self._last_output
             if not started or proc is None:
                 return
-            dead = proc.poll() is not None
-            if dead or quiet_for > self.output_stall:
+            if proc.poll() is not None:
+                self._fail()
+                return
+            if previous_tick is not None:
+                elapsed = now - previous_tick
+                if elapsed <= _WATCH_GAP:
+                    if previous_output == last_output:
+                        quiet += elapsed
+                    else:
+                        quiet = 0.0
+            previous_tick = now
+            previous_output = last_output
+            if quiet > self.output_stall:
                 self._fail()
                 return
 
@@ -609,20 +745,26 @@ class FfmpegRelay:
         if proc is None or proc.stdin is None:
             return
         interval = 1.0 / self.fps
-        next_at = time.monotonic()
+        next_at = self._clock()
         # At most two seconds of duplicates per wake, then look at the picture again.
         max_burst = max(1, self.fps * 2)
         while not self._stop.is_set():
             frame = self._frame()
-            copies, next_at = pace_frames(next_at, time.monotonic(), interval, max_burst)
+            copies, next_at = pace_frames(next_at, self._clock(), interval, max_burst)
             try:
-                for _copy in range(copies):
-                    proc.stdin.write(frame)
+                self._write_copies(proc.stdin, frame, copies)
             except (BrokenPipeError, OSError, ValueError):
                 return
-            delay = next_at - time.monotonic()
+            delay = next_at - self._clock()
             if delay > 0 and self._stop.wait(delay):
                 return
+
+    def _write_copies(self, stdin, frame: bytes, copies: int) -> None:
+        """Write `copies` of one picture. A late clock asks for more than one."""
+
+        for _copy in range(copies):
+            stdin.write(frame)
+        self._last_frame = self._clock()
 
     def _frame(self) -> bytes:
         decks = self._decks()
@@ -635,7 +777,11 @@ class FfmpegRelay:
         frame = self.composer.frame(decks, images)
         if frame.size != (self.width, self.height):
             frame = frame.resize((self.width, self.height))
-        return frame.tobytes()
+        raw = frame.tobytes()
+        if len(self._rgb) != len(raw):
+            self._rgb = bytearray(len(raw))
+        self._rgb[:] = raw
+        return self._rgb
 
     def _stderr_loop(self) -> None:
         proc = self._proc
