@@ -28,7 +28,7 @@
             <path fill="currentColor" fill-rule="evenodd" d="M12 4.15a7.85 7.85 0 1 0 6.5 3.4 1.65 1.65 0 0 1-2.28-1.02 1.65 1.65 0 0 1-1.16-2.18A7.8 7.8 0 0 0 12 4.15zM7.65 11.55a1.15 1.15 0 1 0 2.3 0 1.15 1.15 0 0 0-2.3 0zm4.55 2.45a1.15 1.15 0 1 0 2.3 0 1.15 1.15 0 0 0-2.3 0zM8.55 15.7a.8.8 0 1 0 1.6 0 .8.8 0 0 0-1.6 0z" />
           </svg>
         </button>
-        <button type="button" id="midi-button" class="midi-button" data-midi="off" aria-label="MIDI">
+        <button type="button" id="midi-button" class="midi-button" data-midi="off" title="MIDI未接続" aria-label="MIDI を開く">
           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <circle cx="8.15" cy="9.7" r="1.55" fill="currentColor" />
             <circle cx="12" cy="7.15" r="1.55" fill="currentColor" />
@@ -37,7 +37,7 @@
             <circle cx="14.45" cy="14.25" r="1.55" fill="currentColor" />
           </svg>
         </button>
-        <p class="midi-status" id="midi-status" role="status">MIDI未接続</p>
+        <p class="sr-only" id="midi-live" role="status"></p>
       </header>
 
       <main class="stage">

@@ -1,10 +1,9 @@
 import { SOURCE_UNAVAILABLE, createActions, freshState, sourcePlaybackBlocked } from "./actions.js";
 import {
+  applyMidiStatus,
   connectController,
-  controllerStatusText,
   extinguishFlx4Leds,
   flx4LedPort,
-  midiButtonState,
   paintFlx4Leds,
   resumeFlx4Leds,
 } from "./controller.js";
@@ -954,26 +953,14 @@ window.addEventListener(
   true,
 );
 
-function showMidiStatus(status) {
-  const node = document.getElementById("midi-status");
-  const text = controllerStatusText(status);
-  if (node.textContent !== text) node.textContent = text;
-  node.classList.toggle("is-connected", !!(status?.connected || (status?.state === "open" && status.names?.length)));
-}
-
 const midiButton = document.getElementById("midi-button");
-
-function paintMidiButton(status) {
-  midiButton.dataset.midi = midiButtonState(status);
-}
+const midiLive = document.getElementById("midi-live");
 
 midiButton.addEventListener("click", () => {
   const opening = { state: "opening", names: [], connected: false };
-  showMidiStatus(opening);
-  paintMidiButton(opening);
+  applyMidiStatus(midiButton, midiLive, opening);
   connectController(actions, (status) => {
-    paintMidiButton(status);
-    showMidiStatus(status);
+    applyMidiStatus(midiButton, midiLive, status);
   });
 });
 
