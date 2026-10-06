@@ -4,8 +4,11 @@ import test from "node:test";
 
 import {
   LIVE_BITRATE,
+  LIVE_BUFFER_LIMIT,
   LIVE_BUTTON_LABEL,
+  LIVE_COPY_FAILED,
   LIVE_DROPPED,
+  LIVE_SEND_BACKLOG,
   LIVE_IDLE,
   LIVE_MIME,
   LIVE_STARTING,
@@ -135,7 +138,21 @@ function openBus(state = "running") {
       return Promise.resolve();
     },
     createMediaStreamDestination() {
-      const dest = { stream: { id: "mix" } };
+      const track = {
+        live: true,
+        stop() {
+          this.live = false;
+        },
+      };
+      const dest = {
+        stream: {
+          id: "mix",
+          getTracks() {
+            return [track];
+          },
+        },
+        track,
+      };
       this.destinations.push(dest);
       return dest;
     },
@@ -159,7 +176,7 @@ function setup(extra = {}) {
     supported: extra.supported !== false,
     connectSocket(url) {
       extra.onSocket?.();
-      const socket = fakeSocket(url);
+      const socket = extra.makeSocket ? extra.makeSocket(url) : fakeSocket(url);
       sockets.push(socket);
       return socket;
     },
@@ -206,7 +223,7 @@ test("listener and publish URLs use the public prefix", () => {
   assert.equal(livePublishUrl("/djtube", "https://s.cympfh.cc"), "wss://s.cympfh.cc/djtube/api/live/publish");
   assert.equal(livePublishUrl("/djtube", "http://127.0.0.1:8098"), "ws://127.0.0.1:8098/djtube/api/live/publish");
   assert.equal(mimeMessage(), JSON.stringify({ type: "mime", mime: LIVE_MIME }));
-  assert.equal(closeReason(4408), "応答が止まったため、配信を止めました");
+  assert.equal(closeReason(4408), "音声が届かなくなったため、配信を止めました");
   assert.equal(closeReason(4409), "その ID は使われています");
   assert.equal(closeReason(4429), "配信の上限に達しました");
   assert.equal(closeReason(1003), "配信の形式が受け付けられませんでした");
@@ -283,6 +300,14 @@ test("applyLiveStatus writes a result once and leaves the button name", () => {
 
   ui.button.writes.length = 0;
   applyLiveStatus(ui.button, ui.live, { state: "live", url, note: "" });
+  assert.deepEqual(ui.button.writes, []);
+
+  applyLiveStatus(ui.button, ui.live, { state: "live", url, copyFailed: true });
+  assert.equal(ui.painted().title, `配信中：${url}`);
+  assert.equal(ui.painted().live, `配信中：${url}。${LIVE_COPY_FAILED}`);
+  assert.deepEqual(ui.button.writes, ["status"]);
+  ui.button.writes.length = 0;
+  applyLiveStatus(ui.button, ui.live, { state: "live", url, copyFailed: true });
   assert.deepEqual(ui.button.writes, []);
 
   applyLiveStatus(ui.button, ui.live, { state: "error", reason: "配信の上限に達しました" });
@@ -365,6 +390,15 @@ test("the click arms the clipboard and the id fills it in", async () => {
     await armed.provide("https://s.cympfh.cc/djtube/stream/ABCD");
     const blob = await writes[0][0].items["text/plain"];
     assert.equal(await blob.text(), "https://s.cympfh.cc/djtube/stream/ABCD");
+
+    const denied = armClipboard({
+      clipboard: {
+        write() {
+          return Promise.reject(new Error("denied"));
+        },
+      },
+    });
+    await assert.rejects(() => denied.provide("https://s.cympfh.cc/djtube/stream/NOPE"), /clipboard/);
   } finally {
     if (previousItem === undefined) delete globalThis.ClipboardItem;
     else globalThis.ClipboardItem = previousItem;
@@ -421,9 +455,51 @@ test("a failed copy still starts, and the URL stays on the hover", async () => {
     },
   });
   await goLive(harness, "WXYZ");
+  const url = "https://s.cympfh.cc/djtube/stream/WXYZ";
   assert.equal(harness.ui.painted().face, "on");
-  assert.equal(harness.ui.painted().title, "配信中：https://s.cympfh.cc/djtube/stream/WXYZ");
+  assert.equal(harness.ui.painted().title, `配信中：${url}`);
+  assert.equal(harness.ui.painted().live, `配信中：${url}。${LIVE_COPY_FAILED}`);
   assert.equal(harness.sockets[0].sent[0], mimeMessage());
+});
+
+test("a rejected clipboard reservation falls back, and a failed fallback stays on the air", async () => {
+  const saved = setup({
+    armCopy() {
+      return {
+        provide() {
+          return Promise.reject(new Error("denied"));
+        },
+        cancel() {},
+      };
+    },
+  });
+  await goLive(saved, "COPY");
+  const savedUrl = "https://s.cympfh.cc/djtube/stream/COPY";
+  assert.deepEqual(saved.copies, [savedUrl]);
+  assert.equal(saved.ui.painted().face, "on");
+  assert.equal(saved.ui.painted().title, `配信中：${savedUrl}`);
+  assert.equal(saved.ui.painted().live, `配信中：${savedUrl}`);
+
+  const failed = setup({
+    armCopy() {
+      return {
+        provide() {
+          return Promise.reject(new Error("denied"));
+        },
+        cancel() {},
+      };
+    },
+    copyText: async () => {
+      throw new Error("denied");
+    },
+  });
+  await goLive(failed, "FAIL");
+  const failedUrl = "https://s.cympfh.cc/djtube/stream/FAIL";
+  assert.equal(failed.ui.painted().face, "on");
+  assert.equal(failed.ui.painted().title, `配信中：${failedUrl}`);
+  assert.equal(failed.ui.painted().live, `配信中：${failedUrl}。${LIVE_COPY_FAILED}`);
+  assert.equal(failed.sockets[0].sent[0], mimeMessage());
+  assert.equal(failed.sockets.length, 1);
 });
 
 test("the second click stops without copying or asking", async () => {
@@ -438,11 +514,49 @@ test("the second click stops without copying or asking", async () => {
   assert.equal(harness.ui.painted().face, "off");
   assert.equal(harness.recorders[0].stopped, true);
   assert.equal(harness.sockets[0].closed, 1000);
+  assert.equal(harness.bus.context.destinations[0].track.live, false);
   assert.deepEqual(harness.bus.master.connections, [harness.bus.destination]);
   assert.equal(harness.sockets.length, 1);
   harness.ui.button.writes.length = 0;
   harness.sockets[0].onclose?.({ code: 1000 });
   assert.deepEqual(harness.ui.button.writes, []);
+});
+
+test("stopping before the socket opens closes it and sends nothing after it opens", async () => {
+  const harness = setup({
+    makeSocket(url) {
+      return {
+        url,
+        readyState: 0,
+        sent: [],
+        closed: null,
+        onmessage: null,
+        onclose: null,
+        send(data) {
+          this.sent.push(data);
+        },
+        close(code) {
+          this.closed = code ?? 1000;
+          this.readyState = 2;
+        },
+      };
+    },
+  });
+  harness.ui.button.click();
+  await flush();
+  assert.equal(harness.sockets[0].readyState, 0);
+  assert.equal(harness.sockets[0].closed, null);
+  harness.ui.button.click();
+  await flush();
+  assert.equal(harness.sockets[0].closed, 1000);
+  assert.equal(harness.ui.painted().title, LIVE_IDLE);
+  assert.equal(harness.bus.context.destinations[0].track.live, false);
+  harness.sockets[0].readyState = 1;
+  harness.sockets[0].onmessage?.({ data: JSON.stringify({ type: "id", id: "ABCD" }) });
+  await flush();
+  assert.deepEqual(harness.sockets[0].sent, []);
+  assert.equal(harness.recorders.length, 0);
+  assert.equal(harness.sockets.length, 1);
 });
 
 test("cancelling before the id arrives does not copy or open another socket", async () => {
@@ -517,7 +631,7 @@ test("stopping while the context is resuming does not open a socket", async () =
 test("a server close stops the broadcast, shows the reason, and does not reconnect", async () => {
   const cases = [
     [4429, "配信の上限に達しました"],
-    [4408, "応答が止まったため、配信を止めました"],
+    [4408, "音声が届かなくなったため、配信を止めました"],
     [4409, "その ID は使われています"],
     [1003, "配信の形式が受け付けられませんでした"],
     [1008, "送信の上限に達しました"],
@@ -542,6 +656,28 @@ test("a server close stops the broadcast, shows the reason, and does not reconne
     assert.equal(harness.sockets.length, 1);
     assert.equal(harness.copies.length, 1);
   }
+});
+
+test("a backed-up socket stops the broadcast instead of sending more", async () => {
+  const harness = setup();
+  await goLive(harness);
+  harness.sockets[0].bufferedAmount = LIVE_BUFFER_LIMIT;
+  harness.recorders[0].emit(new Blob([Uint8Array.of(1)]));
+  await flush();
+  assert.equal(harness.sockets[0].sent.length, 2);
+  assert.equal(harness.ui.painted().face, "on");
+
+  harness.sockets[0].bufferedAmount = LIVE_BUFFER_LIMIT + 1;
+  harness.ui.button.writes.length = 0;
+  harness.recorders[0].emit(new Blob([Uint8Array.of(2)]));
+  await flush();
+  assert.equal(harness.sockets[0].sent.length, 2);
+  assert.equal(harness.ui.painted().title, LIVE_SEND_BACKLOG);
+  assert.equal(harness.ui.painted().live, LIVE_SEND_BACKLOG);
+  assert.equal(harness.ui.painted().face, "off");
+  assert.equal(harness.recorders[0].stopped, true);
+  assert.equal(harness.sockets.length, 1);
+  assert.deepEqual(harness.ui.button.writes, ["title", "status", "data-live"]);
 });
 
 test("a deck that missed the master is named on the live hover", async () => {

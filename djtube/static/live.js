@@ -13,9 +13,12 @@ export const LIVE_STARTING = "配信を始めています";
 export const LIVE_UNSUPPORTED = "このブラウザでは配信できません";
 export const LIVE_CONNECT_FAILED = "音声を配信に接続できませんでした";
 export const LIVE_DROPPED = "配信が切れました";
+export const LIVE_COPY_FAILED = "URL をコピーできませんでした";
+export const LIVE_SEND_BACKLOG = "送信が追いつかないため、配信を止めました";
+export const LIVE_BUFFER_LIMIT = 1024 * 1024;
 
 const CLOSE_TEXT = {
-  4408: "応答が止まったため、配信を止めました",
+  4408: "音声が届かなくなったため、配信を止めました",
   4409: "その ID は使われています",
   4429: "配信の上限に達しました",
   1003: "配信の形式が受け付けられませんでした",
@@ -84,12 +87,20 @@ export function liveButtonFace(status) {
   return status?.state === "live" ? "on" : "off";
 }
 
+/** Hover stays the live URL. A failed copy is only added for the screen reader. */
+export function liveAnnounceText(status) {
+  const text = liveStatusText(status);
+  if (status?.state === "live" && status.copyFailed) return `${text}。${LIVE_COPY_FAILED}`;
+  return text;
+}
+
 /** Paint the header button and the hidden result. Skip a write when the value is unchanged. */
 export function applyLiveStatus(button, live, status) {
-  const text = liveStatusText(status);
-  if (button.title !== text) button.title = text;
+  const hover = liveStatusText(status);
+  const announced = liveAnnounceText(status);
+  if (button.title !== hover) button.title = hover;
   if (button.getAttribute("aria-label") !== LIVE_BUTTON_LABEL) button.setAttribute("aria-label", LIVE_BUTTON_LABEL);
-  if (status?.state !== "starting" && live.textContent !== text) live.textContent = text;
+  if (status?.state !== "starting" && live.textContent !== announced) live.textContent = announced;
   const face = liveButtonFace(status);
   if (button.dataset.live !== face) button.dataset.live = face;
 }
@@ -138,15 +149,20 @@ export function armClipboard(nav = globalThis.navigator) {
     rejectText(new Error("clipboard"));
     return null;
   }
-  const settled = Promise.resolve(writing).catch(() => {});
+  const settled = Promise.resolve(writing).then(
+    () => true,
+    () => false,
+  );
   return {
     provide(value) {
       resolveText(String(value));
-      return settled;
+      return settled.then((ok) => {
+        if (!ok) throw new Error("clipboard");
+      });
     },
     cancel() {
       rejectText(new Error("cancel"));
-      return settled;
+      return settled.then(() => {});
     },
   };
 }
@@ -165,24 +181,42 @@ export function createLiveControl(options) {
   const armCopy = options.armCopy;
   let session = null;
 
+  function markCopyFailed(mine) {
+    if (mine.ended || mine.copyFailed) return;
+    mine.copyFailed = true;
+    paint(liveStatus(mine));
+  }
+
+  function fallbackCopy(mine, url) {
+    if (typeof copyText !== "function") {
+      markCopyFailed(mine);
+      return;
+    }
+    try {
+      Promise.resolve(copyText(url)).then(
+        () => {},
+        () => markCopyFailed(mine),
+      );
+    } catch {
+      markCopyFailed(mine);
+    }
+  }
+
   function deliverCopy(mine, url) {
     if (mine.clip) {
       try {
-        Promise.resolve(mine.clip.provide(url)).catch(() => {
-          if (typeof copyText !== "function") return;
-          Promise.resolve(copyText(url)).catch(() => {});
-        });
+        Promise.resolve(mine.clip.provide(url)).then(
+          (ok) => {
+            if (ok === false) fallbackCopy(mine, url);
+          },
+          () => fallbackCopy(mine, url),
+        );
         return;
       } catch {
         /* the late copy is the fallback */
       }
     }
-    if (typeof copyText !== "function") return;
-    try {
-      Promise.resolve(copyText(url)).catch(() => {});
-    } catch {
-      /* the URL stays on the hover */
-    }
+    fallbackCopy(mine, url);
   }
 
   function paint(status) {
@@ -207,7 +241,18 @@ export function createLiveControl(options) {
       /* the tap is already gone */
     }
     try {
-      if (socket && socket.readyState === SOCKET_OPEN) socket.close(1000);
+      if (dest?.stream && typeof dest.stream.getTracks === "function") {
+        dest.stream.getTracks().forEach((track) => track.stop());
+      }
+    } catch {
+      /* the stream is already stopped */
+    }
+    closeSocket(socket);
+  }
+
+  function closeSocket(socket) {
+    try {
+      if (socket && socket.readyState <= SOCKET_OPEN) socket.close(1000);
     } catch {
       /* already closing */
     }
@@ -231,7 +276,12 @@ export function createLiveControl(options) {
   }
 
   function liveStatus(mine) {
-    return { state: "live", url: mine.url, note: masterGapNote(audios) };
+    return {
+      state: "live",
+      url: mine.url,
+      note: masterGapNote(audios),
+      copyFailed: mine.copyFailed === true,
+    };
   }
 
   function begin(mine, id) {
@@ -260,6 +310,10 @@ export function createLiveControl(options) {
       Promise.resolve(blob.arrayBuffer())
         .then((data) => {
           if (mine.ended || mine.socket?.readyState !== SOCKET_OPEN) return;
+          if (mine.socket.bufferedAmount > LIVE_BUFFER_LIMIT) {
+            finish(mine, { state: "error", reason: LIVE_SEND_BACKLOG });
+            return;
+          }
           try {
             mine.socket.send(data);
           } catch {
@@ -349,11 +403,7 @@ export function createLiveControl(options) {
       return;
     }
     if (mine.ended) {
-      try {
-        if (socket && socket.readyState === SOCKET_OPEN) socket.close(1000);
-      } catch {
-        /* already gone */
-      }
+      closeSocket(socket);
       return;
     }
     bindSocket(mine, socket);
