@@ -484,7 +484,9 @@ def test_a_slow_listener_is_dropped_and_a_full_queue_drops_old_clusters():
         assert listener.pending_kinds()[0] == "init"
 
         hub = LiveHub(send_timeout=0.05, max_streams=2)
-        stream, _generation, _token, _replaced, _ended = hub._open("SLOW", None, "203.0.113.8")
+        stream, _generation, _token, _replaced, _ended, _video_ended, _old_relay = hub._open(
+            "SLOW", None, "203.0.113.8"
+        )
         waiting = _Listener(limit=4)
         stream.listeners.add(waiting)
         waiting.offer_init(b"i")
@@ -1076,12 +1078,14 @@ def test_reservations_expire_and_idle_holds_are_capped():
 
 def test_old_cleanup_does_not_drop_the_replacement_and_reclaim_ignores_its_own_slot():
     hub = LiveHub(max_per_ip=2, max_streams=2)
-    first, generation, token, _replaced, _ended = hub._open("AAAA", None, "203.0.113.8", 1)
+    first, generation, token, _replaced, _ended, _video_ended, _old_relay = hub._open("AAAA", None, "203.0.113.8", 1)
     hub._open("AAAB", None, "203.0.113.8")
     with pytest.raises(LiveClose) as full:
         hub._open("AAAC", None, "203.0.113.8")
     assert full.value.code == CODE_FULL
-    reclaimed, new_generation, same, replaced, _ended = hub._open("AAAA", token, "203.0.113.8", 2)
+    reclaimed, new_generation, same, replaced, _ended, _video_ended, _old_relay = hub._open(
+        "AAAA", token, "203.0.113.8", 2
+    )
     assert reclaimed is first
     assert same == token
     assert replaced is None or replaced is first.websocket
