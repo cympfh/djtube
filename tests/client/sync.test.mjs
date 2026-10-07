@@ -841,3 +841,29 @@ test("loading a deck or clearing its BPM leaves sync", async () => {
   assert.equal(env.state.decks.A.syncing, false);
   assert.equal(env.audios.A.playCalls, 0);
 });
+
+test("loading the sync follower releases sync and keeps its rate", async () => {
+  const env = harness();
+  arm(env, "A", { bpm: 128, time: 3, rate: 1 });
+  arm(env, "B", { bpm: 128, time: 3, rate: 1.25 });
+  env.actions.syncBeat("A");
+  assert.equal(env.state.decks.A.syncing, true);
+  const kept = env.state.decks.A.rate;
+  assert.equal(kept, 1.25);
+  assert.equal(env.audios.A.playbackRate, kept);
+  env.state.decks.A.cue = 2;
+  env.state.decks.A.eq.high = 0.2;
+  await env.actions.loadTrack("A", { id: "zzzzzzzzzzz", title: "別" });
+  assert.equal(env.state.decks.A.syncing, false);
+  assert.equal(env.state.decks.B.syncing, false);
+  assert.equal(env.state.decks.A.rate, kept);
+  assert.equal(env.audios.A.playbackRate, kept);
+  assert.equal(env.state.decks.A.bpm, null);
+  assert.equal(env.state.decks.A.beatOffset, null);
+  assert.equal(env.state.decks.A.cue, 0);
+  assert.equal(env.state.decks.A.playing, false);
+  assert.equal(env.audios.A.paused, true);
+  assert.equal(env.audios.A.playCalls, 0);
+  assert.equal(env.state.decks.B.rate, 1.25);
+  assert.equal(env.state.decks.A.eq.high, 0.2);
+});

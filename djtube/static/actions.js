@@ -493,12 +493,9 @@ export function createActions(deps) {
     deckState.discHeld = false;
     deckState.discWasPlaying = false;
     deckState.jogCommand = null;
-    deckState.rate = 1;
     finishJogHear(deck, "drop");
     audio.cancelPendingSeek?.();
     audio.pause();
-    audio.playbackRate = 1;
-    resetEq(deck);
     const loaded = audio.loadVideo(track.id);
     if (deckState.gen !== gen) return;
     deckState.status = loaded === false ? "preparing" : "ready";
