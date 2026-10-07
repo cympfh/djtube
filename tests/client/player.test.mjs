@@ -1955,15 +1955,16 @@ test("loading a track keeps that deck's tempo and EQ", async () => {
   actions.setEq("B", "high", 0.2);
   actions.setEq("B", "mid", 0.4);
   actions.setEq("B", "low", 0.6);
-  state.selected = 0;
+  state.selected = 1;
   state.library = "search";
   audios.A.eqCalls.length = 0;
   audios.B.eqCalls.length = 0;
   const mapBefore = { ...FLX4_MAP };
   const note = messageFromMidi(new Uint8Array([0x96, 0x46, 0x7f]));
   assert.equal(FLX4_MAP["note:6:70"].action, "loadOpenSelection");
-  assert.equal(dispatchControllerEvent(note, actions), true);
   assert.equal(state.decks.A.id, "abcdefghijk");
+  assert.equal(dispatchControllerEvent(note, actions), true);
+  assert.equal(state.decks.A.id, "zzzzzzzzzzz");
   assert.equal(state.decks.A.rate, 2);
   assert.equal(audios.A.playbackRate, 2);
   assert.equal(state.decks.A.volume, 0.3);
@@ -2111,6 +2112,176 @@ test("loading a track keeps that deck's tempo and EQ", async () => {
   assert.equal(other.playbackRate, 0.5);
   assert.deepEqual(other.eqCalls, []);
   assert.equal(other.eqDb.high, eqGainDb(0.1));
+});
+
+test("loadVideo keeps the EQ nodes and _eqDb set before the load", () => {
+  function node() {
+    return {
+      type: "",
+      frequency: { value: 0 },
+      Q: { value: 0 },
+      gain: { value: 0 },
+      connect() {},
+    };
+  }
+  const context = {
+    state: "running",
+    destination: {},
+    resume() {},
+    createMediaElementSource() {
+      return node();
+    },
+    createGain() {
+      return node();
+    },
+    createBiquadFilter() {
+      return node();
+    },
+  };
+  const player = createDeckPlayer("A", "player-A", {
+    context,
+    master: node(),
+    failed: false,
+  });
+  player.audio = {
+    volume: 1,
+    muted: false,
+    src: "",
+    playbackRate: 1,
+    load() {},
+    pause() {},
+  };
+  assert.equal(player.setEqGain("high", 6), true);
+  assert.equal(player.setEqGain("mid", -12), true);
+  assert.equal(player.setEqGain("low", 3), true);
+  const nodes = player._filters;
+  const stored = { ...player._eqDb };
+  assert.equal(nodes.high.gain.value, 6);
+  assert.equal(nodes.mid.gain.value, -12);
+  assert.equal(nodes.low.gain.value, 3);
+  player.loadVideo("zzzzzzzzzzz");
+  assert.equal(player.videoId, "zzzzzzzzzzz");
+  assert.equal(player._filters, nodes);
+  assert.equal(player._filters.high, nodes.high);
+  assert.equal(player._filters.mid, nodes.mid);
+  assert.equal(player._filters.low, nodes.low);
+  assert.equal(nodes.high.gain.value, 6);
+  assert.equal(nodes.mid.gain.value, -12);
+  assert.equal(nodes.low.gain.value, 3);
+  assert.deepEqual(player._eqDb, stored);
+});
+
+test("loading a track drops the held disc and the jog command", async () => {
+  const { state, audios, actions } = harness();
+  await actions.loadTrack("A", { id: "abcdefghijk", title: "曲" });
+  assert.equal(state.decks.A.id, "abcdefghijk");
+  audios.A.paused = false;
+  state.decks.A.status = "ready";
+  actions.pressDisc("A", true);
+  assert.equal(state.decks.A.discHeld, true);
+  assert.equal(state.decks.A.discWasPlaying, true);
+  state.decks.A.jogCommand = { at: 8, from: 4 };
+  await actions.loadTrack("A", { id: "zzzzzzzzzzz", title: "次" });
+  assert.equal(state.decks.A.id, "zzzzzzzzzzz");
+  assert.equal(state.decks.A.discHeld, false);
+  assert.equal(state.decks.A.discWasPlaying, false);
+  assert.equal(state.decks.A.jogCommand, null);
+});
+
+test("loading while the jog is listening ends that listening and cancels the pending seek", async () => {
+  const timers = [];
+  const cancelled = [];
+  const { state, audios, actions } = harness({
+    deps: {
+      now: () => 1000,
+      later(fn) {
+        timers.push(fn);
+        return timers.length;
+      },
+      cancelLater(id) {
+        cancelled.push(id);
+      },
+    },
+  });
+  const deck = elementPlayer("A");
+  const player = deck.player;
+  audios.A = player;
+  let cancels = 0;
+  const cancelPendingSeek = player.cancelPendingSeek.bind(player);
+  player.cancelPendingSeek = () => {
+    cancels += 1;
+    cancelPendingSeek();
+  };
+  await actions.loadTrack("A", { id: "abcdefghijk", title: "曲" });
+  state.decks.A.status = "ready";
+  actions.jog("A", -0.1);
+  assert.equal(player.jogHear.hear, "scratch");
+  assert.notEqual(player.scratch, null);
+  assert.equal(timers.length, 1);
+  const beforeCancels = cancels;
+  const beforeCancelled = cancelled.length;
+  await actions.loadTrack("A", { id: "zzzzzzzzzzz", title: "次" });
+  assert.equal(state.decks.A.id, "zzzzzzzzzzz");
+  assert.equal(player.jogHear.hear, "deck");
+  assert.equal(player.jogHear.scratch, null);
+  assert.equal(player.scratch, null);
+  assert.equal(cancels, beforeCancels + 2);
+  assert.ok(cancelled.length > beforeCancelled);
+  timers[0]();
+  assert.equal(player.jogHear.hear, "deck");
+  assert.equal(player.scratch, null);
+});
+
+test("loadVideo stops scratch, clears the spin, and parks paused at the start", () => {
+  const player = createDeckPlayer("A", "player-A");
+  let time = 4.5;
+  const element = {
+    duration: 120,
+    paused: false,
+    muted: true,
+    volume: 1,
+    playbackRate: 1,
+    src: "",
+    load() {
+      time = 0;
+    },
+    pause() {
+      this.paused = true;
+    },
+    play() {
+      this.paused = false;
+      return Promise.resolve();
+    },
+  };
+  Object.defineProperty(element, "currentTime", {
+    configurable: true,
+    get() {
+      return time;
+    },
+    set(value) {
+      time = Number(value);
+    },
+  });
+  player.audio = element;
+  player.paused = false;
+  player.currentTime = 4.5;
+  player.setSpinRate(1.25);
+  let stops = 0;
+  player._scratch = {
+    stop() {
+      stops += 1;
+    },
+  };
+  assert.equal(player._spinRate, 1.25);
+  assert.equal(player._time, 4.5);
+  assert.equal(player.loadVideo("zzzzzzzzzzz"), false);
+  assert.equal(stops, 1);
+  assert.equal(player._scratch, null);
+  assert.equal(player._spinRate, null);
+  assert.equal(player._time, 0);
+  assert.equal(player.currentTime, 0);
+  assert.equal(player.paused, true);
+  assert.equal(player.videoId, "zzzzzzzzzzz");
 });
 
 test("eq gain mapping drives the filter and the shared actions", () => {
