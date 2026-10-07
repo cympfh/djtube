@@ -16,7 +16,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 import httpx
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageStat, UnidentifiedImageError
 
 from djtube.ids import is_video_id
 
@@ -46,10 +46,9 @@ NEGATIVE_TTL = 30.0
 FETCH_TIMEOUT = 4.0
 
 _NAMES = ("maxresdefault.jpg", "sddefault.jpg", "hqdefault.jpg")
-# A letterbox bar is flat and near black. The picture under it is not.
-_BAR_LUMA = 18
-_BAR_SPREAD = 12
-_CONTENT_LIFT = 24
+# Mean luma of a letterbox bar, on the grayscale Pillow uses. 6 is black.
+# A dark stage photo sits near 14 and must stay a 4:3 picture.
+_BAR_LUMA = 6
 
 
 def thumb_urls(video_id: str) -> tuple[str, str, str]:
@@ -60,67 +59,46 @@ def thumb_urls(video_id: str) -> tuple[str, str, str]:
     return (f"{base}/{maxres}", f"{base}/{sd}", f"{base}/{hq}")
 
 
-def _strip_luma(image: Image.Image, box: tuple[int, int, int, int]) -> tuple[float, float] | None:
-    """Mean luma and the brightest column, or None when the box is empty."""
+def _is_4_3(width: int, height: int) -> bool:
+    """True within 1%. sddefault and hqdefault are this shape; maxres is not."""
+
+    if width < 1 or height < 1:
+        return False
+    return abs(width * 3 - height * 4) <= width * 3 // 100
+
+
+def _band_luma(image: Image.Image, box: tuple[int, int, int, int]) -> float | None:
+    """Mean grayscale of one strip, or None when the box is empty."""
 
     left, upper, right, lower = box
     if right <= left or lower <= upper:
         return None
-    sample = image.crop(box).resize((16, 4), Image.Resampling.BOX)
-    raw = sample.tobytes()
-    width, height = sample.size
-    bands = len(sample.getbands())
-    columns: list[float] = []
-    values: list[int] = []
-    for x in range(width):
-        total = 0
-        for y in range(height):
-            offset = (y * width + x) * bands
-            red, green, blue = raw[offset], raw[offset + 1], raw[offset + 2]
-            luma = (red * 299 + green * 587 + blue * 114) // 1000
-            values.append(luma)
-            total += luma
-        columns.append(total / height)
-    return sum(values) / len(values), max(columns)
-
-
-def _is_bar(stats: tuple[float, float] | None) -> bool:
-    if stats is None:
-        return False
-    mean, peak = stats
-    return mean <= _BAR_LUMA and peak <= _BAR_LUMA + _BAR_SPREAD
+    gray = image.convert("L").crop(box)
+    return float(ImageStat.Stat(gray).mean[0])
 
 
 def _crop_letterbox(image: Image.Image) -> Image.Image:
-    """Keep the centered 16:9 when sd/hq has symmetric dark bars.
+    """Cut the centered 16:9 out of a 4:3 frame when both bars are near black.
 
-    A 4:3 picture with no bars, and a picture that is dark on only one edge,
-    is returned unchanged. The kept region is the centered 16:9, so 60px and
-    45px are not hardcoded.
+    Only a 16:9 picture inside a 4:3 frame is cropped. maxres, a square, and a
+    16:9 frame that itself has cinematic bars stay whole. The picture between
+    the bars can be dark. A 4:3 photo with no bars, even a dim one, stays whole.
     """
 
     width, height = image.size
-    content_h = (width * 9) // 16
-    if content_h < 2 or content_h >= height:
+    if not _is_4_3(width, height):
         return image
+    content_h = (width * 9) // 16
     bar = (height - content_h) // 2
-    if bar < 8:
+    if content_h < 2 or bar < 8:
         return image
     # Stay off the picture edge. JPEG ringing lightens the last rows of a bar.
     inset = max(2, bar // 5)
-    if inset * 2 >= bar:
-        inset = 1
-    top = _strip_luma(image, (0, inset, width, bar - inset))
-    bottom = _strip_luma(image, (0, height - bar + inset, width, height - inset))
-    if top is None or bottom is None or not _is_bar(top) or not _is_bar(bottom):
+    top = _band_luma(image, (0, 0, width, bar - inset))
+    bottom = _band_luma(image, (0, height - bar + inset, width, height))
+    if top is None or bottom is None or top > _BAR_LUMA or bottom > _BAR_LUMA:
         return image
-    if abs(top[0] - bottom[0]) > _BAR_SPREAD:
-        return image
-    crop_top = (height - content_h) // 2
-    content = _strip_luma(image, (0, crop_top + content_h // 3, width, crop_top + (2 * content_h) // 3))
-    if content is None or content[0] < max(top[0], bottom[0]) + _CONTENT_LIFT:
-        return image
-    return image.crop((0, crop_top, width, crop_top + content_h))
+    return image.crop((0, bar, width, bar + content_h))
 
 
 def _dimensions_ok(width: int, height: int, *, minimum: bool) -> bool:

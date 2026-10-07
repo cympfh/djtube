@@ -45,6 +45,7 @@ from djtube.thumbs import (
 from djtube.video import (
     MAX_VIDEO_ENCODERS,
     MAX_VIDEO_PER_IP,
+    VIDEO_AUDIO_BITRATE,
     VIDEO_BITRATE,
     VIDEO_BUFSIZE,
     VIDEO_MAXRATE,
@@ -241,9 +242,14 @@ def test_composer_keeps_at_most_four_cards():
     assert len(composer._cards) == 4
 
 
-def _letterbox(size: tuple[int, int], band: int, color: tuple[int, int, int]) -> Image.Image:
+def _letterbox(
+    size: tuple[int, int],
+    band: int,
+    color: tuple[int, int, int],
+    bar: tuple[int, int, int] = (0, 0, 0),
+) -> Image.Image:
     width, height = size
-    image = Image.new("RGB", size, (0, 0, 0))
+    image = Image.new("RGB", size, bar)
     image.paste(Image.new("RGB", (width, max(1, height - 2 * band)), color), (0, band))
     return image
 
@@ -355,6 +361,52 @@ def test_letterbox_crop_keeps_centered_sixteen_nine_only():
     assert opened is not None and opened.size == (640, 360)
 
 
+def test_letterbox_crop_is_only_a_dark_4_3_bar():
+    # Dark artwork on a black background. The picture itself is dim; the bars are not.
+    cover = _letterbox((640, 480), 60, (16, 12, 10))
+    cropped = _crop_letterbox(cover)
+    assert cropped.size == (640, 360)
+    assert cropped.getpixel((20, 20)) == (16, 12, 10)
+
+    stage = Image.new("RGB", (640, 480), (14, 14, 14))
+    stage.paste(Image.new("RGB", (200, 120), (40, 36, 30)), (220, 180))
+    assert _crop_letterbox(stage).size == (640, 480)
+
+    noisy = Image.new("RGB", (640, 480), (180, 40, 50))
+    pixels = noisy.load()
+    for y in list(range(60)) + list(range(420, 480)):
+        for x in range(640):
+            level = 0 if (x + y) % 3 else 12
+            pixels[x, y] = (level, level, level)
+    assert _crop_letterbox(noisy).size == (640, 360)
+
+    at_threshold = _letterbox((640, 480), 60, (40, 80, 20), bar=(6, 6, 6))
+    assert _crop_letterbox(at_threshold).size == (640, 360)
+    above = _letterbox((640, 480), 60, (40, 80, 20), bar=(7, 7, 7))
+    assert _crop_letterbox(above).size == (640, 480)
+
+    # The rows next to the picture are bright. The sampled part of the bar is black.
+    ringing = Image.new("RGB", (640, 480), (30, 20, 16))
+    ringing.paste(Image.new("RGB", (640, 48), (0, 0, 0)), (0, 0))
+    ringing.paste(Image.new("RGB", (640, 12), (220, 220, 220)), (0, 48))
+    ringing.paste(Image.new("RGB", (640, 12), (220, 220, 220)), (0, 420))
+    ringing.paste(Image.new("RGB", (640, 48), (0, 0, 0)), (0, 432))
+    assert _crop_letterbox(ringing).size == (640, 360)
+
+    wide = _letterbox((1280, 800), 40, (200, 30, 30))
+    assert _crop_letterbox(wide).size == (1280, 800)
+    square = _letterbox((720, 720), 157, (200, 30, 30))
+    assert _crop_letterbox(square).size == (720, 720)
+
+    scope = Image.new("RGB", (1280, 720), (180, 40, 40))
+    scope.paste(Image.new("RGB", (1280, 80), (0, 0, 0)), (0, 0))
+    scope.paste(Image.new("RGB", (1280, 80), (0, 0, 0)), (0, 640))
+    kept = _crop_letterbox(scope)
+    assert kept.size == (1280, 720)
+    assert kept.getpixel((0, 0)) == (0, 0, 0)
+    assert kept.getpixel((640, 360)) == (180, 40, 40)
+
+
 def test_sixteen_nine_card_stays_padded_on_the_blurred_background():
     source = Image.new("RGB", (1280, 720), (220, 30, 40))
     card = deck_card(source)
@@ -406,7 +458,11 @@ def test_ffmpeg_command_encodes_aac_and_one_x264_thread():
     assert command[command.index("-preset") + 1] == "ultrafast"
     assert command[command.index("-tune") + 1] == "stillimage"
     assert command[command.index("-g") + 1] == str(VIDEO_FPS)
-    assert _SYNC_PACKETS * 188 > (VIDEO_MAXRATE // 8) * 2
+    audio_bits = int(VIDEO_AUDIO_BITRATE[:-1]) * 1000
+    payload = (VIDEO_MAXRATE + VIDEO_BUFSIZE) // 8 + audio_bits // 8
+    # 4 bytes of TS header per 184 payload bytes, plus about 4% for PES.
+    ts_overhead = payload * 4 // 184 + payload // 25
+    assert _SYNC_PACKETS * 188 > payload + ts_overhead
     assert command[command.index("-c:a") + 1] == "aac"
     assert command[command.index("-profile:a") + 1] == "aac_low"
     assert command[command.index("-b:a") + 1] == "128k"

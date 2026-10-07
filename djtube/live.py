@@ -94,7 +94,10 @@ LISTENER_QUEUE = 8
 # once; the extras are dropped and the newest one is applied when a token
 # returns. The publisher is not closed.
 NOW_PER_SECOND = 4
-VIDEO_LISTENER_QUEUE = 32
+# Each item is one muxer read (32 MPEG-TS packets). 32 of those was about
+# 2.7 s at a 400 kbps peak and about 1.4 s at 1 Mbps. 64 puts the headroom
+# back near 2.7 s.
+VIDEO_LISTENER_QUEUE = 64
 # Starts when the ASGI send is awaited. The kernel accepts writes until the
 # socket buffer fills, so a congested listener is not cut until then and keeps
 # that much delay.

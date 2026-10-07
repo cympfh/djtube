@@ -60,8 +60,9 @@ _PRIME_CLUSTERS = 2
 # AAC-LC, 48 kHz, one channel. The video URL is mono because the mix is.
 VIDEO_AUDIO_BITRATE = "128k"
 VIDEO_AUDIO_RATE = "48000"
-# 1600 packets is 301KB. A 1 s GOP at the 1 Mbps ceiling is 125KB,
-# so the buffer still holds the last keyframe after a burst.
+# 1600 packets is 301KB. A 1 s GOP can dump the 1 Mbps cap plus the 500 kbps
+# VBV window (187.5KB) and one second of AAC (16KB). MPEG-TS overhead takes
+# that to about 215KB, so the buffer still holds the last keyframe.
 _SYNC_PACKETS = 1600
 _READ = 188 * 32
 _SPS = 7
