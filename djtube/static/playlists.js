@@ -507,7 +507,13 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
 
   function importPlaylist(explicit) {
     if (state.playlistImporting) {
-      importAbort?.abort();
+      const controller = importAbort;
+      controller?.abort();
+      if (importAbort === controller) {
+        importAbort = null;
+        state.playlistImporting = false;
+        scheduleRender();
+      }
       return;
     }
     const source = (explicit?.url ?? deps.playlistImportUrl?.() ?? "").trim();
@@ -534,7 +540,7 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
     return Promise.resolve()
       .then(() => deps.importPlaylist(body, { signal: controller.signal }))
       .then((result) => {
-        if (controller.signal.aborted) return;
+        if (importAbort !== controller || controller.signal.aborted) return;
         const playlist = result?.playlist;
         if (playlist?.id) {
           const previous = state.playlists.find((item) => item.id === playlist.id);
@@ -549,6 +555,7 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
         deps.setPlaylistImportUrl?.("");
       })
       .catch((err) => {
+        if (importAbort !== controller) return;
         if (controller.signal.aborted || err?.name === "AbortError") {
           state.playlistImportNote = "";
           state.playlistImportError = false;

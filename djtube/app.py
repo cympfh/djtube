@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import logging
 import mimetypes
+import queue
 import threading
 import time
 from collections import deque
@@ -10,7 +13,6 @@ from typing import Any
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
-from starlette.concurrency import run_in_threadpool
 
 from djtube.assets import DOCUMENT_CACHE, VersionedStaticFiles, asset_version, stamp_document
 from djtube.audio import AudioError, audio_needs_cookies, clear_audio_cache, open_audio
@@ -22,7 +24,8 @@ from djtube.paths import INDEX_PATH, PUBLIC_PREFIX, STATIC_DIR
 from djtube.playlists import PlaylistError, PlaylistStore, normalize_name, playlist_path
 from djtube.search import SearchError, search_mode, search_tracks
 from djtube.youtube_playlist import (
-    PLAYLIST_ITEM_LIMIT,
+    FetchControl,
+    ImportCancelled,
     PlaylistLookupError,
     fetch_youtube_playlist,
     parse_playlist_id,
@@ -80,41 +83,121 @@ class MoveTrackBody(BaseModel):
 
 IMPORTS_PER_MINUTE = 6
 IMPORT_WINDOW_SECONDS = 60.0
+IMPORTS_PER_DAY = 100
+IMPORT_DAY_SECONDS = 86400.0
+
+_IMPORT_QUEUE: queue.Queue = queue.Queue()
+_IMPORT_WORKER_LOCK = threading.Lock()
+_IMPORT_WORKER_STARTED = False
 
 
-class ImportGate:
-    """One import at a time, and at most a few starts per minute.
+def _import_worker() -> None:
+    while True:
+        job, future = _IMPORT_QUEUE.get()
+        if not future.set_running_or_notify_cancel():
+            continue
+        try:
+            result = job()
+        except Exception as exc:
+            future.set_exception(exc)
+        else:
+            future.set_result(result)
 
-    The permit is taken before the work is handed to the shared thread pool,
-    so a busy import does not occupy another worker.
-    """
+
+def _submit_import(job):
+    global _IMPORT_WORKER_STARTED
+    with _IMPORT_WORKER_LOCK:
+        if not _IMPORT_WORKER_STARTED:
+            threading.Thread(target=_import_worker, name="djtube-import", daemon=True).start()
+            _IMPORT_WORKER_STARTED = True
+    future = concurrent.futures.Future()
+    _IMPORT_QUEUE.put((job, future))
+    return future
+
+
+class ImportSlot:
+    """One import at a time, on the dedicated worker, with a cancel flag."""
 
     def __init__(self) -> None:
-        self._semaphore = threading.Semaphore(1)
-        self._times: deque[float] = deque()
         self._lock = threading.Lock()
+        self._busy = False
+        self._generation = 0
+        self._minute: deque[float] = deque()
+        self._day: deque[float] = deque()
         self.now = time.monotonic
 
-    def try_acquire(self) -> None:
-        if not self._semaphore.acquire(blocking=False):
-            raise HTTPException(429, "取り込み中です")
-        try:
+    def acquire(self) -> tuple[int, FetchControl]:
+        with self._lock:
+            if self._busy:
+                raise HTTPException(429, "取り込み中です")
             self._charge()
-        except Exception:
-            self._semaphore.release()
-            raise
+            self._busy = True
+            self._generation += 1
+            return self._generation, FetchControl()
 
     def _charge(self) -> None:
         stamp = self.now()
-        with self._lock:
-            while self._times and stamp - self._times[0] >= IMPORT_WINDOW_SECONDS:
-                self._times.popleft()
-            if len(self._times) >= IMPORTS_PER_MINUTE:
-                raise HTTPException(429, "取り込みの回数が多いです")
-            self._times.append(stamp)
+        while self._minute and stamp - self._minute[0] >= IMPORT_WINDOW_SECONDS:
+            self._minute.popleft()
+        while self._day and stamp - self._day[0] >= IMPORT_DAY_SECONDS:
+            self._day.popleft()
+        if len(self._minute) >= IMPORTS_PER_MINUTE:
+            raise HTTPException(429, "取り込みの回数が多いです")
+        if len(self._day) >= IMPORTS_PER_DAY:
+            raise HTTPException(429, "今日の取り込みの上限に達しました")
+        self._minute.append(stamp)
+        self._day.append(stamp)
 
-    def release(self) -> None:
-        self._semaphore.release()
+    def release(self, generation: int) -> None:
+        with self._lock:
+            if generation != self._generation:
+                return
+            self._busy = False
+
+
+def _import_job(store, source, room, known, control, dest_id, dest_name):
+    fetched = fetch_youtube_playlist(source, limit=room, known=known, control=control)
+    if control.cancel.is_set():
+        raise ImportCancelled()
+    return store.import_tracks(
+        fetched.tracks,
+        playlist_id=dest_id or None,
+        name=dest_name if not dest_id else None,
+        unavailable=fetched.unavailable,
+        repeated=fetched.repeated,
+        overflow=fetched.overflow,
+    )
+
+
+async def _run_import(request: Request, control: FetchControl, job):
+    """Run `job` on the import worker. Watch the client between polls.
+
+    The worker is joined before this returns, including when the client
+    disconnects, so the slot stays taken until a killed process is gone.
+    """
+
+    future = _submit_import(job)
+    wrapped = asyncio.wrap_future(future)
+    try:
+        while not wrapped.done():
+            if await request.is_disconnected():
+                control.abort()
+            await asyncio.wait({wrapped}, timeout=0.05)
+        if control.cancel.is_set() or await request.is_disconnected():
+            control.abort()
+            try:
+                await wrapped
+            except Exception:
+                return None
+            return None
+        return wrapped.result()
+    finally:
+        if not future.done():
+            control.abort()
+            try:
+                await asyncio.shield(wrapped)
+            except Exception:
+                pass
 
 
 def _import_destination(payload: dict) -> tuple[str, str]:
@@ -144,11 +227,9 @@ def create_app(
     cookies: CookieStore | None = None,
     live: LiveHub | None = None,
 ) -> FastAPI:
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
     app = FastAPI(title="djtube")
-    gate = ImportGate()
-    app.state.import_gate = gate
+    slot = ImportSlot()
+    app.state.import_slot = slot
     store = playlist_store if playlist_store is not None else PlaylistStore(playlist_path())
     jar = cookies if cookies is not None else CookieStore(cookie_path())
     install_store(jar)
@@ -306,11 +387,14 @@ def create_app(
         if dest_id and dest_name:
             raise HTTPException(400, "追加先を一つ選んでください")
         current = 0
+        known: set[str] = set()
         if dest_id:
             try:
-                current = len(store.get(dest_id)["tracks"])
+                tracks = store.get(dest_id)["tracks"]
             except PlaylistError as exc:
                 raise_playlist(exc)
+            current = len(tracks)
+            known = {item["id"] for item in tracks if isinstance(item.get("id"), str)}
         elif dest_name:
             if not normalize_name(dest_name):
                 raise HTTPException(400, "名前を入れてください")
@@ -323,30 +407,26 @@ def create_app(
         room = store.track_limit - current
         if room < 1:
             raise HTTPException(400, "曲数が多すぎます")
-        gate.try_acquire()
+        generation, control = slot.acquire()
         try:
-            try:
-                fetched = await run_in_threadpool(
-                    fetch_youtube_playlist,
-                    source,
-                    limit=min(PLAYLIST_ITEM_LIMIT, room),
-                )
-            except PlaylistLookupError as exc:
-                raise HTTPException(exc.status, str(exc)) from None
-            try:
-                return await run_in_threadpool(
-                    store.import_tracks,
-                    fetched.tracks,
-                    playlist_id=dest_id or None,
-                    name=dest_name if not dest_id else None,
-                    unavailable=fetched.unavailable,
-                    repeated=fetched.repeated,
-                    overflow=fetched.overflow,
-                )
-            except PlaylistError as exc:
-                raise_playlist(exc)
+            saved = await _run_import(
+                request,
+                control,
+                lambda: _import_job(store, source, room, known, control, dest_id, dest_name),
+            )
+            if saved is None:
+                return Response(status_code=499)
+            return saved
+        except ImportCancelled:
+            return Response(status_code=499)
+        except PlaylistLookupError as exc:
+            if control.cancel.is_set():
+                return Response(status_code=499)
+            raise HTTPException(exc.status, str(exc)) from None
+        except PlaylistError as exc:
+            raise_playlist(exc)
         finally:
-            gate.release()
+            slot.release(generation)
 
     @app.get("/")
     def index() -> HTMLResponse:

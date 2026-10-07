@@ -12,6 +12,7 @@ from djtube.ids import extract_video_id, is_video_id, video_id_from_query, watch
 
 log = logging.getLogger(__name__)
 # Request URLs contain the API key. INFO logs from httpx include that URL.
+# This is the only place those loggers are raised; import uses the same client.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 

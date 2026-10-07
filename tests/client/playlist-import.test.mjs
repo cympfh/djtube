@@ -232,6 +232,86 @@ test("a second import cancels the first and does not mark the playlist busy", as
   assert.equal(ui.state.playlists[0].tracks.length, 1);
 });
 
+test("the import passes the abort signal through to the request", async () => {
+  let signal;
+  const ui = harness({
+    url: "PLaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    destination: PLAYLIST_ID,
+    importPlaylist: (_body, options) => {
+      signal = options && options.signal;
+      return new Promise(() => {});
+    },
+  });
+  ui.state.playlists = [{ id: PLAYLIST_ID, name: "夜", tracks: [track("bbbbbbbbbbb", "先")] }];
+  ui.actions.importPlaylist();
+  await Promise.resolve();
+  assert.ok(signal instanceof AbortSignal);
+});
+
+test("a result that arrives after cancel is not applied", async () => {
+  let resolveImport;
+  const ui = harness({
+    url: "PLaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    destination: PLAYLIST_ID,
+    importPlaylist: () =>
+      new Promise((resolve) => {
+        resolveImport = resolve;
+      }),
+  });
+  ui.state.playlists = [{ id: PLAYLIST_ID, name: "夜", tracks: [track("bbbbbbbbbbb", "先")] }];
+  ui.state.playlistId = PLAYLIST_ID;
+  const pending = ui.actions.importPlaylist();
+  await Promise.resolve();
+  ui.actions.importPlaylist();
+  resolveImport({
+    playlist: {
+      id: PLAYLIST_ID,
+      name: "夜",
+      tracks: [track("bbbbbbbbbbb", "先"), track("ccccccccccc", "後")],
+    },
+    added: 1,
+  });
+  await pending;
+  assert.equal(ui.state.playlists[0].tracks.length, 1);
+  assert.equal(ui.state.playlistImporting, false);
+});
+
+test("an older import does not clear a newer import", async () => {
+  let firstResolve;
+  let secondResolve;
+  let calls = 0;
+  const ui = harness({
+    url: "PLaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    destination: PLAYLIST_ID,
+    importPlaylist: () =>
+      new Promise((resolve) => {
+        calls += 1;
+        if (calls === 1) firstResolve = resolve;
+        else secondResolve = resolve;
+      }),
+  });
+  ui.state.playlists = [{ id: PLAYLIST_ID, name: "夜", tracks: [track("bbbbbbbbbbb", "先")] }];
+  ui.state.playlistId = PLAYLIST_ID;
+  const first = ui.actions.importPlaylist();
+  await Promise.resolve();
+  ui.actions.importPlaylist();
+  const second = ui.actions.importPlaylist();
+  await Promise.resolve();
+  assert.equal(ui.state.playlistImporting, true);
+  assert.equal(calls, 2);
+  firstResolve({ playlist: { id: PLAYLIST_ID, name: "夜", tracks: [] }, added: 0 });
+  await first;
+  assert.equal(ui.state.playlistImporting, true);
+  assert.equal(ui.state.playlists[0].tracks.length, 1);
+  secondResolve({
+    playlist: { id: PLAYLIST_ID, name: "夜", tracks: [track("bbbbbbbbbbb", "先"), track("ccccccccccc", "後")] },
+    added: 1,
+  });
+  await second;
+  assert.equal(ui.state.playlistImporting, false);
+  assert.equal(ui.state.playlists[0].tracks.length, 2);
+});
+
 test("typing in the import fields does not trigger deck or playlist keys", () => {
   const ui = harness();
   let played = false;
