@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from djtube.assets import DOCUMENT_CACHE, VersionedStaticFiles, asset_version, stamp_document
 from djtube.audio import AudioError, audio_needs_cookies, clear_audio_cache, open_audio
 from djtube.cookies import MAX_COOKIE_BYTES, CookieError, CookieStore, cookie_path, install_store
-from djtube.ids import is_video_id
+from djtube.ids import is_video_id, video_id_from_query
 from djtube.live import LiveHub, _publisher_address, live_seen_path, mount_live
 from djtube.thumbs import thumb_cache
 from djtube.paths import INDEX_PATH, PUBLIC_PREFIX, STATIC_DIR
@@ -340,7 +340,11 @@ def create_app(
     ) -> dict[str, object]:
         list_id = parse_playlist_url(q)
         if list_id is not None:
-            return await search_playlist(q, list_id, request)
+            try:
+                return await search_playlist(q, list_id, request)
+            except HTTPException:
+                if video_id_from_query(q) is None:
+                    raise
         try:
             tracks, source = await asyncio.to_thread(search_tracks, q, music=music)
         except SearchError as exc:

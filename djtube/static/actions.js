@@ -242,6 +242,7 @@ export function createActions(deps) {
     if (next === state.musicOnly) return;
     state.musicOnly = next;
     scheduleRender();
+    if (state.searching) return;
     if (state.lastQuery || deps.queryValue().trim()) return submitSearch();
   }
 

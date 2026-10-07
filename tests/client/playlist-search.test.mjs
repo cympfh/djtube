@@ -139,6 +139,42 @@ test("enter during a search keeps the first result", async () => {
   assert.equal(state.searching, false);
 });
 
+test("toggling music during a search keeps the first result", async () => {
+  const rows = [track(VIDEO, "夜")];
+  let release = () => {};
+  const pending = new Promise((resolve) => {
+    release = resolve;
+  });
+  let calls = 0;
+  const state = freshState();
+  const actions = createActions({
+    state,
+    audios: {
+      A: { paused: true, currentTime: 0, duration: 120, volume: 1 },
+      B: { paused: true, currentTime: 0, duration: 120, volume: 1 },
+    },
+    scheduleRender() {},
+    queryValue: () => "city pop",
+    fetchSearch: async () => {
+      calls += 1;
+      if (calls > 1) throw new Error("プレイリストを取得中です");
+      await pending;
+      return { source: "youtube", tracks: rows };
+    },
+  });
+  const first = actions.submitSearch();
+  await Promise.resolve();
+  assert.equal(state.searching, true);
+  actions.setMusicOnly(false);
+  assert.equal(state.musicOnly, false);
+  assert.equal(calls, 1);
+  release();
+  await first;
+  assert.deepEqual(state.results, rows);
+  assert.equal(state.searchError, "");
+  assert.equal(state.searching, false);
+});
+
 test("search rows still offer both decks and playlist add", () => {
   const app = readFileSync(new URL("../../djtube/static/app.js", import.meta.url), "utf8");
   const render = app.slice(app.indexOf("function renderResults"), app.indexOf("function renderSearchStatus"));
