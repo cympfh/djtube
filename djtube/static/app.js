@@ -37,6 +37,9 @@ audios.B.onSeekLanded = () => {
 };
 const searchInput = document.getElementById("search-input");
 const playlistName = document.getElementById("playlist-name");
+const playlistImportUrl = document.getElementById("playlist-import-url");
+const playlistImportName = document.getElementById("playlist-import-name");
+const playlistImportDest = document.getElementById("playlist-import-dest");
 
 async function fetchJson(path, options = {}) {
   const response = await fetch(`${prefix}${path}`, {
@@ -116,6 +119,25 @@ const actions = createActions({
   movePlaylistTrack: (id, from, to) =>
     fetchJson(`/api/playlists/${id}/tracks/move`, { method: "POST", body: JSON.stringify({ from, to }) }),
   saveBpm: (id, bpm) => fetchJson("/api/bpm", { method: "POST", body: JSON.stringify({ id, bpm }) }),
+  importPlaylist: (body, options = {}) =>
+    fetchJson("/api/playlists/import", {
+      method: "POST",
+      body: JSON.stringify(body),
+      signal: options.signal,
+    }),
+  playlistImportUrl: () => playlistImportUrl.value,
+  setPlaylistImportUrl: (value) => {
+    playlistImportUrl.value = value;
+  },
+  playlistImportDestination: () => playlistImportDest.value,
+  setPlaylistImportDestination: (value) => {
+    playlistImportDest.value = value;
+    delete playlistImportDest.dataset.touched;
+  },
+  playlistImportName: () => playlistImportName.value,
+  setPlaylistImportName: (value) => {
+    playlistImportName.value = value;
+  },
   playlistNameValue: () => playlistName.value,
   setPlaylistNameValue: (value) => {
     playlistName.value = value;
@@ -676,6 +698,7 @@ function renderPlaylists() {
   const pendingTrack =
     pendingRemove && pendingRemove.playlistId === playlist?.id ? tracks[pendingRemove.index] : null;
   if (!pendingTrack || pendingTrack.id !== pendingRemove?.trackId) pendingRemove = null;
+  renderImport();
   const list = document.getElementById("playlist-tracks");
   if (sortingTrack) return;
   list.replaceChildren();
@@ -762,6 +785,43 @@ function renderPlaylists() {
   } else {
     list.removeAttribute("aria-activedescendant");
   }
+}
+
+function renderImport() {
+  const dest = document.getElementById("playlist-import-dest");
+  const signature = state.playlists.map((item) => `${item.id}\t${item.name}`).join("\n");
+  const previous = dest.value;
+  const touched = dest.dataset.touched === "1";
+  if (dest.dataset.signature !== signature) {
+    dest.dataset.signature = signature;
+    dest.replaceChildren();
+    const created = document.createElement("option");
+    created.value = "new";
+    created.textContent = "新しいプレイリスト";
+    dest.append(created);
+    for (const playlist of state.playlists) {
+      const option = document.createElement("option");
+      option.value = playlist.id;
+      option.textContent = playlist.name;
+      dest.append(option);
+    }
+    const known = previous === "new" || state.playlists.some((item) => item.id === previous);
+    if (touched && known) dest.value = previous;
+    else if (state.playlistId && state.playlists.some((item) => item.id === state.playlistId)) dest.value = state.playlistId;
+    else dest.value = "new";
+  }
+  const name = document.getElementById("playlist-import-name");
+  name.hidden = dest.value !== "new";
+  const note = document.getElementById("playlist-import-note");
+  note.textContent = state.playlistImportNote || "";
+  note.classList.toggle("is-error", !!state.playlistImportError);
+  const button = document.getElementById("playlist-import");
+  const importing = !!state.playlistImporting;
+  button.disabled = state.playlistBusy && !importing;
+  button.textContent = importing ? "やめる" : "取り込む";
+  dest.disabled = state.playlistBusy || importing;
+  document.getElementById("playlist-import-url").disabled = state.playlistBusy || importing;
+  name.disabled = state.playlistBusy || importing;
 }
 
 function renderAddNote() {
@@ -852,6 +912,27 @@ playlistRenameName.addEventListener("keydown", (event) => {
 });
 document.getElementById("playlist-select").addEventListener("change", (event) => {
   actions.selectPlaylist(event.target.value);
+});
+document.getElementById("playlist-import").addEventListener("click", () => actions.importPlaylist());
+playlistImportDest.addEventListener("change", () => {
+  playlistImportDest.dataset.touched = "1";
+  playlistImportName.hidden = playlistImportDest.value !== "new";
+  if (playlistImportDest.value === "new") playlistImportName.focus();
+});
+playlistImportUrl.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  if (playlistImportDest.value === "new" && !playlistImportName.value.trim()) {
+    playlistImportName.hidden = false;
+    playlistImportName.focus();
+    return;
+  }
+  actions.importPlaylist();
+});
+playlistImportName.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  actions.importPlaylist();
 });
 playlistName.addEventListener("blur", () => {
   if (state.playlistNaming !== "create") {
