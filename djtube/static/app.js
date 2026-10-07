@@ -11,6 +11,7 @@ import { deckGains } from "./gains.js";
 import { eqGainDb, formatEqDb } from "./eq.js";
 import { formatFilter } from "./filter.js";
 import { formatTime } from "./format.js";
+import { playlistMetaText } from "./playlists.js";
 import { bpmText, tempoValueText } from "./bpm.js";
 import { formatRate } from "./rate.js";
 import { handleKeydown, isSearchTarget, isTypingTarget, legendGroups } from "./keys.js";
@@ -114,6 +115,7 @@ const actions = createActions({
   removePlaylistTrack: (id, index) => fetchJson(`/api/playlists/${id}/tracks/${index}`, { method: "DELETE" }),
   movePlaylistTrack: (id, from, to) =>
     fetchJson(`/api/playlists/${id}/tracks/move`, { method: "POST", body: JSON.stringify({ from, to }) }),
+  saveBpm: (id, bpm) => fetchJson("/api/bpm", { method: "POST", body: JSON.stringify({ id, bpm }) }),
   playlistNameValue: () => playlistName.value,
   setPlaylistNameValue: (value) => {
     playlistName.value = value;
@@ -709,8 +711,7 @@ function renderPlaylists() {
     title.textContent = track.title || track.id;
     const meta = document.createElement("p");
     meta.className = "result-meta";
-    const bits = [track.channel, track.duration ? formatTime(track.duration) : ""].filter(Boolean);
-    meta.textContent = bits.join(" · ");
+    meta.textContent = playlistMetaText(track, state.trackBpm?.[track.id]);
     text.append(title, meta);
     const buttons = document.createElement("div");
     buttons.className = "result-actions";

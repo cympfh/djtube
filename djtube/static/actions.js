@@ -9,7 +9,7 @@ import { EQ_BANDS, clampEqUnit, eqGainDb, eqUnitFromMidi } from "./eq.js";
 import { clampFilterUnit, filterUnitFromMidi } from "./filter.js";
 import { deckGains } from "./gains.js";
 import { JOG_RELEASE_MS, jogReleaseHear, jogSpinPlan } from "./jogspin.js";
-import { createPlaylistActions, freshPlaylistState, trackSnapshot } from "./playlists.js";
+import { createPlaylistActions, freshPlaylistState, playlistHasTrack, trackSnapshot } from "./playlists.js";
 import { publicPrefix } from "./prefix.js";
 import { clampRate, rateFromMidi } from "./rate.js";
 import { commandedSeekLanded } from "./seekland.js";
@@ -104,6 +104,7 @@ export function createActions(deps) {
     A: { token: 0, forGen: null, controller: null },
     B: { token: 0, forGen: null, controller: null },
   };
+  const bpmInflight = new Set();
 
   function scheduleRender() {
     deps.scheduleRender?.();
@@ -311,11 +312,49 @@ export function createActions(deps) {
     if (Number.isFinite(bpm) && bpm > 0 && Number.isFinite(beatOffset) && beatOffset >= 0) {
       deckState.bpm = bpm;
       deckState.beatOffset = beatOffset;
+      publishTrackBpm(deckState.id, bpm);
     } else {
       deckState.bpm = null;
       deckState.beatOffset = null;
     }
     scheduleRender();
+  }
+
+  function roundBpm(bpm) {
+    const value = Number(bpm);
+    if (!Number.isFinite(value)) return null;
+    return Math.round(value * 100) / 100;
+  }
+
+  function publishTrackBpm(id, bpm) {
+    if (typeof deps.saveBpm !== "function") return;
+    if (!playlistHasTrack(state.playlists, id)) return;
+    const rounded = roundBpm(bpm);
+    if (rounded == null) return;
+    if (state.trackBpm?.[id] === rounded) return;
+    if (bpmInflight.has(id)) return;
+    bpmInflight.add(id);
+    let pending;
+    try {
+      pending = deps.saveBpm(id, rounded);
+    } catch {
+      bpmInflight.delete(id);
+      return;
+    }
+    Promise.resolve(pending)
+      .then((body) => {
+        if (!playlistHasTrack(state.playlists, id)) return;
+        const reported = body && typeof body.bpm === "number" ? roundBpm(body.bpm) : null;
+        if (!state.trackBpm || typeof state.trackBpm !== "object" || Array.isArray(state.trackBpm)) {
+          state.trackBpm = {};
+        }
+        state.trackBpm[id] = reported == null ? rounded : reported;
+        scheduleRender();
+      })
+      .catch(() => {})
+      .finally(() => {
+        bpmInflight.delete(id);
+      });
   }
 
   function copyAudioBytes(bytes) {
@@ -1132,7 +1171,7 @@ export function createActions(deps) {
     scheduleJogRelease(deck);
   }
 
-  const playlistActions = createPlaylistActions({ deps, state, scheduleRender, loadTrack });
+  const playlistActions = createPlaylistActions({ deps, state, scheduleRender, loadTrack, publishTrackBpm });
 
   function moveSelection(delta) {
     if (state.library === "playlist") {

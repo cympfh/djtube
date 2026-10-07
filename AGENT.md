@@ -39,6 +39,7 @@ nginx は `/djtube/` を外してコンテナへ渡す。コンテナはポー�
 | `/djtube/static/app.js` | `/static/app.js` |
 | `/djtube/api/search` | `/api/search` |
 | `/djtube/api/playlists` | `/api/playlists` |
+| `/djtube/api/bpm` | `/api/bpm` |
 | `/djtube/api/cookies` | `/api/cookies` |
 | `/djtube/stream/ABCD` | `/stream/ABCD` |
 | `/djtube/api/live/publish` | `/api/live/publish` |
@@ -96,6 +97,18 @@ docker run --rm -p 127.0.0.1:8098:8098 -e YOUTUBE_API_KEY -e DJTUBE_PLAYLISTS=/a
 ```
 
 イメージは `/app/data` を `appuser` の所有で作ります。名前付きボリュームを初めて付けるとき、この所有者が使われます。API は `/api/playlists` です。プロセスは 1 つを想定しています。
+
+`GET /api/playlists` は `{"playlists":[...], "bpm":{"動画ID":128.04}}` を返す。`bpm` の無い古いファイルも読め、そのときは `bpm` は空である。作る、リネーム、削除、曲の追加、削除、移動の応答には `bpm` を付けない。遅れて届いた変更の応答で、ブラウザが持っている BPM をまとめて消さないためである。
+
+BPM はプレイリストの各項目には入れない。同じ曲がいくつのプレイリストに入っていても、同じプレイリストの何箇所にあっても、表は動画 ID ごとに 1 行である。`Track` と `track_from_payload` は変えない。曲を足す本文に `bpm` があっても無視する。
+
+`POST /api/bpm` の本文は `{"id":"<動画ID>","bpm":128.041}`。`id` は `is_video_id` に完全に一致しないと 400 で、URL からは取り出さない。`bpm` は真偽値ではない有限の数で、20 以上 500 以下である。そうでないときは 400。その動画がどのプレイリストにも無いときは 404 で、ファイルは変えない。保存するのは小数第 2 位へ丸めた値で、あとから送った値が残る。丸めた値が今の値と同じならディスクには書かない。
+
+読み込みと保存は、プレイリストと同じロックの中で `_save` する。そのたびに、どのプレイリストにも無い ID と、壊れた行（動画 ID の形でない、数でない、有限でない、範囲外）は捨てる。ログインが無いので、表だけが増えていかないようにする。ファイルに書けないときはプレイリストと同じくメモリに残し、`durable` は false になる。
+
+ブラウザは、計測が成功したときだけ `POST /api/bpm` を送る。送るのは `applyBpmResult` の成功の枝だけで、`null`、読み込み直したあとに届いた結果、中止では送らない。その動画が `state.playlists` にあるときだけ送る。送っている ID は Set に覚え、重なった送信はしない。小数第 2 位に丸めた値が `state.trackBpm` と同じときも送らない。送りは `deps.saveBpm` で、音源取得の `fetch` とは別である。失敗しても画面には出さず、`playlistError` も `playlistBusy` も変えない。`mutate` は通さない。
+
+プレイリストの行は `チャンネル · 3:45 · 128.0 BPM` の形である。出すのは保存した曲そのものの BPM で、デッキのテンポは掛けない。小数第 1 位で、文字列は `playlistMetaText` が作る。曲をプレイリストへ入れたとき、デッキが同じ曲の BPM を既に持っていれば、それも同じ送り方で送る。デッキ A を先に見て、無ければ B を見る。半分や倍に外れた推定も、そのまま保存する。最後にその曲をプレイリストから外すと、表の行も消える。ブラウザ側の `state.trackBpm` も、どのプレイリストにも残っていない ID は落とす。
 
 ## Cookie
 

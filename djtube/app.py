@@ -157,7 +157,22 @@ def create_app(
 
     @app.get("/api/playlists")
     def list_playlists() -> dict[str, object]:
-        return {"playlists": store.list_playlists()}
+        return store.snapshot()
+
+    @app.post("/api/bpm")
+    async def set_track_bpm(request: Request) -> dict[str, object]:
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(400, "BPMが正しくありません") from None
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "BPMが正しくありません")
+        try:
+            bpm = store.set_bpm(payload.get("id"), payload.get("bpm"))
+        except PlaylistError as exc:
+            raise_playlist(exc)
+        video_id = payload.get("id")
+        return {"id": video_id, "bpm": bpm}
 
     @app.post("/api/playlists")
     def create_playlist(body: PlaylistNameBody) -> dict[str, object]:
