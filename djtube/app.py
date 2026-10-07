@@ -339,12 +339,8 @@ def create_app(
         music: bool = True,
     ) -> dict[str, object]:
         list_id = parse_playlist_url(q)
-        if list_id is not None:
-            try:
-                return await search_playlist(q, list_id, request)
-            except HTTPException:
-                if video_id_from_query(q) is None:
-                    raise
+        if list_id is not None and video_id_from_query(q) is None:
+            return await search_playlist(q, list_id, request)
         try:
             tracks, source = await asyncio.to_thread(search_tracks, q, music=music)
         except SearchError as exc:

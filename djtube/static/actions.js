@@ -203,6 +203,33 @@ export function createActions(deps) {
 
   let searchGen = 0;
 
+  const playlistPageHosts = new Set([
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
+    "youtube-nocookie.com",
+    "www.youtube-nocookie.com",
+  ]);
+
+  function isPlaylistPageQuery(text) {
+    const raw = String(text || "").trim();
+    if (!raw || /\s/.test(raw)) return false;
+    let candidate = raw;
+    if (candidate.startsWith("//")) candidate = `https:${candidate}`;
+    else if (!/^[a-z][a-z0-9+.-]*:/i.test(candidate)) candidate = `https://${candidate}`;
+    let url;
+    try {
+      url = new URL(candidate);
+    } catch {
+      return false;
+    }
+    const host = url.hostname.replace(/\.$/, "").toLowerCase();
+    if (!playlistPageHosts.has(host)) return false;
+    if (url.pathname.replace(/\/+$/, "").toLowerCase() !== "/playlist") return false;
+    return !!url.searchParams.get("list");
+  }
+
   async function submitSearch() {
     const query = deps.queryValue().trim();
     if (!query) {
@@ -215,6 +242,7 @@ export function createActions(deps) {
     state.searching = true;
     state.searchError = "";
     scheduleRender();
+    let retry = false;
     try {
       const data = await deps.fetchSearch(query, musicOnly);
       if (gen !== searchGen) return;
@@ -231,10 +259,14 @@ export function createActions(deps) {
       state.searchError = message && !/^failed to fetch$/i.test(message) ? message : "検索できませんでした";
     } finally {
       if (gen === searchGen) {
-        state.searching = false;
-        scheduleRender();
+        retry = state.musicOnly !== musicOnly && !isPlaylistPageQuery(query);
+        if (!retry) {
+          state.searching = false;
+          scheduleRender();
+        }
       }
     }
+    if (retry && gen === searchGen) return submitSearch();
   }
 
   function setMusicOnly(value) {

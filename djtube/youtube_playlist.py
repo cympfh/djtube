@@ -1,8 +1,9 @@
 """YouTube playlist lookup, separate from djtube playlist storage.
 
-Search uses `parse_playlist_url` and `fetch_youtube_playlist` when the box
-holds a YouTube URL with an importable `list`. Import uses `parse_playlist_id`
-for that URL or a bare id, then decides where to save the same fetch.
+Search uses `parse_playlist_url` and `fetch_youtube_playlist` for a playlist
+page (`playlist?list=`) with no video id. A URL that already names a video
+stays that one video. Import uses `parse_playlist_id` for a URL or a bare id,
+then decides where to save the same fetch.
 """
 
 from __future__ import annotations

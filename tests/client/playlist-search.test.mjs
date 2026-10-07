@@ -34,11 +34,11 @@ function harness({ query, fetchSearch, musicOnly = true }) {
 test("a playlist url fills the same result list", async () => {
   const rows = [track(VIDEO, "夜"), track("bbbbbbbbbbb", "朝")];
   const { state, actions, calls } = harness({
-    query: `https://www.youtube.com/watch?v=${VIDEO}&list=${LIST}`,
+    query: `https://www.youtube.com/playlist?list=${LIST}`,
     fetchSearch: async () => ({ source: "youtube", tracks: rows }),
   });
   await actions.submitSearch();
-  assert.deepEqual(calls, [[`https://www.youtube.com/watch?v=${VIDEO}&list=${LIST}`, true]]);
+  assert.deepEqual(calls, [[`https://www.youtube.com/playlist?list=${LIST}`, true]]);
   assert.deepEqual(state.results, rows);
   assert.equal(state.source, "youtube");
   assert.equal(state.searchError, "");
@@ -139,7 +139,52 @@ test("enter during a search keeps the first result", async () => {
   assert.equal(state.searching, false);
 });
 
-test("toggling music during a search keeps the first result", async () => {
+test("toggling music during a keyword search searches again when it finishes", async () => {
+  const firstRows = [track(VIDEO, "夜")];
+  const secondRows = [track("bbbbbbbbbbb", "朝")];
+  let release = () => {};
+  const pending = new Promise((resolve) => {
+    release = resolve;
+  });
+  const calls = [];
+  const state = freshState();
+  const actions = createActions({
+    state,
+    audios: {
+      A: { paused: true, currentTime: 0, duration: 120, volume: 1 },
+      B: { paused: true, currentTime: 0, duration: 120, volume: 1 },
+    },
+    scheduleRender() {},
+    queryValue: () => "city pop",
+    fetchSearch: async (text, music) => {
+      calls.push([text, music]);
+      if (calls.length === 1) {
+        await pending;
+        return { source: "youtube", tracks: firstRows };
+      }
+      return { source: "ytdlp", tracks: secondRows };
+    },
+  });
+  const first = actions.submitSearch();
+  await Promise.resolve();
+  assert.equal(state.searching, true);
+  actions.setMusicOnly(false);
+  assert.equal(state.musicOnly, false);
+  assert.deepEqual(calls, [["city pop", true]]);
+  release();
+  await first;
+  assert.deepEqual(calls, [
+    ["city pop", true],
+    ["city pop", false],
+  ]);
+  assert.deepEqual(state.results, secondRows);
+  assert.equal(state.source, "ytdlp");
+  assert.equal(state.searchError, "");
+  assert.equal(state.searching, false);
+  assert.equal(state.musicOnly, false);
+});
+
+test("toggling music back during a keyword search does not search again", async () => {
   const rows = [track(VIDEO, "夜")];
   let release = () => {};
   const pending = new Promise((resolve) => {
@@ -157,22 +202,65 @@ test("toggling music during a search keeps the first result", async () => {
     queryValue: () => "city pop",
     fetchSearch: async () => {
       calls += 1;
-      if (calls > 1) throw new Error("プレイリストを取得中です");
       await pending;
       return { source: "youtube", tracks: rows };
     },
   });
   const first = actions.submitSearch();
   await Promise.resolve();
-  assert.equal(state.searching, true);
   actions.setMusicOnly(false);
-  assert.equal(state.musicOnly, false);
+  actions.setMusicOnly(true);
   assert.equal(calls, 1);
   release();
   await first;
+  assert.equal(calls, 1);
   assert.deepEqual(state.results, rows);
-  assert.equal(state.searchError, "");
+  assert.equal(state.musicOnly, true);
   assert.equal(state.searching, false);
+});
+
+test("toggling music during a playlist page search does not search again", async () => {
+  const rows = [track(VIDEO, "夜")];
+  const pages = [
+    `https://www.youtube.com/playlist?list=${LIST}`,
+    `https://music.youtube.com/playlist?list=${LIST}`,
+    `https://m.youtube.com/playlist?list=${LIST}`,
+  ];
+  for (const query of pages) {
+    let release = () => {};
+    const pending = new Promise((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    const state = freshState();
+    const actions = createActions({
+      state,
+      audios: {
+        A: { paused: true, currentTime: 0, duration: 120, volume: 1 },
+        B: { paused: true, currentTime: 0, duration: 120, volume: 1 },
+      },
+      scheduleRender() {},
+      queryValue: () => query,
+      fetchSearch: async () => {
+        calls += 1;
+        if (calls > 1) throw new Error("やり直した");
+        await pending;
+        return { source: "youtube", tracks: rows };
+      },
+    });
+    const first = actions.submitSearch();
+    await Promise.resolve();
+    assert.equal(state.searching, true);
+    actions.setMusicOnly(false);
+    assert.equal(state.musicOnly, false);
+    assert.equal(calls, 1);
+    release();
+    await first;
+    assert.equal(calls, 1);
+    assert.deepEqual(state.results, rows);
+    assert.equal(state.searching, false);
+    assert.equal(state.musicOnly, false);
+  }
 });
 
 test("search rows still offer both decks and playlist add", () => {

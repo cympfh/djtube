@@ -144,19 +144,34 @@ def test_a_playlist_url_returns_its_tracks_instead_of_search(monkeypatch):
     assert "music" not in seen[0][1]
 
 
-def test_watch_url_with_a_list_prefers_the_playlist(monkeypatch):
-    _forbid_search(monkeypatch)
+def test_a_watch_url_with_a_list_returns_that_video(monkeypatch):
+    fetches: list = []
+    _fake_playlist(monkeypatch, fetches)
     seen: list = []
-    _fake_playlist(monkeypatch, seen)
+    _lookup_one(monkeypatch, seen)
     client = _client()
-    query = f"https://www.youtube.com/watch?v={VIDEO}&list={LIST}"
-    response = client.get("/api/search", params={"q": query, "music": "false"})
-    assert response.status_code == 200
-    assert response.json()["tracks"][0]["id"] == VIDEO
-    assert seen[0][0] == query
-    again = client.get("/api/search", params={"q": f"https://music.youtube.com/playlist?list={LIST}", "music": "true"})
-    assert again.status_code == 200
-    assert len(seen) == 1
+    urls = [
+        f"https://www.youtube.com/watch?v={VIDEO}&list={LIST}",
+        f"https://music.youtube.com/watch?v={VIDEO}&list={LIST}",
+        f"https://m.youtube.com/watch?v={VIDEO}&list={LIST}",
+        f"https://youtu.be/{VIDEO}?list={LIST}",
+    ]
+    for url in urls:
+        seen.clear()
+        response = client.get("/api/search", params={"q": url, "music": "false"})
+        assert response.status_code == 200, response.text
+        assert response.json()["tracks"][0]["id"] == VIDEO
+        assert response.json()["tracks"][0]["title"] == "一曲"
+        assert seen == [VIDEO], url
+    assert fetches == []
+    assert len(client.app.state.import_slot._minute) == 0
+    page = client.get("/api/search", params={"q": f"https://music.youtube.com/playlist?list={LIST}"})
+    assert page.status_code == 200
+    assert page.json()["tracks"][0]["title"] == "中の曲"
+    assert fetches[0][0] == f"https://music.youtube.com/playlist?list={LIST}"
+    mobile = client.get("/api/search", params={"q": f"https://m.youtube.com/playlist?list={MUSIC}"})
+    assert mobile.status_code == 200
+    assert len(fetches) == 2
 
 
 def test_a_playlist_url_is_a_playlist_and_a_bare_id_is_a_keyword(monkeypatch):
@@ -269,7 +284,7 @@ def test_a_playlist_url_longer_than_120_characters_still_lists_tracks(monkeypatc
     _forbid_search(monkeypatch)
     seen: list = []
     _fake_playlist(monkeypatch, seen)
-    query = f"https://www.youtube.com/watch?v={VIDEO}&list={LIST}&si={'s' * 40}"
+    query = f"https://music.youtube.com/playlist?list={LIST}&si={'s' * 80}"
     assert len(query) > 120
     client = _client()
     response = client.get("/api/search", params={"q": query})
@@ -521,7 +536,7 @@ def test_a_cached_playlist_does_not_call_youtube_or_spend_a_slot(monkeypatch):
     client = _client()
     clock = {"t": 8_000.0}
     client.app.state.playlist_search_cache.now = lambda: clock["t"]
-    first = client.get("/api/search", params={"q": f"https://youtu.be/{VIDEO}?list={LIST}"})
+    first = client.get("/api/search", params={"q": f"https://music.youtube.com/playlist?list={LIST}"})
     assert first.status_code == 200
     assert calls["n"] == 2
     slot = client.app.state.import_slot
@@ -692,133 +707,100 @@ def _lookup_one(monkeypatch, seen: list):
     monkeypatch.setattr("djtube.search.lookup_tracks", lookup)
 
 
-def test_a_watch_url_falls_back_to_its_video_when_the_playlist_cannot_be_read(monkeypatch):
+def test_watch_urls_do_not_spend_the_import_budget(tmp_path, monkeypatch):
     album = "OLAK5uy_" + "a" * 33
+    hidden_id = "FL" + "f" * 22
+    items = {"n": 0}
+    mode = {"kind": "hidden"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/playlistItems"):
+            items["n"] += 1
+            if mode["kind"] == "hidden":
+                return httpx.Response(
+                    403,
+                    json={"error": {"code": 403, "errors": [{"reason": "playlistItemsNotAccessible"}]}},
+                )
+            if mode["kind"] == "missing":
+                return httpx.Response(
+                    404,
+                    json={"error": {"code": 404, "errors": [{"reason": "playlistNotFound"}]}},
+                )
+            if mode["kind"] == "quota":
+                return httpx.Response(
+                    403,
+                    json={"error": {"code": 403, "message": KEY, "errors": [{"reason": "quotaExceeded"}]}},
+                )
+            return httpx.Response(
+                200,
+                json={"items": [playlist_item(vid(0), title="中の曲")], "pageInfo": {"totalResults": 1}},
+            )
+        return httpx.Response(200, json={"items": [video_item(vid(0), title="中の曲")]})
+
+    _install(monkeypatch, handler)
     seen: list = []
     _lookup_one(monkeypatch, seen)
-    cases = [
-        (
-            f"https://www.youtube.com/watch?v={VIDEO}&list={LIST}",
-            404,
-            {"error": {"code": 404, "errors": [{"reason": "playlistNotFound"}]}},
-        ),
-        (
-            f"https://music.youtube.com/watch?v={VIDEO}&list={LIST}",
-            403,
-            {"error": {"code": 403, "errors": [{"reason": "playlistItemsNotAccessible"}]}},
-        ),
-        (
-            f"https://m.youtube.com/watch?v={VIDEO}&list={album}",
-            403,
-            {"error": {"code": 403, "message": KEY, "errors": [{"reason": "quotaExceeded"}]}},
-        ),
+    client = TestClient(create_app(PlaylistStore(tmp_path / "playlists.json")))
+    clock = {"t": 9_000.0}
+    client.app.state.import_slot.now = lambda: clock["t"]
+    address = {"X-Real-IP": "203.0.113.44"}
+    urls = [
+        f"https://www.youtube.com/watch?v={VIDEO}&list={LIST}",
+        f"https://music.youtube.com/watch?v={VIDEO}&list={LIST}",
+        f"https://m.youtube.com/watch?v={VIDEO}&list={album}",
+        f"https://youtu.be/{VIDEO}?list={LIST}",
     ]
-    for url, status, body in cases:
+    for index in range(21):
         seen.clear()
-
-        def handler(_request: httpx.Request, payload=body, code=status) -> httpx.Response:
-            return httpx.Response(code, json=payload)
-
-        _install(monkeypatch, handler)
-        client = _client()
-        response = client.get("/api/search", params={"q": url})
+        response = client.get("/api/search", params={"q": urls[index % len(urls)]}, headers=address)
         assert response.status_code == 200, response.text
         assert [track["id"] for track in response.json()["tracks"]] == [VIDEO]
         assert response.json()["tracks"][0]["title"] == "一曲"
-        assert seen == [VIDEO], url
-        assert KEY not in response.text
+        assert seen == [VIDEO]
+        assert items["n"] == 0
+        clock["t"] += 61.0
+    slot = client.app.state.import_slot
+    assert len(slot._minute) == 0
+    assert len(slot._day) == 0
 
-    def missing(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(404, json={"error": {"code": 404, "errors": [{"reason": "playlistNotFound"}]}})
+    mode["kind"] = "ok"
+    page = client.get("/api/search", params={"q": listed()}, headers=address)
+    assert page.status_code == 200, page.text
+    assert page.json()["tracks"][0]["title"] == "中の曲"
+    assert items["n"] == 1
 
-    _install(monkeypatch, missing)
-    client = _client()
-    response = client.get("/api/search", params={"q": listed()})
-    assert response.status_code == 404
-    assert response.json()["detail"] == "そのプレイリストは見つかりませんでした"
+    mode["kind"] = "missing"
+    missing = client.get(
+        "/api/search",
+        params={"q": f"https://music.youtube.com/playlist?list={MUSIC}"},
+        headers=address,
+    )
+    assert missing.status_code == 404
+    assert missing.json()["detail"] == "そのプレイリストは見つかりませんでした"
 
-    def hidden(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(403, json={"error": {"code": 403, "errors": [{"reason": "playlistItemsNotAccessible"}]}})
+    mode["kind"] = "hidden"
+    hidden = client.get(
+        "/api/search",
+        params={"q": f"https://m.youtube.com/playlist?list={hidden_id}"},
+        headers=address,
+    )
+    assert hidden.status_code == 502
+    assert hidden.json()["detail"] == "プレイリストを取れませんでした"
 
-    _install(monkeypatch, hidden)
-    client = _client()
-    response = client.get("/api/search", params={"q": f"https://music.youtube.com/playlist?list={LIST}"})
-    assert response.status_code == 502
-    assert response.json()["detail"] == "プレイリストを取れませんでした"
+    mode["kind"] = "quota"
+    quota = client.get("/api/search", params={"q": listed(album)}, headers=address)
+    assert quota.status_code == 429
+    assert quota.json()["detail"] == "YouTube API の上限に達しました"
+    assert KEY not in quota.text
 
-    def quota(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(403, json={"error": {"code": 403, "message": KEY, "errors": [{"reason": "quotaExceeded"}]}})
-
-    _install(monkeypatch, quota)
-    client = _client()
-    response = client.get("/api/search", params={"q": f"https://m.youtube.com/playlist?list={album}"})
-    assert response.status_code == 429
-    assert response.json()["detail"] == "YouTube API の上限に達しました"
-    assert KEY not in response.text
-    assert seen == [VIDEO]
-
-
-def test_a_watch_url_falls_back_when_playlist_search_is_rate_limited(monkeypatch):
-    seen: list = []
-    _lookup_one(monkeypatch, seen)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/playlistItems"):
-            return httpx.Response(200, json={"items": [playlist_item(vid(0))], "pageInfo": {"totalResults": 1}})
-        return httpx.Response(200, json={"items": [video_item(vid(0))]})
-
-    _install(monkeypatch, handler)
-    client = _client()
-    clock = {"t": 4_000.0}
-    client.app.state.import_slot.now = lambda: clock["t"]
-    for index in range(6):
-        response = client.get("/api/search", params={"q": listed("PL" + f"{index:032d}")})
-        assert response.status_code == 200, response.text
-    seen.clear()
-    watch = f"https://music.youtube.com/watch?v={VIDEO}&list={LIST}"
-    response = client.get("/api/search", params={"q": watch})
-    assert response.status_code == 200, response.text
-    assert [track["id"] for track in response.json()["tracks"]] == [VIDEO]
-    assert seen == [VIDEO]
-    blocked = client.get("/api/search", params={"q": listed(MUSIC)})
-    assert blocked.status_code == 429
-    assert blocked.json()["detail"] == "取り込みの回数が多いです"
-
-
-def test_a_watch_url_falls_back_while_an_import_holds_the_slot(tmp_path, monkeypatch):
-    seen: list = []
-    _lookup_one(monkeypatch, seen)
-    started = threading.Event()
-    release = threading.Event()
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/playlistItems"):
-            started.set()
-            assert release.wait(5)
-            return httpx.Response(200, json={"items": [playlist_item(vid(0))], "pageInfo": {"totalResults": 1}})
-        return httpx.Response(200, json={"items": [video_item(vid(0))]})
-
-    _install(monkeypatch, handler)
-    app = create_app(PlaylistStore(tmp_path / "playlists.json"))
-    watch = f"https://m.youtube.com/watch?v={VIDEO}&list={LIST}"
-
-    async def scenario():
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
-            task = asyncio.create_task(http.post("/api/playlists/import", json={"url": LIST, "name": "朝"}))
-            assert await asyncio.to_thread(started.wait, 2)
-            watched = await asyncio.wait_for(http.get("/api/search", params={"q": watch}), 1)
-            assert watched.status_code == 200, watched.text
-            assert [track["id"] for track in watched.json()["tracks"]] == [VIDEO]
-            plain = await asyncio.wait_for(http.get("/api/search", params={"q": listed(MUSIC)}), 1)
-            assert plain.status_code == 429
-            assert plain.json()["detail"] == "取り込み中です"
-            release.set()
-            first = await asyncio.wait_for(task, 2)
-            assert first.status_code == 200
-
-    anyio.run(scenario)
-    assert seen == [VIDEO]
+    clock["t"] += 61.0
+    mode["kind"] = "ok"
+    imported = client.post(
+        "/api/playlists/import",
+        json={"url": f"https://www.youtube.com/watch?v={VIDEO}&list={LIST}", "name": "朝"},
+        headers=address,
+    )
+    assert imported.status_code == 200, imported.text
 
 
 def test_keyword_search_does_not_spend_the_import_budget(monkeypatch):
