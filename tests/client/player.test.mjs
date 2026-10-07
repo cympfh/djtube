@@ -2222,11 +2222,11 @@ test("loading while the jog is listening ends that listening and cancels the pen
   const beforeCancelled = cancelled.length;
   await actions.loadTrack("A", { id: "zzzzzzzzzzz", title: "次" });
   assert.equal(state.decks.A.id, "zzzzzzzzzzz");
-  assert.equal(cancels, beforeCancels + 2);
-  assert.ok(cancelled.length > beforeCancelled);
   assert.equal(player.jogHear.hear, "deck");
   assert.equal(player.jogHear.scratch, null);
   assert.equal(player.scratch, null);
+  assert.equal(cancels, beforeCancels + 2);
+  assert.ok(cancelled.length > beforeCancelled);
   timers[0]();
   assert.equal(player.jogHear.hear, "deck");
   assert.equal(player.scratch, null);
