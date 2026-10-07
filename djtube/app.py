@@ -28,6 +28,7 @@ from djtube.youtube_playlist import (
     PlaylistLookupError,
     fetch_youtube_playlist,
     parse_playlist_id,
+    parse_playlist_url,
     rejected_playlist_message,
 )
 
@@ -337,10 +338,7 @@ def create_app(
         q: str = Query(min_length=1, max_length=SEARCH_QUERY_MAX),
         music: bool = True,
     ) -> dict[str, object]:
-        rejected = rejected_playlist_message(q)
-        if rejected:
-            raise HTTPException(400, rejected)
-        list_id = parse_playlist_id(q)
+        list_id = parse_playlist_url(q)
         if list_id is not None:
             return await search_playlist(q, list_id, request)
         try:

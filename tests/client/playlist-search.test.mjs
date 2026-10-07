@@ -45,17 +45,19 @@ test("a playlist url fills the same result list", async () => {
   assert.equal(state.selected, 0);
 });
 
-test("an unimportable playlist and an api limit show the server message", async () => {
-  const rejected = harness({
-    query: "WL",
-    fetchSearch: async () => {
-      throw new Error("取り込めない種類のリストです");
-    },
+test("a mix url shows the one track the server returned", async () => {
+  const one = track(VIDEO, "一曲");
+  const { state, actions, calls } = harness({
+    query: `https://www.youtube.com/watch?v=${VIDEO}&list=RD${VIDEO}&start_radio=1`,
+    fetchSearch: async () => ({ source: "oembed", tracks: [one] }),
   });
-  await rejected.actions.submitSearch();
-  assert.deepEqual(rejected.state.results, []);
-  assert.equal(rejected.state.searchError, "取り込めない種類のリストです");
+  await actions.submitSearch();
+  assert.deepEqual(calls, [[`https://www.youtube.com/watch?v=${VIDEO}&list=RD${VIDEO}&start_radio=1`, true]]);
+  assert.deepEqual(state.results, [one]);
+  assert.equal(state.searchError, "");
+});
 
+test("an api limit still shows the server message", async () => {
   const limited = harness({
     query: `https://www.youtube.com/playlist?list=${LIST}`,
     fetchSearch: async () => {
@@ -99,6 +101,42 @@ test("an empty playlist says nothing was found", async () => {
   await actions.submitSearch();
   assert.deepEqual(state.results, []);
   assert.equal(state.searchError, "見つかりませんでした");
+});
+
+test("enter during a search keeps the first result", async () => {
+  const rows = [track(VIDEO, "夜")];
+  let release = () => {};
+  const pending = new Promise((resolve) => {
+    release = resolve;
+  });
+  let calls = 0;
+  const state = freshState();
+  const actions = createActions({
+    state,
+    audios: {
+      A: { paused: true, currentTime: 0, duration: 120, volume: 1 },
+      B: { paused: true, currentTime: 0, duration: 120, volume: 1 },
+    },
+    scheduleRender() {},
+    queryValue: () => "city pop",
+    isSearchFocused: () => true,
+    fetchSearch: async () => {
+      calls += 1;
+      if (calls > 1) throw new Error("プレイリストを取得中です");
+      await pending;
+      return { source: "youtube", tracks: rows };
+    },
+  });
+  const first = actions.submitSearch();
+  await Promise.resolve();
+  assert.equal(state.searching, true);
+  await actions.onEnter();
+  assert.equal(calls, 1);
+  release();
+  await first;
+  assert.deepEqual(state.results, rows);
+  assert.equal(state.searchError, "");
+  assert.equal(state.searching, false);
 });
 
 test("search rows still offer both decks and playlist add", () => {

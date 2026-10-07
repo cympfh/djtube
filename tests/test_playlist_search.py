@@ -15,13 +15,18 @@ from fastapi.testclient import TestClient
 from djtube.app import create_app
 from djtube.playlists import PlaylistStore
 from djtube.search import Track
-from djtube.youtube_playlist import PLAYLIST_ITEM_LIMIT, YouTubePlaylist
+from djtube.youtube_playlist import PLAYLIST_ITEM_LIMIT, YouTubePlaylist, parse_playlist_id, parse_playlist_url
 
 LIST = "PL" + "a" * 32
 MUSIC = "RDCLAK5uy_" + "m" * 33
 KEY = "test-playlist-search-key"
 VIDEO = "abcdefghijk"
 PASTED = f"https://www.youtube.com/watch?v={VIDEO}"
+WORD_SHAPED_LIKE_A_LIST = "PLAYSTATIONCLASSIC"
+
+
+def listed(list_id: str = LIST) -> str:
+    return f"https://www.youtube.com/playlist?list={list_id}"
 
 
 @pytest.fixture(autouse=True)
@@ -154,15 +159,20 @@ def test_watch_url_with_a_list_prefers_the_playlist(monkeypatch):
     assert len(seen) == 1
 
 
-def test_a_bare_playlist_id_and_a_music_playlist_are_playlists(monkeypatch):
-    _forbid_search(monkeypatch)
-    seen: list = []
-    _fake_playlist(monkeypatch, seen)
+def test_a_playlist_url_is_a_playlist_and_a_bare_id_is_a_keyword(monkeypatch):
+    fetches: list = []
+    _fake_playlist(monkeypatch, fetches)
+    searches: list = []
+    _fake_search(monkeypatch, searches)
     client = _client()
-    assert client.get("/api/search", params={"q": f"  {LIST}  "}).status_code == 200
-    assert client.get("/api/search", params={"q": MUSIC}).status_code == 200
-    assert seen[0][0] == f"  {LIST}  "
-    assert seen[1][0] == MUSIC
+    assert client.get("/api/search", params={"q": listed(MUSIC)}).status_code == 200
+    assert fetches[0][0] == listed(MUSIC)
+    for sample in (LIST, f"  {LIST}  ", MUSIC, WORD_SHAPED_LIKE_A_LIST):
+        response = client.get("/api/search", params={"q": sample})
+        assert response.status_code == 200, sample
+    assert [item[0] for item in searches] == [LIST, f"  {LIST}  ", MUSIC, WORD_SHAPED_LIKE_A_LIST]
+    assert len(fetches) == 1
+    assert len(client.app.state.import_slot._minute) == 1
 
 
 def test_a_single_video_and_a_keyword_still_search(monkeypatch):
@@ -183,24 +193,57 @@ def test_a_single_video_and_a_keyword_still_search(monkeypatch):
     assert [item[0] for item in seen[-3:]] == ["UL" + "u" * 22, "PLAYSTATION5", "FLOWER_DANCE"]
 
 
-def test_unimportable_lists_are_rejected_before_youtube(monkeypatch):
-    _forbid_search(monkeypatch)
+def test_mix_urls_stay_one_video_and_list_words_stay_keywords(monkeypatch):
     _forbid_playlist(monkeypatch)
+    seen: list = []
+
+    def lookup(video_id: str):
+        seen.append(("video", video_id))
+        return [Track(video_id, "一曲", "人", 90, None)], "oembed"
+
+    def keyword(query: str, *, music: bool = False):
+        seen.append(("keyword", query, music))
+        return [Track(vid(0), "語", "人", 30, None)]
+
+    monkeypatch.setattr("djtube.search.lookup_tracks", lookup)
+    monkeypatch.setattr("djtube.search.search_ytdlp", keyword)
     client = _client()
-    samples = [
-        "WL",
-        "LL",
-        "LM",
-        "RDMM",
-        "RD" + VIDEO,
-        f"https://www.youtube.com/playlist?list=WL",
+    urls = [
+        f"https://www.youtube.com/watch?v={VIDEO}&list=RD{VIDEO}&start_radio=1",
+        f"https://music.youtube.com/watch?v={VIDEO}&list=RDAMVM{VIDEO}",
         f"https://www.youtube.com/watch?v={VIDEO}&list=RDMM",
+        f"https://www.youtube.com/watch?v={VIDEO}&list=WL",
         f"https://music.youtube.com/watch?v={VIDEO}&list=LL",
+        f"https://www.youtube.com/watch?v={VIDEO}&list=LM",
     ]
-    for sample in samples:
-        response = client.get("/api/search", params={"q": sample})
-        assert response.status_code == 400, sample
-        assert response.json()["detail"] == "取り込めない種類のリストです"
+    for url in urls:
+        seen.clear()
+        response = client.get("/api/search", params={"q": url})
+        assert response.status_code == 200, response.text
+        assert [track["id"] for track in response.json()["tracks"]] == [VIDEO]
+        assert "取り込めない種類のリストです" not in response.text
+        assert seen == [("video", VIDEO)], url
+    words = ["RDX", "RD", "RDR2", "LL", "LM", "WL"]
+    for word in words:
+        seen.clear()
+        response = client.get("/api/search", params={"q": word})
+        assert response.status_code == 200, response.text
+        assert seen == [("keyword", word, True)], word
+    assert parse_playlist_id(WORD_SHAPED_LIKE_A_LIST) == WORD_SHAPED_LIKE_A_LIST
+    assert parse_playlist_url(WORD_SHAPED_LIKE_A_LIST) is None
+    assert parse_playlist_url(listed()) == LIST
+    assert parse_playlist_url(urls[0]) is None
+    seen.clear()
+    plain = client.get("/api/search", params={"q": "https://www.youtube.com/playlist?list=WL"})
+    assert plain.status_code == 200
+    assert seen == [("keyword", "https://www.youtube.com/playlist?list=WL", True)]
+    imported = client.post(
+        "/api/playlists/import",
+        json={"url": f"https://www.youtube.com/watch?v={VIDEO}&list=RD{VIDEO}&start_radio=1", "name": "朝"},
+    )
+    assert imported.status_code == 400
+    assert imported.json()["detail"] == "取り込めない種類のリストです"
+    assert len(client.app.state.import_slot._minute) == 0
 
 
 def test_a_long_keyword_is_still_cut_to_120_characters(monkeypatch):
@@ -286,7 +329,7 @@ def test_display_stops_at_the_scan_cap(monkeypatch):
 
     _install(monkeypatch, handler)
     client = _client()
-    response = client.get("/api/search", params={"q": LIST})
+    response = client.get("/api/search", params={"q": listed()})
     assert response.status_code == 200
     assert [track["id"] for track in response.json()["tracks"]] == [vid(0), vid(1)]
 
@@ -317,7 +360,7 @@ def test_a_playlist_longer_than_a_search_page_is_not_cut_to_fifty(monkeypatch):
 
     _install(monkeypatch, handler)
     client = _client()
-    response = client.get("/api/search", params={"q": LIST})
+    response = client.get("/api/search", params={"q": listed()})
     assert response.status_code == 200
     ids = [track["id"] for track in response.json()["tracks"]]
     assert len(ids) == 60
@@ -337,7 +380,7 @@ def test_quota_and_missing_playlist_use_the_import_messages(monkeypatch, caplog)
 
     _install(monkeypatch, quota)
     client = _client()
-    response = client.get("/api/search", params={"q": LIST})
+    response = client.get("/api/search", params={"q": listed()})
     assert response.status_code == 429
     assert response.json()["detail"] == "YouTube API の上限に達しました"
     assert KEY not in response.text
@@ -351,7 +394,7 @@ def test_quota_and_missing_playlist_use_the_import_messages(monkeypatch, caplog)
 
     _install(monkeypatch, missing)
     client = _client()
-    response = client.get("/api/search", params={"q": LIST})
+    response = client.get("/api/search", params={"q": listed()})
     assert response.status_code == 404
     assert response.json()["detail"] == "そのプレイリストは見つかりませんでした"
     assert KEY not in response.text
@@ -361,7 +404,7 @@ def test_quota_and_missing_playlist_use_the_import_messages(monkeypatch, caplog)
 
     _install(monkeypatch, broken)
     client = _client()
-    response = client.get("/api/search", params={"q": LIST})
+    response = client.get("/api/search", params={"q": listed()})
     assert response.status_code == 502
     assert response.json()["detail"] == "プレイリストを取れませんでした"
     assert KEY not in response.text
@@ -375,7 +418,7 @@ def test_an_empty_playlist_is_an_empty_result(monkeypatch):
 
     _install(monkeypatch, handler)
     client = _client()
-    response = client.get("/api/search", params={"q": LIST})
+    response = client.get("/api/search", params={"q": listed()})
     assert response.status_code == 200
     assert response.json() == {"source": "youtube", "tracks": []}
 
@@ -452,13 +495,13 @@ def test_playlist_search_shares_the_import_rate_limit(tmp_path, monkeypatch):
         clock["t"] = 2_000.0 + index
         response = client.post("/api/playlists/import", json={"url": LIST, "playlist_id": created["id"]})
         assert response.status_code == 200, response.text
-    listed = client.get("/api/search", params={"q": LIST})
-    assert listed.status_code == 200
-    blocked = client.get("/api/search", params={"q": MUSIC})
+    searched = client.get("/api/search", params={"q": listed()})
+    assert searched.status_code == 200
+    blocked = client.get("/api/search", params={"q": listed(MUSIC)})
     assert blocked.status_code == 429
     assert blocked.json()["detail"] == "取り込みの回数が多いです"
     clock["t"] = 2_000.0 + 60.0
-    again = client.get("/api/search", params={"q": MUSIC})
+    again = client.get("/api/search", params={"q": listed(MUSIC)})
     assert again.status_code == 200
 
 
@@ -486,17 +529,17 @@ def test_a_cached_playlist_does_not_call_youtube_or_spend_a_slot(monkeypatch):
     slot._minute.clear()
     for _index in range(6):
         slot._minute.append(stamp)
-    cached = client.get("/api/search", params={"q": LIST, "music": "false"})
+    cached = client.get("/api/search", params={"q": listed(), "music": "false"})
     assert cached.status_code == 200
     assert cached.json()["tracks"][0]["title"] == "夜"
     assert calls["n"] == 2
     clock["t"] = 8_000.0 + 599.999
-    still = client.get("/api/search", params={"q": LIST})
+    still = client.get("/api/search", params={"q": listed()})
     assert still.status_code == 200
     assert calls["n"] == 2
     clock["t"] = 8_000.0 + 600.0
     slot._minute.clear()
-    refreshed = client.get("/api/search", params={"q": LIST})
+    refreshed = client.get("/api/search", params={"q": listed()})
     assert refreshed.status_code == 200
     assert calls["n"] == 4
     stored = json.dumps(list(client.app.state.playlist_search_cache._items.values()), default=str)
@@ -522,9 +565,9 @@ def test_errors_are_not_cached(monkeypatch):
 
     _install(monkeypatch, handler)
     client = _client()
-    missing = client.get("/api/search", params={"q": LIST})
+    missing = client.get("/api/search", params={"q": listed()})
     assert missing.status_code == 404
-    found = client.get("/api/search", params={"q": LIST})
+    found = client.get("/api/search", params={"q": listed()})
     assert found.status_code == 200
     assert calls["n"] == 3
 
@@ -553,15 +596,15 @@ def test_the_cache_drops_the_oldest_playlist_past_32(monkeypatch):
         slot_clock["t"] += 61
         response = client.get(
             "/api/search",
-            params={"q": playlist_id},
+            params={"q": listed(playlist_id)},
             headers={"X-Real-IP": f"203.0.113.{index + 1}"},
         )
         assert response.status_code == 200, response.text
     slot_clock["t"] += 61
-    again = client.get("/api/search", params={"q": ids[0]}, headers={"X-Real-IP": "198.51.100.1"})
+    again = client.get("/api/search", params={"q": listed(ids[0])}, headers={"X-Real-IP": "198.51.100.1"})
     assert again.status_code == 200
     assert calls[ids[0]] == 2
-    kept = client.get("/api/search", params={"q": ids[2]}, headers={"X-Real-IP": "198.51.100.2"})
+    kept = client.get("/api/search", params={"q": listed(ids[2])}, headers={"X-Real-IP": "198.51.100.2"})
     assert kept.status_code == 200
     assert calls[ids[2]] == 1
 
@@ -586,13 +629,13 @@ def test_one_playlist_search_at_a_time_leaves_the_event_loop_free(tmp_path, monk
     async def scenario():
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
-            task = asyncio.create_task(http.get("/api/search", params={"q": LIST}))
+            task = asyncio.create_task(http.get("/api/search", params={"q": listed()}))
             assert await asyncio.to_thread(started.wait, 2)
             health_at = time.monotonic()
             health = await asyncio.wait_for(http.get("/api/health"), 1)
             assert health.status_code == 200
             assert time.monotonic() - health_at < 0.8
-            second = await asyncio.wait_for(http.get("/api/search", params={"q": MUSIC}), 1)
+            second = await asyncio.wait_for(http.get("/api/search", params={"q": listed(MUSIC)}), 1)
             assert second.status_code == 429
             assert second.json()["detail"] == "プレイリストを取得中です"
             blocked = await asyncio.wait_for(
@@ -631,7 +674,7 @@ def test_a_playlist_search_waits_out_an_import(tmp_path, monkeypatch):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
             task = asyncio.create_task(http.post("/api/playlists/import", json={"url": LIST, "name": "朝"}))
             assert await asyncio.to_thread(started.wait, 2)
-            searched = await asyncio.wait_for(http.get("/api/search", params={"q": LIST}), 1)
+            searched = await asyncio.wait_for(http.get("/api/search", params={"q": listed()}), 1)
             assert searched.status_code == 429
             assert searched.json()["detail"] == "取り込み中です"
             release.set()
@@ -650,6 +693,7 @@ def test_keyword_search_does_not_spend_the_import_budget(monkeypatch):
     for _index in range(7):
         response = client.get("/api/search", params={"q": "city pop"})
         assert response.status_code == 200
-    rejected = client.get("/api/search", params={"q": "WL"})
-    assert rejected.status_code == 400
+    for sample in ("WL", "LL", "LM", "RD", "RDX", "RDR2", WORD_SHAPED_LIKE_A_LIST, LIST):
+        response = client.get("/api/search", params={"q": sample})
+        assert response.status_code == 200, sample
     assert len(client.app.state.import_slot._minute) == 0

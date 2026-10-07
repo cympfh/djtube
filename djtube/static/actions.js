@@ -250,9 +250,10 @@ export function createActions(deps) {
   }
 
   function onEnter() {
+    if (state.searching) return;
     const query = deps.queryValue().trim();
     const focused = !!deps.isSearchFocused?.();
-    if (focused && (state.searching || query !== state.lastQuery || state.results.length === 0)) {
+    if (focused && (query !== state.lastQuery || state.results.length === 0)) {
       return submitSearch();
     }
   }

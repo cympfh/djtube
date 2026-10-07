@@ -1,7 +1,8 @@
 """YouTube playlist lookup, separate from djtube playlist storage.
 
-Search can call `parse_playlist_id` and `fetch_youtube_playlist` to show a
-playlist. Import uses the same result, then decides where to save it.
+Search uses `parse_playlist_url` and `fetch_youtube_playlist` when the box
+holds a YouTube URL with an importable `list`. Import uses `parse_playlist_id`
+for that URL or a bare id, then decides where to save the same fetch.
 """
 
 from __future__ import annotations
@@ -197,6 +198,18 @@ def parse_playlist_id(source: object) -> str | None:
     if token is not None and _IMPORTABLE.fullmatch(token):
         return token
     return None
+
+
+def parse_playlist_url(source: object) -> str | None:
+    """Importable playlist id from a YouTube URL with `list=`.
+
+    A bare id stays a search term. Import still uses `parse_playlist_id`.
+    """
+
+    text = _source_text(source)
+    if text is None or _youtube_url(text) is None:
+        return None
+    return parse_playlist_id(text)
 
 
 def rejected_playlist_message(source: object) -> str | None:
