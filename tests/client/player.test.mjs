@@ -339,7 +339,7 @@ test("FLX4 map sends notes and CCs to deck actions", async () => {
     "MIDI接続済み：DDJ-FLX4、DDJ-FLX4 MIDI",
   );
   assert.equal(controllerStatusText({ state: "open", names: ["DDJ-FLX4"], connected: true }), "MIDI接続済み：DDJ-FLX4");
-  assert.equal(controllerStatusText({ state: "open", names: [] }), "MIDI未接続");
+  assert.equal(controllerStatusText({ state: "open", names: [] }), "MIDI接続済み：機器なし（挿すと使えます）");
   assert.equal(controllerStatusText({ state: "unsupported" }), "Web MIDI 非対応");
   assert.equal(controllerStatusText({ state: "denied" }), "MIDI が拒否されました");
   assert.equal(controllerStatusText({ state: "opening" }), "MIDI を開いています…");
@@ -649,12 +649,12 @@ test("applyMidiStatus writes a result once and names what a press does", () => {
 
   applyMidiStatus(button, live, { state: "open", names: [], connected: false });
   assert.deepEqual(painted(), {
-    title: "MIDI未接続",
-    label: "MIDI を開く",
-    live: "MIDI未接続",
+    title: "MIDI接続済み：機器なし（挿すと使えます）\n押すと切断します",
+    label: "MIDI を切断",
+    live: "MIDI接続済み：機器なし（挿すと使えます）",
     midi: "off",
   });
-  assert.deepEqual(writes, ["title", "aria-label", "live", "data-midi"]);
+  assert.deepEqual(writes, ["title", "live", "data-midi"]);
 
   writes.length = 0;
   applyMidiStatus(button, live, { state: "denied", names: [], connected: false });
@@ -664,7 +664,7 @@ test("applyMidiStatus writes a result once and names what a press does", () => {
     live: "MIDI が拒否されました",
     midi: "off",
   });
-  assert.deepEqual(writes, ["title", "live"]);
+  assert.deepEqual(writes, ["title", "aria-label", "live"]);
 
   writes.length = 0;
   applyMidiStatus(button, live, { state: "denied", names: [], connected: false });

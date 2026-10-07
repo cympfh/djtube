@@ -323,6 +323,7 @@ export function controllerStatusText(status) {
   if (status.state === "insecure") return "MIDI未接続：HTTPS が必要です";
   if (status.state === "denied") return "MIDI が拒否されました";
   if (status.state === "open" && status.names?.length) return `MIDI接続済み：${status.names.join("、")}`;
+  if (status.state === "open") return "MIDI接続済み：機器なし（挿すと使えます）";
   if (status.state === "opening") return "MIDI を開いています…";
   return MIDI_STATUS_IDLE;
 }
@@ -330,14 +331,15 @@ export function controllerStatusText(status) {
 /** Accessible name for the header button in this state. */
 export function midiButtonLabel(status) {
   if (status?.state === "opening") return MIDI_BUTTON_LABEL_CANCEL;
-  return midiButtonState(status) === "on" ? MIDI_BUTTON_LABEL_CLOSE : MIDI_BUTTON_LABEL;
+  if (status?.state === "open") return MIDI_BUTTON_LABEL_CLOSE;
+  return MIDI_BUTTON_LABEL;
 }
 
 /** Paint the header button and the hidden result. Skip a write when the value is unchanged. */
 export function applyMidiStatus(button, live, status) {
   const text = controllerStatusText(status);
   const face = midiButtonState(status);
-  const hover = face === "on" ? `${text}\n${MIDI_CLOSE_HINT}` : text;
+  const hover = status?.state === "open" ? `${text}\n${MIDI_CLOSE_HINT}` : text;
   if (button.title !== hover) button.title = hover;
   const label = midiButtonLabel(status);
   if (button.getAttribute("aria-label") !== label) button.setAttribute("aria-label", label);
@@ -366,10 +368,11 @@ function releaseFlx4Outputs(port) {
 }
 
 /**
- * One MIDI connection for the page. `toggle` is the header button:
- * not connected → connect, opening → cancel, a device connected → disconnect.
- * Unplugging every port leaves the session up so a replug keeps working, and
- * the button shows 未接続, so a press there does not drop it.
+ * One MIDI connection for the page. `toggle` matches the stream icon:
+ * a session stops, otherwise start. The session covers the wait for
+ * requestMIDIAccess and an open access with no devices plugged in.
+ * Unplugging leaves that session up so a replug keeps one handler, and a
+ * press while it is up disconnects.
  * connect is idempotent. At most one MIDIAccess is held, and each MIDIInput
  * gets one handler. A second press while requestMIDIAccess is pending cancels
  * it, and the access that arrives late is not bound.
@@ -390,27 +393,24 @@ export function createMidiControl(actions, onStatus, options = {}) {
   }
 
   function bind(mine) {
-    if (mine.ended || session !== mine) return;
+    if (session !== mine) return;
     const access = mine.access;
     const outputs = [];
     for (const output of access.outputs.values()) {
       if (output?.state !== "disconnected" && isFlx4Port(output)) outputs.push(output);
     }
     setFlx4Outputs(ledPort, outputs);
-    if (mine.ended || session !== mine) return;
     const names = [];
     const live = new Set();
     for (const input of access.inputs.values()) {
       if (!input || input.state === "disconnected") continue;
       live.add(input);
       names.push(input.name || "MIDI");
-      if (mine.bound.has(input) && input.onmidimessage === mine.bound.get(input)) continue;
       const handler = (event) => {
-        if (mine.ended || session !== mine) return;
+        if (session !== mine) return;
         const msg = messageFromMidi(event.data);
         if (!msg) return;
         if (!dispatchControllerEvent(msg, actions)) ignored += 1;
-        if (mine.ended || session !== mine) return;
         report("open", mine.names);
       };
       input.onmidimessage = handler;
@@ -422,7 +422,6 @@ export function createMidiControl(actions, onStatus, options = {}) {
       mine.bound.delete(input);
     }
     mine.names = names;
-    if (mine.ended || session !== mine) return;
     report("open", names);
   }
 
@@ -434,7 +433,7 @@ export function createMidiControl(actions, onStatus, options = {}) {
       report(secure ? "unsupported" : "insecure");
       return Promise.resolve();
     }
-    const mine = { access: null, bound: new Map(), names: [], ended: false, onstate: null, ready: null };
+    const mine = { access: null, bound: new Map(), names: [], onstate: null, ready: null };
     session = mine;
     report("opening");
     mine.ready = (async () => {
@@ -444,16 +443,14 @@ export function createMidiControl(actions, onStatus, options = {}) {
       } catch {
         if (session !== mine) return;
         session = null;
-        mine.ended = true;
         setFlx4Outputs(ledPort, []);
         report("denied");
         return;
       }
-      if (mine.ended || session !== mine) return;
+      if (session !== mine) return;
       mine.access = access;
       mine.onstate = () => bind(mine);
       bind(mine);
-      if (mine.ended || session !== mine) return;
       access.onstatechange = mine.onstate;
     })();
     return mine.ready;
@@ -463,7 +460,6 @@ export function createMidiControl(actions, onStatus, options = {}) {
     const mine = session;
     if (!mine) return;
     session = null;
-    mine.ended = true;
     const access = mine.access;
     if (access && access.onstatechange === mine.onstate) access.onstatechange = null;
     for (const [input, handler] of mine.bound) {
@@ -479,9 +475,7 @@ export function createMidiControl(actions, onStatus, options = {}) {
     connect,
     disconnect,
     toggle() {
-      // Opening has no access yet. A plugged-in device fills names.
-      // Neither: not connected, including a hotplug session with nothing plugged in.
-      if (session && (!session.access || session.names.length > 0)) {
+      if (session) {
         disconnect();
         return Promise.resolve();
       }
@@ -489,6 +483,9 @@ export function createMidiControl(actions, onStatus, options = {}) {
     },
     get active() {
       return session !== null;
+    },
+    get connected() {
+      return session?.access != null && session.names.length > 0;
     },
   };
 }
