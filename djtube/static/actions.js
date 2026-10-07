@@ -104,6 +104,7 @@ export function createActions(deps) {
     A: { token: 0, forGen: null, controller: null },
     B: { token: 0, forGen: null, controller: null },
   };
+  let publishTrackBpm = () => {};
 
   function scheduleRender() {
     deps.scheduleRender?.();
@@ -311,6 +312,7 @@ export function createActions(deps) {
     if (Number.isFinite(bpm) && bpm > 0 && Number.isFinite(beatOffset) && beatOffset >= 0) {
       deckState.bpm = bpm;
       deckState.beatOffset = beatOffset;
+      publishTrackBpm(deckState.id, bpm);
     } else {
       deckState.bpm = null;
       deckState.beatOffset = null;
@@ -1132,7 +1134,13 @@ export function createActions(deps) {
     scheduleJogRelease(deck);
   }
 
-  const playlistActions = createPlaylistActions({ deps, state, scheduleRender, loadTrack });
+  const { publishTrackBpm: publishListedBpm, ...playlistActions } = createPlaylistActions({
+    deps,
+    state,
+    scheduleRender,
+    loadTrack,
+  });
+  publishTrackBpm = publishListedBpm;
 
   function moveSelection(delta) {
     if (state.library === "playlist") {

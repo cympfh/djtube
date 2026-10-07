@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import threading
 import uuid
 from pathlib import Path
 
+from djtube.ids import is_video_id
 from djtube.paths import PACKAGE_DIR
 from djtube.search import track_from_payload
 
@@ -16,6 +18,8 @@ log = logging.getLogger(__name__)
 NAME_MAX = 80
 PLAYLIST_MAX = 40
 TRACK_MAX = 300
+BPM_MIN = 20
+BPM_MAX = 500
 _PLAYLIST_ID = re.compile(r"^[0-9a-f]{32}$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -54,11 +58,35 @@ class PlaylistStore:
         self.track_limit = track_limit
         self.durable = True
         self._lock = threading.Lock()
-        self._playlists = self._load()
+        self._playlists: list[dict] = []
+        self._bpm: dict[str, float] = {}
+        self._load()
 
     def list_playlists(self) -> list[dict]:
         with self._lock:
             return [_public(item) for item in self._playlists]
+
+    def snapshot(self) -> dict[str, object]:
+        with self._lock:
+            return {
+                "playlists": [_public(item) for item in self._playlists],
+                "bpm": dict(self._bpm),
+            }
+
+    def set_bpm(self, video_id: object, bpm: object) -> float:
+        if not isinstance(video_id, str) or not is_video_id(video_id):
+            raise PlaylistError("動画IDが正しくありません")
+        rounded = _rounded_bpm(bpm)
+        if rounded is None:
+            raise PlaylistError("BPMが正しくありません")
+        with self._lock:
+            if video_id not in _track_ids(self._playlists):
+                raise PlaylistError("プレイリストにその曲がありません", 404)
+            if self._bpm.get(video_id) == rounded:
+                return rounded
+            self._bpm[video_id] = rounded
+            self._save()
+            return rounded
 
     def create(self, name: object) -> dict:
         cleaned = normalize_name(name)
@@ -149,25 +177,28 @@ class PlaylistStore:
                 return playlist
         raise PlaylistError("プレイリストが見つかりません", 404)
 
-    def _load(self) -> list[dict]:
+    def _load(self) -> None:
+        self._playlists = []
+        self._bpm = {}
         if not self.path.is_file():
-            return []
+            return
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             log.warning("playlist file unreadable: %s", self.path)
             self._park_unreadable()
-            return []
+            return
         if not isinstance(raw, dict) or not isinstance(raw.get("playlists"), list):
             log.warning("playlist file has an unexpected shape: %s", self.path)
             self._park_unreadable()
-            return []
+            return
         playlists: list[dict] = []
         for item in raw["playlists"]:
             parsed = _parse_playlist(item)
             if parsed is not None:
                 playlists.append(parsed)
-        return playlists
+        self._playlists = playlists
+        self._bpm = _bpm_table(raw.get("bpm"), _track_ids(playlists))
 
     def _park_unreadable(self) -> None:
         backup = self.path.with_name(self.path.name + ".bak")
@@ -177,7 +208,8 @@ class PlaylistStore:
             log.warning("could not move unreadable playlist file aside: %s", self.path)
 
     def _save(self) -> None:
-        payload = {"playlists": [_public(item) for item in self._playlists]}
+        self._bpm = _bpm_table(self._bpm, _track_ids(self._playlists))
+        payload = {"playlists": [_public(item) for item in self._playlists], "bpm": self._bpm}
         text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -206,6 +238,36 @@ def _parse_playlist(item: object) -> dict | None:
             if track is not None:
                 tracks.append(track.as_dict())
     return {"id": playlist_id, "name": name, "tracks": tracks}
+
+
+def _track_ids(playlists: list[dict]) -> set[str]:
+    return {track["id"] for playlist in playlists for track in playlist["tracks"]}
+
+
+def _rounded_bpm(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(number) or number < BPM_MIN or number > BPM_MAX:
+        return None
+    return round(number, 2)
+
+
+def _bpm_table(raw: object, referenced: set[str]) -> dict[str, float]:
+    if not isinstance(raw, dict):
+        return {}
+    table: dict[str, float] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or key not in referenced or not is_video_id(key):
+            continue
+        bpm = _rounded_bpm(value)
+        if bpm is None:
+            continue
+        table[key] = bpm
+    return table
 
 
 def _public(playlist: dict) -> dict:

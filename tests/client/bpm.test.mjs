@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createActions, freshState } from "../../djtube/static/actions.js";
+import { playlistMetaText } from "../../djtube/static/playlists.js";
 import {
   BPM_MAX_BYTES,
   BPM_MAX_TRACK_SECONDS,
@@ -611,4 +612,625 @@ test("decode prefers a one-channel offline context at 22050", async () => {
     if (previousLive === undefined) delete globalThis.AudioContext;
     else globalThis.AudioContext = previousLive;
   }
+});
+
+function listedTrack(state, track) {
+  const playlist = { id: "a".repeat(32), name: "夜", tracks: [{ ...track }] };
+  state.playlists = [playlist];
+  state.playlistId = playlist.id;
+  return playlist;
+}
+
+function flush() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+const LISTED = { id: "abcdefghijk", title: "曲", channel: "チャンネル", duration: 225 };
+
+test("a successful estimate of a listed track calls saveBpm once", async () => {
+  const samples = clickTrack({ bpm: 120, lead: 0.35, seconds: 8 });
+  const fetchCalls = [];
+  const saves = [];
+  let release = () => {};
+  const { state, actions } = harness({
+    async fetch(url) {
+      fetchCalls.push(url);
+      return { ok: true, arrayBuffer: async () => new Uint8Array([1]).buffer };
+    },
+    async decodeAudio() {
+      return { samples, sampleRate: 44100 };
+    },
+    saveBpm(id, bpm) {
+      saves.push({ id, bpm });
+      return new Promise((resolve) => {
+        release = () => resolve({ id, bpm });
+      });
+    },
+  });
+  listedTrack(state, LISTED);
+  await actions.loadTrack("A", LISTED);
+  state.decks.A.status = "preparing";
+  await actions.onDeckReady("A");
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(saves.length, 1);
+  assert.equal(saves[0].id, LISTED.id);
+  assert.equal(saves[0].bpm, Math.round(saves[0].bpm * 100) / 100);
+  assert.ok(Math.abs(saves[0].bpm - 120) <= 0.5);
+  assert.equal(state.playlistBusy, false);
+  release();
+  await flush();
+  assert.equal(state.trackBpm[LISTED.id], saves[0].bpm);
+
+  state.decks.A.status = "preparing";
+  await actions.onDeckReady("A");
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(saves.length, 1);
+
+  await actions.loadTrack("A", LISTED);
+  state.decks.A.status = "preparing";
+  await actions.onDeckReady("A");
+  assert.equal(fetchCalls.length, 2);
+  assert.equal(saves.length, 1);
+});
+
+test("an unlisted track, a failed estimate, a stale result, and an abort do not call saveBpm", async () => {
+  const samples = clickTrack({ bpm: 120, lead: 0.2, seconds: 8 });
+  const saves = [];
+  const { state, actions } = harness({
+    async fetch() {
+      return { ok: true, arrayBuffer: async () => new Uint8Array([1]).buffer };
+    },
+    async decodeAudio() {
+      return { samples, sampleRate: 44100 };
+    },
+    saveBpm(id, bpm) {
+      saves.push({ id, bpm });
+      return { id, bpm };
+    },
+  });
+
+  await actions.loadTrack("A", LISTED);
+  state.decks.A.status = "preparing";
+  await actions.onDeckReady("A");
+  assert.ok(state.decks.A.bpm > 0);
+  assert.equal(saves.length, 0);
+
+  listedTrack(state, LISTED);
+  const failed = harness({
+    async fetch() {
+      throw new Error("audio");
+    },
+    saveBpm(id, bpm) {
+      saves.push({ id, bpm });
+      return { id, bpm };
+    },
+  });
+  listedTrack(failed.state, LISTED);
+  await failed.actions.loadTrack("A", LISTED);
+  failed.state.decks.A.status = "preparing";
+  await failed.actions.onDeckReady("A");
+  assert.equal(failed.state.decks.A.bpm, null);
+  assert.equal(saves.length, 0);
+
+  const { jobs, fetchAudio } = deferredJobs();
+  let decoded = null;
+  const stale = harness({
+    fetchAudio,
+    async decodeAudio() {
+      decoded = { samples, sampleRate: 44100 };
+      return new Promise((resolve) => {
+        decoded.resolve = () => resolve(decoded);
+      });
+    },
+    saveBpm(id, bpm) {
+      saves.push({ id, bpm });
+      return { id, bpm };
+    },
+  });
+  listedTrack(stale.state, LISTED);
+  await stale.actions.loadTrack("A", LISTED);
+  const first = stale.actions.onDeckReady("A");
+  await flush();
+  assert.equal(jobs.length, 1);
+  jobs[0].finish(new Uint8Array([1]).buffer);
+  await flush();
+  assert.equal(typeof decoded.resolve, "function");
+  await stale.actions.loadTrack("A", { id: "zzzzzzzzzzz", title: "次" });
+  decoded.resolve();
+  await first;
+  assert.equal(stale.state.decks.A.bpm, null);
+  assert.equal(saves.length, 0);
+
+  const abortedJobs = deferredJobs();
+  const aborted = harness({
+    fetchAudio: abortedJobs.fetchAudio,
+    saveBpm(id, bpm) {
+      saves.push({ id, bpm });
+      return { id, bpm };
+    },
+  });
+  listedTrack(aborted.state, LISTED);
+  await aborted.actions.loadTrack("A", LISTED);
+  const pending = aborted.actions.onDeckReady("A");
+  await flush();
+  assert.equal(abortedJobs.jobs.length, 1);
+  await aborted.actions.loadTrack("A", { id: "zzzzzzzzzzz", title: "次" });
+  await pending;
+  assert.equal(saves.length, 0);
+  assert.equal(aborted.state.decks.A.bpm, null);
+});
+
+test("the same listed track on both decks is saved once", async () => {
+  const samples = clickTrack({ bpm: 128, lead: 0.1, seconds: 8 });
+  const saves = [];
+  let release = () => {};
+  const { state, actions } = harness({
+    async fetch() {
+      return { ok: true, arrayBuffer: async () => new Uint8Array([1]).buffer };
+    },
+    async decodeAudio() {
+      return { samples, sampleRate: 44100 };
+    },
+    saveBpm(id, bpm) {
+      saves.push({ id, bpm });
+      return new Promise((resolve) => {
+        release = () => resolve({ id, bpm });
+      });
+    },
+  });
+  listedTrack(state, LISTED);
+  await actions.loadTrack("A", LISTED);
+  await actions.loadTrack("B", LISTED);
+  state.decks.A.status = "preparing";
+  state.decks.B.status = "preparing";
+  await Promise.all([actions.onDeckReady("A"), actions.onDeckReady("B")]);
+  assert.equal(saves.length, 1);
+  assert.equal(saves[0].id, LISTED.id);
+  assert.equal(state.decks.A.syncing, false);
+  assert.equal(state.decks.B.syncing, false);
+  release();
+  await flush();
+  assert.equal(saves.length, 1);
+  assert.equal(state.trackBpm[LISTED.id], saves[0].bpm);
+});
+
+test("a failed BPM save leaves the deck BPM and sync alone", async () => {
+  const samples = clickTrack({ bpm: 120, lead: 0.25, seconds: 8 });
+  const saves = [];
+  const { state, actions } = harness({
+    async fetch() {
+      return { ok: true, arrayBuffer: async () => new Uint8Array([1]).buffer };
+    },
+    async decodeAudio() {
+      return { samples, sampleRate: 44100 };
+    },
+    saveBpm(id, bpm) {
+      saves.push({ id, bpm });
+      state.decks.A.syncing = true;
+      return Promise.reject(new Error("save failed"));
+    },
+  });
+  listedTrack(state, LISTED);
+  state.playlistError = "既存";
+  await actions.loadTrack("A", LISTED);
+  state.decks.A.status = "preparing";
+  const bpmBeforeMeasure = state.decks.B.bpm;
+  await actions.onDeckReady("A");
+  await flush();
+  assert.equal(saves.length, 1);
+  assert.ok(Math.abs(state.decks.A.bpm - 120) <= 0.5);
+  assert.equal(typeof state.decks.A.beatOffset, "number");
+  assert.equal(state.decks.A.syncing, true);
+  assert.equal(state.decks.A.bpmMeasuring, false);
+  assert.equal(state.playlistError, "既存");
+  assert.equal(state.playlistBusy, false);
+  assert.equal(state.decks.B.bpm, bpmBeforeMeasure);
+  assert.equal(state.trackBpm[LISTED.id], undefined);
+});
+
+test("adding a track sends a BPM a deck already has", async () => {
+  const saves = [];
+  const playlistId = "a".repeat(32);
+  const { state, actions } = harness({
+    saveBpm(id, bpm) {
+      saves.push({ id, bpm });
+      return Promise.resolve({ id, bpm });
+    },
+    async addPlaylistTrack(_id, track) {
+      const fields = { ...track };
+      delete fields.index;
+      return { id: playlistId, name: "夜", tracks: [fields] };
+    },
+  });
+  state.playlists = [{ id: playlistId, name: "夜", tracks: [] }];
+  state.playlistId = playlistId;
+  state.decks.A.id = LISTED.id;
+  state.decks.A.bpm = 128.041;
+  state.decks.A.beatOffset = 0.2;
+  state.decks.B.id = LISTED.id;
+  state.decks.B.bpm = 140;
+  await actions.addTrackToPlaylist(playlistId, LISTED);
+  await flush();
+  assert.equal(saves.length, 1);
+  assert.deepEqual(saves[0], { id: LISTED.id, bpm: Math.round(128.041 * 100) / 100 });
+  assert.equal(state.playlistError, "");
+  assert.equal(state.playlistBusy, false);
+});
+
+const OTHER = { id: "zzzzzzzzzzz", title: "昼", channel: "人", duration: 80 };
+const NIGHT = "a".repeat(32);
+const MORNING = "b".repeat(32);
+
+function playlistOf(id, name, tracks) {
+  return { id, name, tracks: tracks.map((track) => ({ ...track })) };
+}
+
+test("removing a track drops its BPM only after it leaves every playlist", async () => {
+  const { state, actions } = harness({
+    async removePlaylistTrack(id, index) {
+      const playlist = state.playlists.find((item) => item.id === id);
+      const tracks = playlist.tracks.slice();
+      tracks.splice(index, 1);
+      return { id: playlist.id, name: playlist.name, tracks };
+    },
+  });
+  state.playlists = [
+    playlistOf(NIGHT, "夜", [LISTED]),
+    playlistOf(MORNING, "朝", [LISTED, OTHER]),
+  ];
+  state.playlistId = NIGHT;
+  state.playlistIndex = 0;
+  state.trackBpm = { [LISTED.id]: 128.04, [OTHER.id]: 90 };
+  await actions.removePlaylistTrack();
+  assert.equal(state.trackBpm[LISTED.id], 128.04);
+  assert.equal(state.trackBpm[OTHER.id], 90);
+  actions.selectPlaylist(MORNING);
+  state.playlistIndex = 0;
+  await actions.removePlaylistTrack();
+  assert.equal(state.trackBpm[LISTED.id], undefined);
+  assert.equal(state.trackBpm[OTHER.id], 90);
+});
+
+test("deleting a playlist drops BPM for tracks that were only there", async () => {
+  const { state, actions } = harness({
+    async deletePlaylist() {},
+  });
+  state.playlists = [playlistOf(NIGHT, "夜", [LISTED]), playlistOf(MORNING, "朝", [OTHER])];
+  state.playlistId = NIGHT;
+  state.trackBpm = { [LISTED.id]: 128.04, [OTHER.id]: 90 };
+  await actions.deletePlaylist();
+  assert.equal(state.playlists.length, 1);
+  assert.equal(state.playlists[0].id, MORNING);
+  assert.equal(state.trackBpm[LISTED.id], undefined);
+  assert.equal(state.trackBpm[OTHER.id], 90);
+});
+
+test("loading playlists drops BPM for a track the server no longer lists", async () => {
+  const { state, actions } = harness({
+    async fetchPlaylists() {
+      return {
+        playlists: [playlistOf(MORNING, "朝", [OTHER])],
+        bpm: { [LISTED.id]: 128.04, [OTHER.id]: 90.5 },
+      };
+    },
+  });
+  state.playlists = [playlistOf(NIGHT, "夜", [LISTED, OTHER])];
+  state.playlistId = NIGHT;
+  state.trackBpm = { [LISTED.id]: 77 };
+  await actions.loadPlaylists();
+  assert.equal(state.trackBpm[LISTED.id], undefined);
+  assert.equal(state.trackBpm[OTHER.id], 90.5);
+});
+
+test("loading playlists reads the server BPM table", async () => {
+  const { state, actions } = harness({
+    async fetchPlaylists() {
+      return {
+        playlists: [playlistOf(NIGHT, "夜", [LISTED])],
+        bpm: { [LISTED.id]: 128.04 },
+      };
+    },
+  });
+  state.trackBpm = { leftover: 1 };
+  await actions.loadPlaylists();
+  assert.equal(state.trackBpm[LISTED.id], 128.04);
+  assert.equal(state.trackBpm.leftover, undefined);
+});
+
+test("a BPM response is dropped when the track is no longer in a playlist", async () => {
+  const samples = clickTrack({ bpm: 120, lead: 0.2, seconds: 8 });
+  const saves = [];
+  const { state, actions } = harness({
+    async fetch() {
+      return { ok: true, arrayBuffer: async () => new Uint8Array([1]).buffer };
+    },
+    async decodeAudio() {
+      return { samples, sampleRate: 44100 };
+    },
+    saveBpm(id, bpm) {
+      saves.push({ id, bpm });
+      state.playlists[0].tracks = [];
+      return Promise.resolve({ id, bpm });
+    },
+  });
+  listedTrack(state, LISTED);
+  await actions.loadTrack("A", LISTED);
+  state.decks.A.status = "preparing";
+  await actions.onDeckReady("A");
+  await flush();
+  assert.equal(saves.length, 1);
+  assert.equal(state.trackBpm[LISTED.id], undefined);
+  assert.ok(state.decks.A.bpm > 0);
+});
+
+test("a rejected BPM save can be sent again", async () => {
+  const samples = clickTrack({ bpm: 120, lead: 0.2, seconds: 8 });
+  const saves = [];
+  let rejectSave = true;
+  const { state, actions } = harness({
+    async fetch() {
+      return { ok: true, arrayBuffer: async () => new Uint8Array([1]).buffer };
+    },
+    async decodeAudio() {
+      return { samples, sampleRate: 44100 };
+    },
+    saveBpm(id, bpm) {
+      saves.push({ id, bpm });
+      if (rejectSave) return Promise.reject(new Error("save failed"));
+      return Promise.resolve({ id, bpm });
+    },
+  });
+  listedTrack(state, LISTED);
+  await actions.loadTrack("A", LISTED);
+  state.decks.A.status = "preparing";
+  await actions.onDeckReady("A");
+  await flush();
+  assert.equal(saves.length, 1);
+  assert.equal(state.trackBpm[LISTED.id], undefined);
+  rejectSave = false;
+  await actions.loadTrack("A", LISTED);
+  state.decks.A.status = "preparing";
+  await actions.onDeckReady("A");
+  await flush();
+  assert.equal(saves.length, 2);
+  assert.equal(state.trackBpm[LISTED.id], saves[1].bpm);
+});
+
+test("a BPM save that throws can be sent again", async () => {
+  const samples = clickTrack({ bpm: 120, lead: 0.2, seconds: 8 });
+  const saves = [];
+  let throwSave = true;
+  const { state, actions } = harness({
+    async fetch() {
+      return { ok: true, arrayBuffer: async () => new Uint8Array([1]).buffer };
+    },
+    async decodeAudio() {
+      return { samples, sampleRate: 44100 };
+    },
+    saveBpm(id, bpm) {
+      saves.push({ id, bpm });
+      if (throwSave) throw new Error("sync");
+      return { id, bpm };
+    },
+  });
+  listedTrack(state, LISTED);
+  await actions.loadTrack("A", LISTED);
+  state.decks.A.status = "preparing";
+  await actions.onDeckReady("A");
+  await flush();
+  assert.equal(saves.length, 1);
+  assert.equal(state.trackBpm[LISTED.id], undefined);
+  throwSave = false;
+  await actions.loadTrack("A", LISTED);
+  state.decks.A.status = "preparing";
+  await actions.onDeckReady("A");
+  await flush();
+  assert.equal(saves.length, 2);
+  assert.equal(state.trackBpm[LISTED.id], saves[1].bpm);
+});
+
+test("the latest BPM while a save is in flight is the one sent next", async () => {
+  const samples = clickTrack({ bpm: 120, lead: 0.2, seconds: 8 });
+  const saves = [];
+  let release = () => {};
+  const { state, actions } = harness({
+    async fetch() {
+      return { ok: true, arrayBuffer: async () => new Uint8Array([1]).buffer };
+    },
+    async decodeAudio() {
+      return { samples, sampleRate: 44100 };
+    },
+    saveBpm(id, bpm) {
+      saves.push({ id, bpm });
+      if (saves.length === 1) {
+        return new Promise((resolve) => {
+          release = () => resolve({ id, bpm });
+        });
+      }
+      return Promise.resolve({ id, bpm });
+    },
+    async addPlaylistTrack(_id, payload) {
+      const fields = { ...payload };
+      delete fields.index;
+      const playlist = state.playlists[0];
+      return { ...playlist, tracks: [...playlist.tracks, fields] };
+    },
+  });
+  listedTrack(state, LISTED);
+  await actions.loadTrack("A", LISTED);
+  state.decks.A.status = "preparing";
+  await actions.onDeckReady("A");
+  assert.equal(saves.length, 1);
+  state.decks.A.bpm = 130;
+  await actions.addDeckTrack("A");
+  state.decks.A.bpm = 140;
+  await actions.addDeckTrack("A");
+  assert.equal(saves.length, 1);
+  assert.ok(!saves.some((item) => item.bpm === 130 || item.bpm === 140));
+  release();
+  await flush();
+  assert.equal(saves.length, 2);
+  assert.equal(saves[1].bpm, 140);
+  assert.equal(state.trackBpm[LISTED.id], 140);
+});
+
+test("a BPM from before the track left is sent again when the track is added back", async () => {
+  const saves = [];
+  let release = () => {};
+  const { state, actions } = harness({
+    saveBpm(id, bpm) {
+      saves.push({ id, bpm });
+      if (saves.length === 1) {
+        return new Promise((resolve) => {
+          release = () => resolve({ id, bpm: 128 });
+        });
+      }
+      return Promise.resolve({ id, bpm });
+    },
+    async addPlaylistTrack(_id, payload) {
+      const fields = { ...payload };
+      delete fields.index;
+      const playlist = state.playlists.find((item) => item.id === NIGHT);
+      return { id: NIGHT, name: playlist.name, tracks: [...playlist.tracks, fields] };
+    },
+    async removePlaylistTrack(_id, index) {
+      const playlist = state.playlists.find((item) => item.id === NIGHT);
+      const tracks = playlist.tracks.slice();
+      tracks.splice(index, 1);
+      return { id: NIGHT, name: playlist.name, tracks };
+    },
+  });
+  state.playlists = [playlistOf(NIGHT, "夜", [])];
+  state.playlistId = NIGHT;
+  state.decks.A.id = LISTED.id;
+  state.decks.A.bpm = 128;
+  state.decks.A.beatOffset = 0.1;
+  await actions.addDeckTrack("A");
+  assert.deepEqual(saves, [{ id: LISTED.id, bpm: 128 }]);
+  await actions.removePlaylistTrack();
+  await actions.addDeckTrack("A");
+  assert.equal(saves.length, 1);
+  assert.equal(state.trackBpm[LISTED.id], undefined);
+  release();
+  await flush();
+  assert.deepEqual(saves, [
+    { id: LISTED.id, bpm: 128 },
+    { id: LISTED.id, bpm: 128 },
+  ]);
+  assert.equal(state.trackBpm[LISTED.id], 128);
+});
+
+function playlistServer() {
+  const playlists = { [NIGHT]: [], [MORNING]: [] };
+  const bpm = {};
+  const has = (id) => Object.values(playlists).some((tracks) => tracks.some((track) => track.id === id));
+  const prune = () => {
+    for (const id of Object.keys(bpm)) if (!has(id)) delete bpm[id];
+  };
+  const pub = (id) => ({
+    id,
+    name: id === NIGHT ? "夜" : "朝",
+    tracks: playlists[id].map((track) => ({ ...track })),
+  });
+  return { playlists, bpm, has, prune, pub };
+}
+
+async function settle() {
+  for (let i = 0; i < 6; i++) await flush();
+}
+
+test("a retried BPM does not stay pending and overwrite a later value", async () => {
+  const stored = playlistServer();
+  const pendingSaves = [];
+  const { state, actions } = harness({
+    saveBpm(id, bpm) {
+      if (!stored.has(id)) return Promise.reject(new Error("404"));
+      stored.bpm[id] = Math.round(bpm * 100) / 100;
+      const reply = Promise.resolve({ id, bpm: stored.bpm[id] });
+      return new Promise((resolve, reject) => pendingSaves.push(() => reply.then(resolve, reject)));
+    },
+    async addPlaylistTrack(pid, track) {
+      const fields = { ...track };
+      delete fields.index;
+      stored.playlists[pid].push(fields);
+      stored.prune();
+      return stored.pub(pid);
+    },
+  });
+  state.playlists = [stored.pub(NIGHT), stored.pub(MORNING)];
+  state.playlistId = NIGHT;
+  state.decks.A.id = LISTED.id;
+  state.decks.A.bpm = 128;
+  await actions.addTrackToPlaylist(NIGHT, { id: LISTED.id, title: "曲" });
+  state.decks.A.bpm = 130;
+  await actions.addTrackToPlaylist(MORNING, { id: LISTED.id, title: "曲" });
+  pendingSaves.shift()();
+  await settle();
+  pendingSaves.shift()();
+  await settle();
+  state.decks.A.bpm = 140;
+  await actions.addTrackToPlaylist(MORNING, { id: LISTED.id, title: "曲" });
+  pendingSaves.shift()();
+  await settle();
+  while (pendingSaves.length) {
+    pendingSaves.shift()();
+    await settle();
+  }
+  assert.deepEqual(stored.bpm, { [LISTED.id]: 140 });
+});
+
+test("a track loaded from the server ignores a BPM response from before it left", async () => {
+  const stored = playlistServer();
+  stored.playlists[NIGHT].push({ id: LISTED.id, title: "曲" });
+  const saves = [];
+  const held = [];
+  const samples = clickTrack({ bpm: 120, lead: 0.3, seconds: 8 });
+  const { state, actions } = harness({
+    async fetch() {
+      return { ok: true, arrayBuffer: async () => new Uint8Array([1]).buffer };
+    },
+    async decodeAudio() {
+      return { samples, sampleRate: 44100 };
+    },
+    async fetchPlaylists() {
+      return { playlists: [stored.pub(NIGHT), stored.pub(MORNING)], bpm: { ...stored.bpm } };
+    },
+    saveBpm(id, bpm) {
+      saves.push(bpm);
+      if (stored.has(id)) stored.bpm[id] = bpm;
+      return new Promise((resolve) => held.push(() => resolve({ id, bpm })));
+    },
+    async addPlaylistTrack(pid, track) {
+      const fields = { ...track };
+      delete fields.index;
+      stored.playlists[pid].push(fields);
+      stored.prune();
+      return stored.pub(pid);
+    },
+    async removePlaylistTrack(pid, index) {
+      stored.playlists[pid].splice(index, 1);
+      stored.prune();
+      return stored.pub(pid);
+    },
+  });
+  await actions.loadPlaylists();
+  await actions.loadTrack("A", { id: LISTED.id, title: "曲" });
+  state.decks.A.status = "preparing";
+  await actions.onDeckReady("A");
+  assert.equal(saves.length, 1);
+  state.playlistId = NIGHT;
+  state.playlistIndex = 0;
+  await actions.removePlaylistTrack();
+  await actions.loadTrack("A", { id: OTHER.id, title: "別" });
+  await actions.addTrackToPlaylist(NIGHT, { id: LISTED.id, title: "曲" });
+  held.shift()();
+  await settle();
+  assert.deepEqual(state.trackBpm, stored.bpm);
+});
+
+test("playlist meta shows the track BPM to one decimal", () => {
+  assert.equal(playlistMetaText({ channel: "チャンネル", duration: 225 }, 128.04), "チャンネル · 3:45 · 128.0 BPM");
+  assert.equal(playlistMetaText({ channel: "チャンネル", duration: 225, rate: 1.5 }, 128.04), "チャンネル · 3:45 · 128.0 BPM");
+  assert.equal(playlistMetaText({ channel: "チャンネル", duration: 225 }, null), "チャンネル · 3:45");
+  assert.equal(playlistMetaText({ channel: "", duration: 225 }, 99.96), "3:45 · 100.0 BPM");
 });

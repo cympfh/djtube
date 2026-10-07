@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
@@ -53,6 +54,11 @@ def render_index() -> str:
 
 class PlaylistNameBody(BaseModel):
     name: str = ""
+
+
+class BpmBody(BaseModel):
+    id: Any = None
+    bpm: Any = None
 
 
 class MoveTrackBody(BaseModel):
@@ -157,7 +163,15 @@ def create_app(
 
     @app.get("/api/playlists")
     def list_playlists() -> dict[str, object]:
-        return {"playlists": store.list_playlists()}
+        return store.snapshot()
+
+    @app.post("/api/bpm")
+    def set_track_bpm(body: BpmBody) -> dict[str, object]:
+        try:
+            bpm = store.set_bpm(body.id, body.bpm)
+        except PlaylistError as exc:
+            raise_playlist(exc)
+        return {"id": body.id, "bpm": bpm}
 
     @app.post("/api/playlists")
     def create_playlist(body: PlaylistNameBody) -> dict[str, object]:

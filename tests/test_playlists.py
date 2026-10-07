@@ -49,7 +49,7 @@ def test_playlist_crud_persists_for_a_new_process(tmp_path):
 
     removed = again.delete(f"/api/playlists/{playlist['id']}")
     assert removed.status_code == 204
-    assert again.get("/api/playlists").json() == {"playlists": []}
+    assert again.get("/api/playlists").json() == {"playlists": [], "bpm": {}}
     reloaded = PlaylistStore(store.path)
     assert reloaded.list_playlists() == []
     assert reloaded.durable is True
@@ -140,3 +140,253 @@ def test_saved_file_drops_invalid_entries(tmp_path):
     assert len(listed) == 1
     assert listed[0]["name"] == "残る"
     assert listed[0]["tracks"] == [TRACK]
+
+
+def _playlist_with(client, *tracks, name="夜"):
+    playlist_id = client.post("/api/playlists", json={"name": name}).json()["id"]
+    for track in tracks:
+        added = client.post(f"/api/playlists/{playlist_id}/tracks", json=track)
+        assert added.status_code == 200
+    return playlist_id
+
+
+def test_saved_bpm_is_rounded_and_survives_restart(tmp_path):
+    client, store = _client(tmp_path)
+    playlist_id = _playlist_with(client, TRACK)
+    saved = client.post("/api/bpm", json={"id": VIDEO_ID, "bpm": 128.041})
+    assert saved.status_code == 200
+    assert saved.json() == {"id": VIDEO_ID, "bpm": 128.04}
+    assert json.loads(store.path.read_text(encoding="utf-8"))["bpm"] == {VIDEO_ID: 128.04}
+
+    again = TestClient(create_app(PlaylistStore(store.path)))
+    listed = again.get("/api/playlists").json()
+    assert listed["bpm"] == {VIDEO_ID: 128.04}
+    assert listed["playlists"][0]["tracks"] == [TRACK]
+    renamed = again.patch(f"/api/playlists/{playlist_id}", json={"name": "朝"})
+    assert renamed.status_code == 200
+    assert "bpm" not in renamed.json()
+    assert again.get("/api/playlists").json()["bpm"] == {VIDEO_ID: 128.04}
+
+
+def test_unknown_track_bpm_does_not_change_the_file(tmp_path):
+    client, store = _client(tmp_path)
+    _playlist_with(client, {**TRACK, "id": OTHER_ID, "title": "昼"})
+    before = store.path.read_bytes()
+    inode = store.path.stat().st_ino
+    missing = client.post("/api/bpm", json={"id": VIDEO_ID, "bpm": 128})
+    assert missing.status_code == 404
+    assert store.path.read_bytes() == before
+    assert store.path.stat().st_ino == inode
+    assert client.get("/api/playlists").json()["bpm"] == {}
+
+    absent = tmp_path / "empty.json"
+    empty = TestClient(create_app(PlaylistStore(absent)))
+    assert empty.post("/api/bpm", json={"id": VIDEO_ID, "bpm": 128}).status_code == 404
+    assert not absent.exists()
+
+
+def test_invalid_bpm_is_rejected(tmp_path):
+    client, store = _client(tmp_path)
+    _playlist_with(client, TRACK)
+    before = store.path.read_bytes()
+    inode = store.path.stat().st_ino
+    # True is 1 and False is 0. Both sit outside 20–500, and a bool cannot be
+    # subclassed, so this 400 is also what the range check alone would return.
+    bodies = [
+        {"id": VIDEO_ID, "bpm": True},
+        {"id": VIDEO_ID, "bpm": "128"},
+        {"id": VIDEO_ID, "bpm": 19.99},
+        {"id": VIDEO_ID, "bpm": 500.01},
+        {"id": "watch?v=abcdefghijk", "bpm": 128},
+        {"id": VIDEO_ID},
+    ]
+    for body in bodies:
+        response = client.post("/api/bpm", json=body)
+        assert response.status_code == 400, body
+    assert client.post("/api/bpm", json=["not-an-object"]).status_code == 422
+    for literal in ("NaN", "Infinity", "-Infinity"):
+        response = client.post(
+            "/api/bpm",
+            content=f'{{"id":"{VIDEO_ID}","bpm":{literal}}}'.encode(),
+            headers={"content-type": "application/json"},
+        )
+        assert response.status_code == 400, literal
+    assert store.path.read_bytes() == before
+    assert store.path.stat().st_ino == inode
+    assert client.get("/api/playlists").json()["bpm"] == {}
+
+
+def test_bpm_bounds_include_20_and_500(tmp_path):
+    client, store = _client(tmp_path)
+    _playlist_with(client, TRACK)
+    for bpm in (20, 500):
+        saved = client.post("/api/bpm", json={"id": VIDEO_ID, "bpm": bpm})
+        assert saved.status_code == 200
+        assert saved.json() == {"id": VIDEO_ID, "bpm": float(bpm)}
+        assert json.loads(store.path.read_text(encoding="utf-8"))["bpm"] == {VIDEO_ID: float(bpm)}
+
+
+def test_huge_bpm_integer_is_rejected_and_dropped_on_load(tmp_path):
+    client, store = _client(tmp_path)
+    other = {**TRACK, "id": OTHER_ID, "title": "昼"}
+    _playlist_with(client, TRACK, other)
+    before = store.path.read_bytes()
+    inode = store.path.stat().st_ino
+    huge = int("9" * 400)
+    rejected = client.post("/api/bpm", json={"id": VIDEO_ID, "bpm": huge})
+    assert rejected.status_code == 400
+    assert store.path.read_bytes() == before
+    assert store.path.stat().st_ino == inode
+
+    raw = json.loads(store.path.read_text(encoding="utf-8"))
+    raw["bpm"] = {VIDEO_ID: 128.04, OTHER_ID: huge}
+    store.path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+    loaded = PlaylistStore(store.path)
+    snapshot = loaded.snapshot()
+    assert snapshot["bpm"] == {VIDEO_ID: 128.04}
+    listed = [track["id"] for playlist in snapshot["playlists"] for track in playlist["tracks"]]
+    assert listed == [VIDEO_ID, OTHER_ID]
+
+
+def test_bpm_plain_text_is_rejected(tmp_path):
+    client, store = _client(tmp_path)
+    _playlist_with(client, TRACK)
+    before = store.path.read_bytes()
+    inode = store.path.stat().st_ino
+    plain = client.post(
+        "/api/bpm",
+        content=f'{{"id":"{VIDEO_ID}","bpm":128}}'.encode(),
+        headers={"content-type": "text/plain"},
+    )
+    other = client.post(
+        "/api/playlists",
+        content=b'{"name":"night"}',
+        headers={"content-type": "text/plain"},
+    )
+    assert plain.status_code == other.status_code
+    assert plain.status_code in (415, 422)
+    assert store.path.read_bytes() == before
+    assert store.path.stat().st_ino == inode
+
+
+def test_same_rounded_bpm_does_not_rewrite(tmp_path):
+    client, store = _client(tmp_path)
+    _playlist_with(client, TRACK)
+    first = client.post("/api/bpm", json={"id": VIDEO_ID, "bpm": 128.041})
+    assert first.status_code == 200
+    assert first.json()["bpm"] == 128.04
+    before = store.path.read_bytes()
+    inode = store.path.stat().st_ino
+    for bpm in (128.04, 128.044, 128.041):
+        again = client.post("/api/bpm", json={"id": VIDEO_ID, "bpm": bpm})
+        assert again.status_code == 200
+        assert again.json() == {"id": VIDEO_ID, "bpm": 128.04}
+    assert store.path.read_bytes() == before
+    assert store.path.stat().st_ino == inode
+
+    changed = client.post("/api/bpm", json={"id": VIDEO_ID, "bpm": 130})
+    assert changed.status_code == 200
+    assert changed.json()["bpm"] == 130
+    assert store.path.stat().st_ino != inode
+    assert json.loads(store.path.read_text(encoding="utf-8"))["bpm"] == {VIDEO_ID: 130}
+
+
+def test_one_bpm_row_drops_when_the_track_is_gone(tmp_path):
+    client, store = _client(tmp_path)
+    first = _playlist_with(client, TRACK, TRACK, name="夜")
+    second = _playlist_with(client, TRACK, name="朝")
+    saved = client.post("/api/bpm", json={"id": VIDEO_ID, "bpm": 128.041})
+    assert saved.json()["bpm"] == 128.04
+    raw = json.loads(store.path.read_text(encoding="utf-8"))
+    assert raw["bpm"] == {VIDEO_ID: 128.04}
+    assert sum(track["id"] == VIDEO_ID for playlist in raw["playlists"] for track in playlist["tracks"]) == 3
+
+    assert client.delete(f"/api/playlists/{first}/tracks/0").status_code == 200
+    assert json.loads(store.path.read_text(encoding="utf-8"))["bpm"] == {VIDEO_ID: 128.04}
+    assert client.delete(f"/api/playlists/{first}/tracks/0").status_code == 200
+    assert json.loads(store.path.read_text(encoding="utf-8"))["bpm"] == {VIDEO_ID: 128.04}
+
+    assert client.delete(f"/api/playlists/{second}").status_code == 204
+    assert json.loads(store.path.read_text(encoding="utf-8"))["bpm"] == {}
+
+    assert client.post(f"/api/playlists/{first}/tracks", json=TRACK).status_code == 200
+    assert client.post("/api/bpm", json={"id": VIDEO_ID, "bpm": 110.004}).json()["bpm"] == 110.0
+    removed = client.delete(f"/api/playlists/{first}/tracks/0")
+    assert removed.status_code == 200
+    assert removed.json()["tracks"] == []
+    assert "bpm" not in removed.json()
+    assert json.loads(store.path.read_text(encoding="utf-8"))["bpm"] == {}
+    listed = client.get("/api/playlists").json()
+    assert listed["playlists"][0]["id"] == first
+    assert listed["bpm"] == {}
+
+
+def test_old_playlist_file_and_malformed_bpm_rows(tmp_path):
+    path = tmp_path / "playlists.json"
+    playlist_id = "a" * 32
+    path.write_text(
+        json.dumps({"playlists": [{"id": playlist_id, "name": "残る", "tracks": [TRACK]}]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    store = PlaylistStore(path)
+    assert store.snapshot() == {
+        "playlists": [{"id": playlist_id, "name": "残る", "tracks": [TRACK]}],
+        "bpm": {},
+    }
+
+    path.write_text(
+        json.dumps(
+            {
+                "playlists": [
+                    {
+                        "id": playlist_id,
+                        "name": "残る",
+                        "tracks": [TRACK, {**TRACK, "id": OTHER_ID, "title": "昼"}],
+                    }
+                ],
+                "bpm": {
+                    VIDEO_ID: 128.041,
+                    OTHER_ID: True,
+                    "short": 120,
+                    "ccccccccccc": 140,
+                    "ddddddddddd": "128",
+                    "eeeeeeeeeee": float("nan"),
+                    "fffffffffff": float("inf"),
+                    "ggggggggggg": 10,
+                    VIDEO_ID + "x": 128,
+                },
+            },
+            ensure_ascii=False,
+            allow_nan=True,
+        ),
+        encoding="utf-8",
+    )
+    loaded = PlaylistStore(path)
+    assert loaded.snapshot()["bpm"] == {VIDEO_ID: 128.04}
+    loaded.rename(playlist_id, "朝")
+    assert json.loads(path.read_text(encoding="utf-8"))["bpm"] == {VIDEO_ID: 128.04}
+
+
+def test_add_track_payload_bpm_is_ignored(tmp_path):
+    client, _store = _client(tmp_path)
+    playlist_id = client.post("/api/playlists", json={"name": "夜"}).json()["id"]
+    added = client.post(f"/api/playlists/{playlist_id}/tracks", json={**TRACK, "bpm": 140})
+    assert added.status_code == 200
+    assert added.json()["tracks"] == [TRACK]
+    assert "bpm" not in added.json()
+    assert client.get("/api/playlists").json()["bpm"] == {}
+
+
+def test_unwritable_bpm_stays_in_memory(tmp_path):
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("x", encoding="utf-8")
+    store = PlaylistStore(blocker / "playlists.json")
+    client = TestClient(create_app(store))
+    playlist_id = client.post("/api/playlists", json={"name": "メモリ"}).json()["id"]
+    assert client.post(f"/api/playlists/{playlist_id}/tracks", json=TRACK).status_code == 200
+    saved = client.post("/api/bpm", json={"id": VIDEO_ID, "bpm": 128.041})
+    assert saved.status_code == 200
+    assert saved.json() == {"id": VIDEO_ID, "bpm": 128.04}
+    assert store.durable is False
+    assert store.snapshot()["bpm"] == {VIDEO_ID: 128.04}
+    assert not (blocker / "playlists.json").exists()

@@ -1,3 +1,5 @@
+import { formatTime } from "./format.js";
+
 export function freshPlaylistState() {
   return {
     playlists: [],
@@ -6,7 +8,22 @@ export function freshPlaylistState() {
     playlistError: "",
     playlistNaming: "create",
     playlistBusy: false,
+    trackBpm: {},
   };
+}
+
+export function playlistHasTrack(playlists, id) {
+  if (!id || !Array.isArray(playlists)) return false;
+  return playlists.some(
+    (playlist) => Array.isArray(playlist?.tracks) && playlist.tracks.some((track) => track?.id === id),
+  );
+}
+
+/** Playlist row meta. BPM is the stored track value, one decimal, not tempo-adjusted. */
+export function playlistMetaText(track, bpm) {
+  const bits = [track?.channel, track?.duration ? formatTime(track.duration) : ""].filter(Boolean);
+  if (typeof bpm === "number" && Number.isFinite(bpm)) bits.push(`${bpm.toFixed(1)} BPM`);
+  return bits.join(" · ");
 }
 
 export function trackSnapshot(track) {
@@ -25,6 +42,10 @@ export function trackSnapshot(track) {
 
 export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }) {
   let revision = 0;
+  const bpmInflight = new Set();
+  const bpmPending = new Map();
+  const bpmGeneration = new Map();
+  let listedGeneration = new Set();
 
   function currentPlaylist() {
     return state.playlists.find((item) => item.id === state.playlistId) || null;
@@ -37,6 +58,7 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
     state.playlistId = playlist.id;
     const count = playlist.tracks?.length || 0;
     state.playlistIndex = count ? Math.min(Math.max(0, index), count - 1) : 0;
+    syncListed();
   }
 
   function forget(playlistId) {
@@ -45,6 +67,116 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
       state.playlistId = state.playlists[0]?.id || "";
       state.playlistIndex = 0;
     }
+    syncListed();
+  }
+
+  function listedIds() {
+    const ids = new Set();
+    for (const playlist of state.playlists) {
+      for (const track of playlist?.tracks || []) {
+        if (typeof track?.id === "string" && track.id) ids.add(track.id);
+      }
+    }
+    return ids;
+  }
+
+  function bpmMapFrom(raw) {
+    const ids = listedIds();
+    const next = {};
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return next;
+    for (const [id, value] of Object.entries(raw)) {
+      if (!ids.has(id) || typeof value !== "number" || !Number.isFinite(value)) continue;
+      next[id] = value;
+    }
+    return next;
+  }
+
+  function trackBpmMap() {
+    if (!state.trackBpm || typeof state.trackBpm !== "object" || Array.isArray(state.trackBpm)) {
+      state.trackBpm = {};
+    }
+    return state.trackBpm;
+  }
+
+  function syncListed() {
+    const ids = listedIds();
+    for (const id of listedGeneration) {
+      if (!ids.has(id)) bpmGeneration.set(id, (bpmGeneration.get(id) || 0) + 1);
+    }
+    listedGeneration = ids;
+  }
+
+  function retainTrackBpm() {
+    syncListed();
+    const map = trackBpmMap();
+    const ids = listedIds();
+    for (const id of Object.keys(map)) {
+      if (!ids.has(id)) delete map[id];
+    }
+  }
+
+  function roundBpm(bpm) {
+    const value = Number(bpm);
+    if (!Number.isFinite(value)) return null;
+    return Math.round(value * 100) / 100;
+  }
+
+  function publishTrackBpm(id, bpm) {
+    if (typeof deps.saveBpm !== "function") return;
+    if (!playlistHasTrack(state.playlists, id)) return;
+    const rounded = roundBpm(bpm);
+    if (rounded == null) return;
+    if (bpmInflight.has(id)) {
+      bpmPending.set(id, rounded);
+      return;
+    }
+    if (trackBpmMap()[id] === rounded) return;
+    sendTrackBpm(id, rounded);
+  }
+
+  function sendTrackBpm(id, rounded) {
+    if (!playlistHasTrack(state.playlists, id)) return;
+    if (trackBpmMap()[id] === rounded) return;
+    const generation = bpmGeneration.get(id) || 0;
+    bpmInflight.add(id);
+    let pending;
+    try {
+      pending = deps.saveBpm(id, rounded);
+    } catch {
+      bpmInflight.delete(id);
+      return;
+    }
+    Promise.resolve(pending)
+      .then((body) => {
+        if ((bpmGeneration.get(id) || 0) !== generation) return;
+        if (!playlistHasTrack(state.playlists, id)) return;
+        const reported = body && typeof body.bpm === "number" ? roundBpm(body.bpm) : null;
+        trackBpmMap()[id] = reported == null ? rounded : reported;
+        scheduleRender();
+      })
+      .catch(() => {})
+      .finally(() => {
+        bpmInflight.delete(id);
+        if (!bpmPending.has(id)) return;
+        const next = bpmPending.get(id);
+        bpmPending.delete(id);
+        publishTrackBpm(id, next);
+      });
+  }
+
+  function deckBpm(id) {
+    for (const name of ["A", "B"]) {
+      const deckState = state.decks?.[name];
+      if (
+        deckState?.id === id &&
+        typeof deckState.bpm === "number" &&
+        Number.isFinite(deckState.bpm) &&
+        deckState.bpm > 0
+      ) {
+        return deckState.bpm;
+      }
+    }
+    return null;
   }
 
   function fail(message) {
@@ -63,6 +195,8 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
         state.playlistId = state.playlists[0]?.id || "";
         state.playlistIndex = 0;
       }
+      syncListed();
+      state.trackBpm = bpmMapFrom(data?.bpm);
     } catch (err) {
       if (gen !== revision) return;
       const message = err instanceof Error ? err.message : "";
@@ -182,6 +316,7 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
       () => deps.deletePlaylist(playlist.id),
       () => {
         forget(playlist.id);
+        retainTrackBpm();
       },
     );
   }
@@ -229,6 +364,8 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
       () => deps.addPlaylistTrack(playlist.id, { ...snapshot, index }),
       (updated) => {
         adopt(updated, index);
+        const known = deckBpm(snapshot.id);
+        if (known != null) publishTrackBpm?.(snapshot.id, known);
       },
     );
   }
@@ -269,6 +406,7 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
       () => deps.removePlaylistTrack(playlist.id, index),
       (updated) => {
         adopt(updated, index);
+        retainTrackBpm();
       },
     );
   }
@@ -355,5 +493,6 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
     movePlaylistTrack,
     placePlaylistTrack,
     loadPlaylistTrack,
+    publishTrackBpm,
   };
 }
