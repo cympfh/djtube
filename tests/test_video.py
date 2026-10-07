@@ -355,32 +355,15 @@ def test_letterbox_crop_keeps_centered_sixteen_nine_only():
     assert opened is not None and opened.size == (640, 360)
 
 
-def test_sixteen_nine_card_is_pixel_exact_and_four_three_stays_contained():
-    source = Image.new("RGB", (1280, 720), (8, 16, 24))
-    source.putpixel((640, 360), (201, 19, 77))
+def test_sixteen_nine_card_stays_padded_on_the_blurred_background():
+    source = Image.new("RGB", (1280, 720), (220, 30, 40))
     card = deck_card(source)
     assert card.size == (1280, 720)
-    assert card.getpixel((640, 360)) == source.getpixel((640, 360))
-    assert card.tobytes() == source.tobytes()
-
-    four_three = Image.new("RGB", (640, 480), (220, 30, 40))
-    contained = deck_card(four_three)
-    assert contained.getpixel((640, 360)) == (220, 30, 40)
-    corner = contained.getpixel((0, 0))
+    assert card.getpixel((640, 360)) == (220, 30, 40)
+    corner = card.getpixel((0, 0))
     assert corner != (220, 30, 40)
     assert corner[0] < 140
-
-    wide = Image.new("RGB", (320, 180), (240, 10, 10))
-    tall = Image.new("RGB", (160, 120), (10, 10, 240))
-    mixed = Composer((320, 180), fade=0).frame(
-        [(VIDEO, 0.5), (OTHER, 0.5)],
-        {VIDEO: wide, OTHER: tall},
-        now=0,
-    )
-    mix_corner = mixed.getpixel((0, 0))
-    mix_center = mixed.getpixel((160, 90))
-    assert mix_corner[0] > 80
-    assert mix_center[0] > 80 and mix_center[2] > 80
+    assert card.tobytes() != source.tobytes()
 
 
 def test_sync_buffer_starts_at_the_video_sps():

@@ -19,7 +19,6 @@ VIDEO_HEIGHT = 720
 # frames long, which is enough to see a cut without staying on it.
 VIDEO_FPS = 5
 FADE_SECONDS = 0.4
-# 4:3 and other non-16:9 pictures keep this margin. A 16:9 picture has none.
 _PAD = 0.08
 # Background sits under the sharp picture. 0.55 toward black keeps the
 # blurred cover visible without competing with the centered image.
@@ -36,14 +35,6 @@ def _cover(image: Image.Image, size: tuple[int, int]) -> Image.Image:
     left = max(0, (resized.width - width) // 2)
     top = max(0, (resized.height - height) // 2)
     return resized.crop((left, top, left + width, top + height))
-
-
-def _is_16_9(width: int, height: int) -> bool:
-    """True within about 1%. 4:3 is far outside this."""
-
-    if width < 1 or height < 1:
-        return False
-    return abs(width * 9 - height * 16) * 100 <= width * 9
 
 
 def _paste_contained(base: Image.Image, image: Image.Image, pad: float = _PAD) -> None:
@@ -65,13 +56,9 @@ def title_card(size: tuple[int, int] = (VIDEO_WIDTH, VIDEO_HEIGHT)) -> Image.Ima
 
 
 def deck_card(image: Image.Image, size: tuple[int, int] = (VIDEO_WIDTH, VIDEO_HEIGHT)) -> Image.Image:
-    """One picture. 16:9 fills the tile; anything else sits on a blurred copy."""
+    """One picture, aspect kept, on a blurred and darkened copy of itself."""
 
     source = image.convert("RGB")
-    if _is_16_9(source.width, source.height) and _is_16_9(size[0], size[1]):
-        if source.size == size:
-            return source.copy()
-        return source.resize(size, Image.Resampling.LANCZOS)
     background = _cover(source, size)
     radius = max(2, size[1] // 36)
     background = background.filter(ImageFilter.GaussianBlur(radius=radius))
