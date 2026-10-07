@@ -24,7 +24,16 @@ from starlette.websockets import WebSocketDisconnect
 
 from djtube.app import create_app
 from djtube.compose import VIDEO_FPS, VIDEO_HEIGHT, VIDEO_WIDTH, Composer, deck_card
-from djtube.live import CODE_REPLACED, CODE_TOO_BIG, MAX_TEXT, NOW_IGNORED, LiveHub, parse_now
+from djtube.live import (
+    CODE_REPLACED,
+    CODE_TOO_BIG,
+    MAX_TEXT,
+    NOW_IGNORED,
+    SEND_TIMEOUT,
+    VIDEO_LISTENER_QUEUE,
+    LiveHub,
+    parse_now,
+)
 from djtube.thumbs import (
     MAX_BYTES,
     MAX_EDGE,
@@ -407,6 +416,40 @@ def test_letterbox_crop_is_only_a_dark_4_3_bar():
     assert kept.getpixel((640, 360)) == (180, 40, 40)
 
 
+def test_letterbox_crop_needs_both_bars():
+    bottom = Image.new("RGB", (640, 480), (200, 80, 40))
+    bottom.paste(Image.new("RGB", (640, 60), (0, 0, 0)), (0, 420))
+    assert _crop_letterbox(bottom).size == (640, 480)
+
+
+def test_letterbox_crop_uses_full_luma_not_red():
+    green = _letterbox((640, 480), 60, (40, 80, 20), bar=(0, 20, 0))
+    assert _crop_letterbox(green).size == (640, 480)
+
+
+def test_letterbox_crop_sees_a_bright_strip_thirty_rows_into_the_bar():
+    image = Image.new("RGB", (640, 480), (30, 40, 50))
+    image.paste(Image.new("RGB", (640, 60), (0, 0, 0)), (0, 0))
+    image.paste(Image.new("RGB", (640, 60), (0, 0, 0)), (0, 420))
+    image.paste(Image.new("RGB", (640, 18), (240, 240, 240)), (0, 30))
+    image.paste(Image.new("RGB", (640, 18), (240, 240, 240)), (0, 432))
+    assert _crop_letterbox(image).size == (640, 480)
+
+
+def test_letterbox_crop_uses_the_mean_so_a_small_logo_blocks_it():
+    image = Image.new("RGB", (640, 480), (40, 50, 60))
+    image.paste(Image.new("RGB", (640, 60), (0, 0, 0)), (0, 0))
+    image.paste(Image.new("RGB", (640, 60), (0, 0, 0)), (0, 420))
+    image.paste(Image.new("RGB", (128, 48), (250, 250, 250)), (0, 0))
+    image.paste(Image.new("RGB", (128, 48), (250, 250, 250)), (0, 432))
+    assert _crop_letterbox(image).size == (640, 480)
+
+
+def test_letterbox_crop_rejects_a_frame_two_percent_off_4_3():
+    off = _letterbox((652, 480), 57, (200, 40, 40))
+    assert _crop_letterbox(off).size == (652, 480)
+
+
 def test_sixteen_nine_card_stays_padded_on_the_blurred_background():
     source = Image.new("RGB", (1280, 720), (220, 30, 40))
     card = deck_card(source)
@@ -478,6 +521,18 @@ def test_ffmpeg_command_encodes_aac_and_one_x264_thread():
     assert copies == 1 + int(9.6 / 0.2)
     assert nxt == copies * 0.2
     assert nxt != 9.6
+
+
+def test_video_listener_queue_covers_one_send_timeout():
+    # Reads average about 4755 bytes, about 27 a second, near 1 Mbps.
+    # 64 is about 2.4 s. 8 and 32 are under one send timeout; 4096 is minutes.
+    item_bytes = 4755
+    per_second = 27
+    hold = VIDEO_LISTENER_QUEUE / per_second
+    assert SEND_TIMEOUT <= hold <= SEND_TIMEOUT * 2
+    measured = item_bytes * per_second * 8
+    audio_bits = int(VIDEO_AUDIO_BITRATE[:-1]) * 1000
+    assert VIDEO_BITRATE < measured <= VIDEO_MAXRATE + audio_bits
 
 
 _FAKE_FFMPEG = """#!/usr/bin/env python3
