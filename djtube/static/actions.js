@@ -230,10 +230,11 @@ export function createActions(deps) {
     return !!url.searchParams.get("list");
   }
 
-  async function submitSearch() {
-    const query = deps.queryValue().trim();
+  async function submitSearch(again = "") {
+    const query = again || deps.queryValue().trim();
     if (!query) {
       state.searchError = "検索語を入れてください";
+      state.searching = false;
       scheduleRender();
       return;
     }
@@ -245,18 +246,20 @@ export function createActions(deps) {
     let retry = false;
     try {
       const data = await deps.fetchSearch(query, musicOnly);
-      if (gen !== searchGen) return;
-      state.lastQuery = query;
-      state.results = Array.isArray(data?.tracks) ? data.tracks : [];
-      state.selected = 0;
-      state.source = data?.source || "";
-      state.searchError = state.results.length ? "" : "見つかりませんでした";
+      if (gen === searchGen) {
+        state.lastQuery = query;
+        state.results = Array.isArray(data?.tracks) ? data.tracks : [];
+        state.selected = 0;
+        state.source = data?.source || "";
+        state.searchError = state.results.length ? "" : "見つかりませんでした";
+      }
     } catch (err) {
-      if (gen !== searchGen) return;
-      state.results = [];
-      state.source = "";
-      const message = err instanceof Error ? err.message : "";
-      state.searchError = message && !/^failed to fetch$/i.test(message) ? message : "検索できませんでした";
+      if (gen === searchGen) {
+        state.results = [];
+        state.source = "";
+        const message = err instanceof Error ? err.message : "";
+        state.searchError = message && !/^failed to fetch$/i.test(message) ? message : "検索できませんでした";
+      }
     } finally {
       if (gen === searchGen) {
         retry = state.musicOnly !== musicOnly && !isPlaylistPageQuery(query);
@@ -266,7 +269,7 @@ export function createActions(deps) {
         }
       }
     }
-    if (retry && gen === searchGen) return submitSearch();
+    if (retry && gen === searchGen) return submitSearch(query);
   }
 
   function setMusicOnly(value) {

@@ -184,6 +184,172 @@ test("toggling music during a keyword search searches again when it finishes", a
   assert.equal(state.musicOnly, false);
 });
 
+test("clearing the box during a search still allows another search", async () => {
+  let box = "city pop";
+  let release = () => {};
+  const pending = new Promise((resolve) => {
+    release = resolve;
+  });
+  const calls = [];
+  const state = freshState();
+  const actions = createActions({
+    state,
+    audios: {
+      A: { paused: true, currentTime: 0, duration: 120, volume: 1 },
+      B: { paused: true, currentTime: 0, duration: 120, volume: 1 },
+    },
+    scheduleRender() {},
+    queryValue: () => box,
+    isSearchFocused: () => true,
+    fetchSearch: async (text, music) => {
+      calls.push([text, music]);
+      if (calls.length === 1) {
+        await pending;
+        return { source: "youtube", tracks: [track(VIDEO, "夜")] };
+      }
+      return { source: "ytdlp", tracks: [track("bbbbbbbbbbb", "朝")] };
+    },
+  });
+  const first = actions.submitSearch();
+  await Promise.resolve();
+  box = "";
+  actions.setMusicOnly(false);
+  assert.equal(state.searching, true);
+  assert.deepEqual(calls, [["city pop", true]]);
+  release();
+  await first;
+  assert.equal(state.searching, false);
+  assert.deepEqual(calls, [
+    ["city pop", true],
+    ["city pop", false],
+  ]);
+  box = "night drive";
+  await actions.onEnter();
+  assert.deepEqual(calls.at(-1), ["night drive", false]);
+  assert.equal(state.searching, false);
+});
+
+test("an empty query does not leave the search running", async () => {
+  const state = freshState();
+  state.searching = true;
+  const actions = createActions({
+    state,
+    audios: {
+      A: { paused: true, currentTime: 0, duration: 120, volume: 1 },
+      B: { paused: true, currentTime: 0, duration: 120, volume: 1 },
+    },
+    scheduleRender() {},
+    queryValue: () => "   ",
+    fetchSearch: async () => {
+      throw new Error("呼ばない");
+    },
+  });
+  await actions.submitSearch();
+  assert.equal(state.searchError, "検索語を入れてください");
+  assert.equal(state.searching, false);
+});
+
+test("a music retry uses the query from when the search started", async () => {
+  const firstRows = [track(VIDEO, "夜")];
+  const secondRows = [track("bbbbbbbbbbb", "朝")];
+  let box = "city pop";
+  let release = () => {};
+  const pending = new Promise((resolve) => {
+    release = resolve;
+  });
+  const calls = [];
+  let droppedSearching = false;
+  const state = freshState();
+  const actions = createActions({
+    state,
+    audios: {
+      A: { paused: true, currentTime: 0, duration: 120, volume: 1 },
+      B: { paused: true, currentTime: 0, duration: 120, volume: 1 },
+    },
+    scheduleRender() {
+      if (calls.length === 1 && !state.searching) droppedSearching = true;
+    },
+    queryValue: () => box,
+    fetchSearch: async (text, music) => {
+      calls.push([text, music]);
+      if (calls.length === 1) {
+        await pending;
+        return { source: "youtube", tracks: firstRows };
+      }
+      return { source: "ytdlp", tracks: secondRows };
+    },
+  });
+  const first = actions.submitSearch();
+  await Promise.resolve();
+  box = "night drive";
+  actions.setMusicOnly(false);
+  assert.equal(state.searching, true);
+  assert.deepEqual(calls, [["city pop", true]]);
+  release();
+  await first;
+  assert.equal(droppedSearching, false);
+  assert.deepEqual(calls, [
+    ["city pop", true],
+    ["city pop", false],
+  ]);
+  assert.deepEqual(state.results, secondRows);
+  assert.equal(state.searching, false);
+});
+
+test("a superseded search does not start another retry", async () => {
+  let box = "city pop";
+  let releaseFirst = () => {};
+  let releaseSecond = () => {};
+  const firstPending = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  const secondPending = new Promise((resolve) => {
+    releaseSecond = resolve;
+  });
+  const calls = [];
+  const state = freshState();
+  const actions = createActions({
+    state,
+    audios: {
+      A: { paused: true, currentTime: 0, duration: 120, volume: 1 },
+      B: { paused: true, currentTime: 0, duration: 120, volume: 1 },
+    },
+    scheduleRender() {},
+    queryValue: () => box,
+    fetchSearch: async (text, music) => {
+      calls.push([text, music]);
+      if (calls.length === 1) {
+        await firstPending;
+        return { source: "youtube", tracks: [track(VIDEO, "夜")] };
+      }
+      if (calls.length === 2) {
+        await secondPending;
+        return { source: "ytdlp", tracks: [track("bbbbbbbbbbb", "朝")] };
+      }
+      return { source: "youtube", tracks: [track("ccccccccccc", "余分")] };
+    },
+  });
+  const first = actions.submitSearch();
+  await Promise.resolve();
+  actions.setMusicOnly(false);
+  box = "night drive";
+  const second = actions.submitSearch();
+  await Promise.resolve();
+  assert.equal(calls.length, 2);
+  releaseFirst();
+  await first;
+  assert.equal(calls.length, 2);
+  assert.equal(state.searching, true);
+  releaseSecond();
+  await second;
+  assert.deepEqual(calls, [
+    ["city pop", true],
+    ["night drive", false],
+  ]);
+  assert.equal(state.results[0].title, "朝");
+  assert.equal(state.searching, false);
+});
+
 test("toggling music back during a keyword search does not search again", async () => {
   const rows = [track(VIDEO, "夜")];
   let release = () => {};
