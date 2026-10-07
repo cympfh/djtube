@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import threading
+import time
+from collections import deque
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.concurrency import run_in_threadpool
 
 from djtube.assets import DOCUMENT_CACHE, VersionedStaticFiles, asset_version, stamp_document
 from djtube.audio import AudioError, audio_needs_cookies, clear_audio_cache, open_audio
@@ -17,7 +21,13 @@ from djtube.thumbs import thumb_cache
 from djtube.paths import INDEX_PATH, PUBLIC_PREFIX, STATIC_DIR
 from djtube.playlists import PlaylistError, PlaylistStore, normalize_name, playlist_path
 from djtube.search import SearchError, search_mode, search_tracks
-from djtube.youtube_playlist import PlaylistLookupError, fetch_youtube_playlist, parse_playlist_id
+from djtube.youtube_playlist import (
+    PLAYLIST_ITEM_LIMIT,
+    PlaylistLookupError,
+    fetch_youtube_playlist,
+    parse_playlist_id,
+    rejected_playlist_message,
+)
 
 mimetypes.add_type("text/javascript", ".js", strict=True)
 mimetypes.add_type("text/css", ".css", strict=True)
@@ -68,6 +78,45 @@ class MoveTrackBody(BaseModel):
     to_index: int = Field(alias="to")
 
 
+IMPORTS_PER_MINUTE = 6
+IMPORT_WINDOW_SECONDS = 60.0
+
+
+class ImportGate:
+    """One import at a time, and at most a few starts per minute.
+
+    The permit is taken before the work is handed to the shared thread pool,
+    so a busy import does not occupy another worker.
+    """
+
+    def __init__(self) -> None:
+        self._semaphore = threading.Semaphore(1)
+        self._times: deque[float] = deque()
+        self._lock = threading.Lock()
+        self.now = time.monotonic
+
+    def try_acquire(self) -> None:
+        if not self._semaphore.acquire(blocking=False):
+            raise HTTPException(429, "取り込み中です")
+        try:
+            self._charge()
+        except Exception:
+            self._semaphore.release()
+            raise
+
+    def _charge(self) -> None:
+        stamp = self.now()
+        with self._lock:
+            while self._times and stamp - self._times[0] >= IMPORT_WINDOW_SECONDS:
+                self._times.popleft()
+            if len(self._times) >= IMPORTS_PER_MINUTE:
+                raise HTTPException(429, "取り込みの回数が多いです")
+            self._times.append(stamp)
+
+    def release(self) -> None:
+        self._semaphore.release()
+
+
 def _import_destination(payload: dict) -> tuple[str, str]:
     dest_id = payload.get("playlist_id", "")
     dest_name = payload.get("name", "")
@@ -95,7 +144,11 @@ def create_app(
     cookies: CookieStore | None = None,
     live: LiveHub | None = None,
 ) -> FastAPI:
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     app = FastAPI(title="djtube")
+    gate = ImportGate()
+    app.state.import_gate = gate
     store = playlist_store if playlist_store is not None else PlaylistStore(playlist_path())
     jar = cookies if cookies is not None else CookieStore(cookie_path())
     install_store(jar)
@@ -242,14 +295,20 @@ def create_app(
         if not isinstance(payload, dict):
             raise HTTPException(400, "プレイリストのURLを入れてください")
         source = payload.get("url", "")
-        if not isinstance(source, str) or parse_playlist_id(source) is None:
+        if not isinstance(source, str):
+            raise HTTPException(400, "プレイリストのURLを入れてください")
+        rejected = rejected_playlist_message(source)
+        if rejected:
+            raise HTTPException(400, rejected)
+        if parse_playlist_id(source) is None:
             raise HTTPException(400, "プレイリストのURLを入れてください")
         dest_id, dest_name = _import_destination(payload)
         if dest_id and dest_name:
             raise HTTPException(400, "追加先を一つ選んでください")
+        current = 0
         if dest_id:
             try:
-                store.get(dest_id)
+                current = len(store.get(dest_id)["tracks"])
             except PlaylistError as exc:
                 raise_playlist(exc)
         elif dest_name:
@@ -261,20 +320,33 @@ def create_app(
             raise HTTPException(400, "名前を入れてください")
         else:
             raise HTTPException(400, "追加先を選んでください")
+        room = store.track_limit - current
+        if room < 1:
+            raise HTTPException(400, "曲数が多すぎます")
+        gate.try_acquire()
         try:
-            fetched = fetch_youtube_playlist(source)
-        except PlaylistLookupError as exc:
-            raise HTTPException(exc.status, str(exc)) from None
-        try:
-            return store.import_tracks(
-                fetched.tracks,
-                playlist_id=dest_id or None,
-                name=dest_name if not dest_id else None,
-                unavailable=fetched.unavailable,
-                repeated=fetched.repeated,
-            )
-        except PlaylistError as exc:
-            raise_playlist(exc)
+            try:
+                fetched = await run_in_threadpool(
+                    fetch_youtube_playlist,
+                    source,
+                    limit=min(PLAYLIST_ITEM_LIMIT, room),
+                )
+            except PlaylistLookupError as exc:
+                raise HTTPException(exc.status, str(exc)) from None
+            try:
+                return await run_in_threadpool(
+                    store.import_tracks,
+                    fetched.tracks,
+                    playlist_id=dest_id or None,
+                    name=dest_name if not dest_id else None,
+                    unavailable=fetched.unavailable,
+                    repeated=fetched.repeated,
+                    overflow=fetched.overflow,
+                )
+            except PlaylistError as exc:
+                raise_playlist(exc)
+        finally:
+            gate.release()
 
     @app.get("/")
     def index() -> HTMLResponse:

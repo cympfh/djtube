@@ -119,13 +119,25 @@ const actions = createActions({
   movePlaylistTrack: (id, from, to) =>
     fetchJson(`/api/playlists/${id}/tracks/move`, { method: "POST", body: JSON.stringify({ from, to }) }),
   saveBpm: (id, bpm) => fetchJson("/api/bpm", { method: "POST", body: JSON.stringify({ id, bpm }) }),
-  importPlaylist: (body) => fetchJson("/api/playlists/import", { method: "POST", body: JSON.stringify(body) }),
+  importPlaylist: (body, options = {}) =>
+    fetchJson("/api/playlists/import", {
+      method: "POST",
+      body: JSON.stringify(body),
+      signal: options.signal,
+    }),
   playlistImportUrl: () => playlistImportUrl.value,
   setPlaylistImportUrl: (value) => {
     playlistImportUrl.value = value;
   },
   playlistImportDestination: () => playlistImportDest.value,
+  setPlaylistImportDestination: (value) => {
+    playlistImportDest.value = value;
+    delete playlistImportDest.dataset.touched;
+  },
   playlistImportName: () => playlistImportName.value,
+  setPlaylistImportName: (value) => {
+    playlistImportName.value = value;
+  },
   playlistNameValue: () => playlistName.value,
   setPlaylistNameValue: (value) => {
     playlistName.value = value;
@@ -804,11 +816,12 @@ function renderImport() {
   note.textContent = state.playlistImportNote || "";
   note.classList.toggle("is-error", !!state.playlistImportError);
   const button = document.getElementById("playlist-import");
-  button.disabled = state.playlistBusy;
-  button.textContent = state.playlistImporting ? "取り込み中" : "取り込む";
-  dest.disabled = state.playlistBusy;
-  document.getElementById("playlist-import-url").disabled = state.playlistBusy;
-  name.disabled = state.playlistBusy;
+  const importing = !!state.playlistImporting;
+  button.disabled = state.playlistBusy && !importing;
+  button.textContent = importing ? "やめる" : "取り込む";
+  dest.disabled = state.playlistBusy || importing;
+  document.getElementById("playlist-import-url").disabled = state.playlistBusy || importing;
+  name.disabled = state.playlistBusy || importing;
 }
 
 function renderAddNote() {

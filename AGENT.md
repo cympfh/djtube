@@ -110,13 +110,19 @@ BPM はプレイリストの各項目には入れない。同じ曲がいくつ�
 
 プレイリストの行は `チャンネル · 3:45 · 128.0 BPM` の形である。出すのは保存した曲そのものの BPM で、デッキのテンポは掛けない。小数第 1 位で、文字列は `playlistMetaText` が作る。曲をプレイリストへ入れたとき、デッキが同じ曲の BPM を既に持っていれば、それも同じ送り方で送る。デッキ A を先に見て、無ければ B を見る。半分や倍に外れた推定も、そのまま保存する。最後にその曲をプレイリストから外すと、表の行も消える。ブラウザ側の `state.trackBpm` も、どのプレイリストにも残っていない ID は落とす。
 
-YouTube のプレイリストを取り込む入口は `POST /api/playlists/import`。JSON の `url` は `watch?v=` と `playlist?list=`、またはプレイリスト ID そのもの。追加先は、あるプレイリストの `playlist_id` か、新しい `name` のどちらか一つ。取得は `djtube.youtube_playlist.fetch_youtube_playlist`（`parse_playlist_id` もここ）で、保存とは別なので、検索で同じプレイリストを出すときもこの関数を使う。
+YouTube のプレイリストを取り込む入口は `POST /api/playlists/import`。JSON の `url` は `watch?v=` と `playlist?list=`、または決まった形のプレイリスト ID。追加先は、あるプレイリストの `playlist_id` か、新しい `name` のどちらか一つ。取得は `djtube.youtube_playlist.fetch_youtube_playlist`（`parse_playlist_id` もここ）で、保存とは別なので、検索で同じプレイリストを出すときもこの関数を使う。
 
-`parse_playlist_id` を通った ID だけを `https://www.googleapis.com/youtube/v3/playlistItems` と `videos.list` に渡す。それ以外のホストは呼ばない。`playlistItems.list` は `maxResults=50` でページし、見るのは最大 500 件。全体の待ちは 25 秒、1 回のリクエストは 8 秒まで。非公開と削除（`privacyStatus=private`、題名が Private video / Deleted video、`videos.list` に戻ってこないもの）は曲にしない。長さとチャンネルは `videos.list` の `contentDetails.duration` と `snippet.channelTitle` で、検索の曲と同じ項目になる。
+`parse_playlist_id` が ID と認めるのは、URL の `list` か、それ単体で、次の形だけである。`PL` のあとに 16 文字か 32 文字、`OLAK5uy_` のあとに 33 文字、`UU` か `FL` のあとに 22 文字、`EC` のあとに 32 文字。文字は `0-9A-Za-z_-`。`PLAYSTATION5` や `FLOWER_DANCE` のような検索語は ID にしない。`WL`、`LL`、`LM`、`RD` で始まるミックスは、API を呼ぶ前に 400「取り込めない種類のリストです」で返す。
 
-キーが無いときは yt-dlp の flat playlist。渡す URL は `https://www.youtube.com/playlist?list=` に検証済みの ID を足したものだけ。失敗したらエラーを返す。キーがあるときの API 失敗は yt-dlp に落とさない。キーはログにもレスポンスにも出さない。
+認めた ID だけを `https://www.googleapis.com/youtube/v3/playlistItems` と `videos.list` に渡す。キーはクエリの `key` で渡す。`httpx` と `httpcore` のログは WARNING 以上だけにし、キーの入った URL を INFO で出さない。それ以外のホストは呼ばない。`playlistItems.list` は `maxResults=50` でページし、`videos.list` も一度に 50 件までである。見る件数は、500 と、追加先の空き（`TRACK_MAX` から今の曲数を引いた数。新しいプレイリストは 0 曲として数える）の、小さい方まで。空きが 0 のときは API を呼ばず「曲数が多すぎます」。`pageInfo.totalResults` がそれより大きいときは、見ていない分を「入りきらない」に数える。全体の待ちは 25 秒、1 回のリクエストの待ちは 8 秒と残り時間の小さい方。非公開と削除（`privacyStatus=private`、題名が Private video / Deleted video とその日本語や括弧付き、`videos.list` に戻ってこないもの）は曲にしない。YouTube が 403 で `quotaExceeded` のときは「YouTube API の上限に達しました」。長さとチャンネルは `videos.list` の `contentDetails.duration` と `snippet.channelTitle` で、検索の曲と同じ項目になる。
 
-保存はプレイリストのロックの中で一度。すでにある曲は先頭のまま、足す分はその末尾に、YouTube の並びで付ける。同じ動画 ID は、取り込み元で重なったものも、追加先に既にあるものも飛ばす。入りきらないときは何も書かず「曲数が多すぎます」。追加先のプレイリストが無いときは 404。URL や追加先の指定がおかしいときは 400。
+キーが無いときは yt-dlp の flat playlist。渡す URL は `https://www.youtube.com/playlist?list=` に検証済みの ID を足したものだけ。`playlistend` は上の件数。全体の待ちは API と同じ 25 秒で、それを超えたら切る。失敗したらエラーを返す。キーがあるときの API 失敗は yt-dlp に落とさない。キーはログにもレスポンスにも例外の文にも出さない。タイムアウトの例外にリクエスト URL が含まれていても、返す文には出さない。
+
+取り込みは一度に一つ。もう一つ来たら待たずに 429「取り込み中です」。始めた取り込みは 1 分に 6 回までで、それを超えたら 429「取り込みの回数が多いです」。取得は `run_in_threadpool` に渡し、イベントループは止めない。共有のスレッドプールを取り込みが埋めないように、実行中はセマフォで 1 つに限る。名前とプレイリスト数の確認は、YouTube を呼ぶ前に行う。
+
+保存はプレイリストのロックの中で行う。すでにある曲は先頭のまま、足す分はその末尾に、YouTube の並びで付ける。同じ動画 ID は、取り込み元で重なったものも、追加先に既にあるものも飛ばす。空きより多い分は、入るところまで足して、残りは「入りきらない」として数える。1 曲も足さないときはディスクに書かない。新しいプレイリストで 1 曲も入らないときは、空のプレイリストをメモリに残さず「曲数が多すぎます」。追加先のプレイリストが無いときは 404。URL や追加先の指定がおかしいときは 400。
+
+画面の結果は、追加、重複、非公開か削除、入りきらない、のうち 0 でないものだけを出す。取り込み中のボタンは「やめる」で、押すと `AbortController` で送受信を中止する。このあいだ `playlistBusy` は立てないので、「Aへ」「Bへ」は押せる。新しいプレイリストへ入れたあとは、追加先をそのプレイリストに戻し、名前欄は空にする。
 
 ## Cookie
 

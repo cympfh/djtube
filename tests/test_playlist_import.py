@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import threading
+import time
 
+import anyio
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -10,6 +14,7 @@ from fastapi.testclient import TestClient
 from djtube.app import create_app
 from djtube.playlists import PlaylistStore
 from djtube.search import Track
+from djtube.app import IMPORTS_PER_MINUTE
 from djtube.youtube_playlist import (
     PLAYLIST_ITEM_LIMIT,
     PlaylistLookupError,
@@ -103,12 +108,10 @@ def test_parse_playlist_id_accepts_urls_and_a_bare_id():
         f"https://www.youtube-nocookie.com/embed/videoseries?list={bare}": bare,
         f"youtube.com/playlist?list={bare}": bare,
         f"//www.youtube.com/playlist?list={bare}": bare,
-        "WL": "WL",
-        "LL": "LL",
-        "LM": "LM",
-        "RDMM": "RDMM",
-        "RD" + VIDEO: "RD" + VIDEO,
+        "PL" + "c" * 16: "PL" + "c" * 16,
         "UU" + "b" * 22: "UU" + "b" * 22,
+        "FL" + "d" * 22: "FL" + "d" * 22,
+        "EC" + "e" * 32: "EC" + "e" * 32,
         album: album,
         f"https://www.youtube.com/playlist?list={album}": album,
     }
@@ -123,8 +126,24 @@ def test_parse_playlist_id_rejects_anything_that_is_not_a_playlist():
         VIDEO,
         "PL",
         "PL" + "a" * 9,
+        "PL" + "a" * 10,
+        "PL" + "a" * 15,
+        "PL" + "a" * 17,
+        "PL" + "a" * 31,
+        "PL" + "a" * 33,
         "PL" + "a" * 65,
         "pl" + "a" * 32,
+        "PLAYSTATION5",
+        "FLOWER_DANCE",
+        "TLC_waterfalls",
+        "WL",
+        "LL",
+        "LM",
+        "RDMM",
+        "RD" + VIDEO,
+        "UU" + "b" * 21,
+        "UU" + "b" * 23,
+        "FL" + "d" * 10,
         f"https://www.youtube.com/watch?v={VIDEO}",
         f"https://youtu.be/{VIDEO}",
         f"https://evil.example/playlist?list={LIST}",
@@ -182,16 +201,30 @@ def test_pagination_keeps_playlist_order_when_video_details_come_back_reversed(m
 def test_private_and_deleted_videos_are_skipped_and_not_looked_up(monkeypatch):
     monkeypatch.setenv("YOUTUBE_API_KEY", KEY)
     seen: list[str] = []
+    hidden = "abcde123451"
+    titled = "abcde123452"
+    japanese_private = "abcde123453"
+    japanese_deleted = "abcde123454"
+    bracket_private = "abcde123455"
+    bracket_deleted = "abcde123456"
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/playlistItems"):
+            private_title = playlist_item(hidden, title="普通の題", private=True)
+            private_title["snippet"]["title"] = "普通の題"
             return httpx.Response(
                 200,
                 json={
                     "items": [
                         playlist_item(VIDEO, title="残る"),
+                        private_title,
                         playlist_item(OTHER, private=True),
                         playlist_item(THIRD, deleted=True),
+                        {"snippet": {"title": "Private video", "resourceId": {"videoId": titled}}},
+                        {"snippet": {"title": "非公開の動画", "resourceId": {"videoId": japanese_private}}},
+                        {"snippet": {"title": "削除された動画", "resourceId": {"videoId": japanese_deleted}}},
+                        {"snippet": {"title": "[Private video]", "resourceId": {"videoId": bracket_private}}},
+                        {"snippet": {"title": "[Deleted video]", "resourceId": {"videoId": bracket_deleted}}},
                         {"snippet": {"title": "空"}},
                     ]
                 },
@@ -202,8 +235,9 @@ def test_private_and_deleted_videos_are_skipped_and_not_looked_up(monkeypatch):
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         fetched = fetch_youtube_playlist(LIST, client=client)
     assert seen == [VIDEO]
+    assert hidden not in "".join(seen)
     assert [track.id for track in fetched.tracks] == [VIDEO]
-    assert fetched.unavailable == 3
+    assert fetched.unavailable == 9
     assert fetched.repeated == 0
 
 
@@ -561,8 +595,10 @@ def test_track_cap_and_playlist_cap_write_nothing(tmp_path, monkeypatch):
     created = client.post("/api/playlists", json={"name": "夜"}).json()
     client.post(f"/api/playlists/{created['id']}/tracks", json=_track(VIDEO, "既"))
     before = store.path.read_text(encoding="utf-8")
+    calls = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
         if request.url.path.endswith("/playlistItems"):
             return httpx.Response(200, json={"items": [playlist_item(OTHER), playlist_item(THIRD)]})
         return httpx.Response(
@@ -577,7 +613,9 @@ def test_track_cap_and_playlist_cap_write_nothing(tmp_path, monkeypatch):
     another = client.post("/api/playlists/import", json={"url": LIST, "name": "朝"})
     assert another.status_code == 400
     assert another.json()["detail"] == "プレイリストが多すぎます"
+    assert calls["n"] == 0
     assert store.path.read_text(encoding="utf-8") == before
+    assert [item["id"] for item in store.list_playlists()] == [created["id"]]
 
 
 def test_api_failure_on_the_endpoint_leaves_playlists_unchanged(tmp_path, monkeypatch, caplog):
@@ -648,4 +686,400 @@ def test_direct_import_of_track_objects_appends_in_order(tmp_path):
     assert imported["duplicates"] == 2
     assert imported["unavailable"] == 2
     assert [item["id"] for item in imported["playlist"]["tracks"]] == [VIDEO, OTHER]
+    assert imported["overflow"] == 0
     assert [item["id"] for item in store.list_playlists()[0]["tracks"]] == [THIRD]
+
+
+def test_unimportable_lists_are_rejected_before_the_api(tmp_path, monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(str(request.url))
+
+    _install(monkeypatch, handler)
+    samples = [
+        "WL",
+        "LL",
+        "LM",
+        "RDMM",
+        "RD" + VIDEO,
+        "https://www.youtube.com/playlist?list=WL",
+        f"https://www.youtube.com/watch?v={VIDEO}&list=LL",
+        f"https://www.youtube.com/playlist?list=RD{VIDEO}",
+    ]
+    for sample in samples:
+        with pytest.raises(PlaylistLookupError) as caught:
+            fetch_youtube_playlist(sample)
+        assert caught.value.status == 400
+        assert str(caught.value) == "取り込めない種類のリストです"
+    client, store = _app(tmp_path)
+    before = store.path.read_text(encoding="utf-8") if store.path.exists() else ""
+    response = client.post("/api/playlists/import", json={"url": "LL", "name": "朝"})
+    assert response.status_code == 400
+    assert response.json()["detail"] == "取り込めない種類のリストです"
+    assert not store.path.exists() or store.path.read_text(encoding="utf-8") == before
+
+
+def test_timeout_hides_the_key_even_when_the_request_url_is_on_the_exception(monkeypatch, caplog):
+    monkeypatch.setenv("YOUTUBE_API_KEY", KEY)
+    caplog.set_level(logging.DEBUG)
+
+    def timeout(request: httpx.Request) -> httpx.Response:
+        raise httpx.TimeoutException(f"timed out {request.url}", request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(timeout)) as client:
+        with pytest.raises(PlaylistLookupError) as caught:
+            fetch_youtube_playlist(LIST, client=client)
+    assert caught.value.status == 502
+    assert str(caught.value) == "プレイリストを取れませんでした"
+    assert caught.value.__cause__ is None
+    assert KEY not in str(caught.value)
+    assert KEY not in caplog.text
+
+
+def test_videos_list_batches_at_most_50_ids(monkeypatch):
+    monkeypatch.setenv("YOUTUBE_API_KEY", KEY)
+    batches: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["key"] == KEY
+        assert "key" not in {name.lower() for name in request.headers}
+        if request.url.path.endswith("/playlistItems"):
+            page = int(request.url.params.get("pageToken") or "0")
+            start = page * 50
+            items = [playlist_item(vid(start + offset)) for offset in range(50) if start + offset < 51]
+            payload = {"items": items, "pageInfo": {"totalResults": 51}}
+            if start == 0:
+                payload["nextPageToken"] = "1"
+            return httpx.Response(200, json=payload)
+        requested = request.url.params["id"].split(",")
+        batches.append(requested)
+        return httpx.Response(200, json={"items": [video_item(video_id) for video_id in requested]})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        fetched = fetch_youtube_playlist(LIST, client=client)
+    assert [len(batch) for batch in batches] == [50, 1]
+    assert len(fetched.tracks) == 51
+
+
+def test_api_key_is_a_query_param(monkeypatch):
+    monkeypatch.setenv("YOUTUBE_API_KEY", KEY)
+    seen: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url)
+        assert request.url.params["key"] == KEY
+        assert request.headers.get("x-goog-api-key") is None
+        if request.url.path.endswith("/playlistItems"):
+            return httpx.Response(200, json={"items": [playlist_item(VIDEO)], "pageInfo": {"totalResults": 1}})
+        return httpx.Response(200, json={"items": [video_item(VIDEO)]})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        fetch_youtube_playlist(LIST, client=client)
+    assert seen
+    assert all(item.params["key"] == KEY for item in seen)
+
+
+def test_request_timeout_shrinks_to_the_remaining_deadline(monkeypatch):
+    monkeypatch.setenv("YOUTUBE_API_KEY", KEY)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("pageToken"):
+            return httpx.Response(200, json={"items": []})
+        return httpx.Response(
+            200,
+            json={"items": [playlist_item(VIDEO, private=True)], "nextPageToken": "next"},
+        )
+
+    class Watching(httpx.Client):
+        def __init__(self) -> None:
+            super().__init__(transport=httpx.MockTransport(handler))
+            self.timeouts: list[float] = []
+
+        def get(self, url, params=None, timeout=None, **kwargs):
+            self.timeouts.append(float(timeout))
+            return super().get(url, params=params, timeout=timeout, **kwargs)
+
+    stamps = [0.0, 0.0, 24.2]
+
+    def now():
+        return stamps.pop(0)
+
+    http = Watching()
+    try:
+        fetch_youtube_playlist(LIST, client=http, now=now)
+    finally:
+        http.close()
+    assert http.timeouts[0] == 8
+    assert http.timeouts[1] == pytest.approx(0.8)
+    assert http.timeouts[1] < 2
+
+
+def test_ytdlp_item_cap_stops_the_list(monkeypatch):
+    seen = {}
+
+    class YoutubeDL:
+        def __init__(self, options):
+            seen["end"] = options["playlistend"]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, _url, download=False):
+            return {
+                "entries": [
+                    {"id": vid(index), "title": f"曲{index}", "duration": 10, "channel": "人"} for index in range(5)
+                ]
+            }
+
+    monkeypatch.setattr("yt_dlp.YoutubeDL", YoutubeDL)
+    fetched = fetch_youtube_playlist(LIST, limit=2)
+    assert seen["end"] == 2
+    assert [track.id for track in fetched.tracks] == [vid(0), vid(1)]
+    assert fetched.overflow == 3
+
+
+def test_ytdlp_obeys_the_overall_deadline(monkeypatch):
+    monkeypatch.setattr("djtube.youtube_playlist.DEADLINE_SECONDS", 0.2)
+    entered = threading.Event()
+
+    class YoutubeDL:
+        def __init__(self, _options):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, _url, download=False):
+            entered.set()
+            time.sleep(3)
+            return {"entries": []}
+
+    monkeypatch.setattr("yt_dlp.YoutubeDL", YoutubeDL)
+    started = time.monotonic()
+    with pytest.raises(PlaylistLookupError) as caught:
+        fetch_youtube_playlist(LIST)
+    assert caught.value.status == 502
+    assert KEY not in str(caught.value)
+    assert time.monotonic() - started < 1.5
+    assert entered.is_set()
+
+
+def test_quota_exceeded_has_its_own_message(tmp_path, monkeypatch):
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={"error": {"code": 403, "message": KEY, "errors": [{"reason": "quotaExceeded"}]}},
+        )
+
+    _install(monkeypatch, handler)
+    client, store = _app(tmp_path)
+    created = client.post("/api/playlists", json={"name": "夜"}).json()
+    before = store.path.read_text(encoding="utf-8")
+    response = client.post("/api/playlists/import", json={"url": LIST, "playlist_id": created["id"]})
+    assert response.status_code == 429
+    assert response.json()["detail"] == "YouTube API の上限に達しました"
+    assert KEY not in response.text
+    assert store.path.read_text(encoding="utf-8") == before
+
+
+def test_name_and_playlist_count_are_validated_before_the_api(tmp_path, monkeypatch):
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(500, json={"error": {"message": KEY}})
+
+    _install(monkeypatch, handler)
+    client, _store = _app(tmp_path, playlist_limit=1)
+    client.post("/api/playlists", json={"name": "夜"})
+    blank = client.post("/api/playlists/import", json={"url": LIST, "name": "   "})
+    assert blank.status_code == 400
+    assert blank.json()["detail"] == "名前を入れてください"
+    crowded = client.post("/api/playlists/import", json={"url": LIST, "name": "朝"})
+    assert crowded.status_code == 400
+    assert crowded.json()["detail"] == "プレイリストが多すぎます"
+    assert calls["n"] == 0
+
+
+def test_import_keeps_what_fits_and_reports_the_rest(tmp_path, monkeypatch):
+    client, store = _app(tmp_path, track_limit=3)
+    created = client.post("/api/playlists", json={"name": "夜"}).json()
+    client.post(f"/api/playlists/{created['id']}/tracks", json=_track(VIDEO, "既"))
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/playlistItems"):
+            seen["max"] = int(request.url.params["maxResults"])
+            seen["calls"] = seen.get("calls", 0) + 1
+            assert request.url.params["key"] == KEY
+            return httpx.Response(
+                200,
+                json={
+                    "items": [playlist_item(OTHER), playlist_item(THIRD)],
+                    "nextPageToken": "more",
+                    "pageInfo": {"totalResults": 6},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={"items": [video_item(video_id) for video_id in request.url.params["id"].split(",")]},
+        )
+
+    _install(monkeypatch, handler)
+    response = client.post("/api/playlists/import", json={"url": LIST, "playlist_id": created["id"]})
+    assert response.status_code == 200
+    body = response.json()
+    assert seen["max"] == 2
+    assert seen["calls"] == 1
+    assert body["added"] == 2
+    assert body["overflow"] == 4
+    assert [item["id"] for item in body["playlist"]["tracks"]] == [VIDEO, OTHER, THIRD]
+    fresh = PlaylistStore(tmp_path / "fresh.json", track_limit=2)
+    destination = fresh.create("夜")
+    fresh.add_track(destination["id"], _track(VIDEO, "既"))
+    trimmed = fresh.import_tracks(
+        [Track(OTHER, "新", "人", 10, None), Track("ddddddddddd", "次", "人", 10, None)],
+        playlist_id=destination["id"],
+    )
+    assert trimmed["added"] == 1
+    assert trimmed["overflow"] == 1
+    assert [item["id"] for item in trimmed["playlist"]["tracks"]] == [VIDEO, OTHER]
+
+
+def test_track_cap_error_does_not_leave_an_empty_playlist(tmp_path):
+    from djtube.playlists import PlaylistError
+
+    store = PlaylistStore(tmp_path / "playlists.json", track_limit=0)
+    with pytest.raises(PlaylistError) as caught:
+        store.import_tracks([Track(VIDEO, "夜", "人", 10, None)], name="朝")
+    assert str(caught.value) == "曲数が多すぎます"
+    assert store.list_playlists() == []
+    assert store._playlists == []
+
+
+def test_import_skips_save_when_nothing_new_is_added(tmp_path, monkeypatch):
+    store = PlaylistStore(tmp_path / "playlists.json")
+    dest = store.create("夜")
+    store.add_track(dest["id"], _track(VIDEO, "既"))
+    before = store.path.read_text(encoding="utf-8")
+
+    def boom(self):
+        raise AssertionError("saved")
+
+    monkeypatch.setattr(PlaylistStore, "_save", boom)
+    imported = store.import_tracks([Track(VIDEO, "重", "人", 10, None)], playlist_id=dest["id"])
+    assert imported["added"] == 0
+    assert imported["duplicates"] == 1
+    assert store.path.read_text(encoding="utf-8") == before
+
+
+def test_import_holds_the_playlist_lock(tmp_path, monkeypatch):
+    store = PlaylistStore(tmp_path / "playlists.json")
+    dest = store.create("夜")
+    observed = {}
+    original = PlaylistStore._save
+
+    def spy(self):
+        observed["locked"] = self._lock.locked()
+        acquired = {}
+
+        def other():
+            acquired["got"] = self._lock.acquire(blocking=False)
+            if acquired["got"]:
+                self._lock.release()
+
+        thread = threading.Thread(target=other)
+        thread.start()
+        thread.join()
+        observed["other"] = acquired["got"]
+        original(self)
+
+    monkeypatch.setattr(PlaylistStore, "_save", spy)
+    store.import_tracks([Track(VIDEO, "夜", "人", 10, None)], playlist_id=dest["id"])
+    assert observed["locked"] is True
+    assert observed["other"] is False
+
+
+def test_a_second_import_is_rejected_while_the_first_holds_the_server(tmp_path, monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/playlistItems"):
+            started.set()
+            assert release.wait(5)
+            return httpx.Response(
+                200,
+                json={"items": [playlist_item(OTHER)], "pageInfo": {"totalResults": 1}},
+            )
+        return httpx.Response(200, json={"items": [video_item(OTHER)]})
+
+    _install(monkeypatch, handler)
+    app = create_app(PlaylistStore(tmp_path / "playlists.json"))
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            task = asyncio.create_task(http.post("/api/playlists/import", json={"url": LIST, "name": "朝"}))
+            assert await asyncio.to_thread(started.wait, 2)
+            health_at = time.monotonic()
+            health = await asyncio.wait_for(http.get("/api/health"), 1)
+            assert health.status_code == 200
+            assert time.monotonic() - health_at < 0.8
+            second = await asyncio.wait_for(http.post("/api/playlists/import", json={"url": LIST, "name": "次"}), 1)
+            assert second.status_code == 429
+            assert second.json()["detail"] == "取り込み中です"
+            release.set()
+            first = await asyncio.wait_for(task, 2)
+            assert first.status_code == 200
+
+    anyio.run(scenario)
+
+
+def test_imports_are_limited_to_six_per_minute(tmp_path, monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/playlistItems"):
+            return httpx.Response(
+                200,
+                json={"items": [playlist_item(OTHER)], "pageInfo": {"totalResults": 1}},
+            )
+        return httpx.Response(200, json={"items": [video_item(OTHER)]})
+
+    _install(monkeypatch, handler)
+    client, _store = _app(tmp_path)
+    clock = {"t": 1_000.0}
+    client.app.state.import_gate.now = lambda: clock["t"]
+    for index in range(IMPORTS_PER_MINUTE):
+        response = client.post("/api/playlists/import", json={"url": LIST, "name": f"朝{index}"})
+        assert response.status_code == 200, response.text
+    blocked = client.post("/api/playlists/import", json={"url": LIST, "name": "多すぎ"})
+    assert blocked.status_code == 429
+    assert blocked.json()["detail"] == "取り込みの回数が多いです"
+    clock["t"] += 61
+    again = client.post("/api/playlists/import", json={"url": LIST, "name": "あと"})
+    assert again.status_code == 200
+
+
+def test_httpx_info_logs_do_not_include_the_api_key(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/playlistItems"):
+            return httpx.Response(
+                200,
+                json={"items": [playlist_item(OTHER)], "pageInfo": {"totalResults": 1}},
+            )
+        return httpx.Response(200, json={"items": [video_item(OTHER)]})
+
+    _install(monkeypatch, handler)
+    client, _store = _app(tmp_path)
+    response = client.post("/api/playlists/import", json={"url": LIST, "name": "朝"})
+    assert response.status_code == 200
+    assert KEY not in caplog.text
+    assert logging.getLogger("httpx").level >= logging.WARNING
+    assert logging.getLogger("httpcore").level >= logging.WARNING

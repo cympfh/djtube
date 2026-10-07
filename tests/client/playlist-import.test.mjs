@@ -48,7 +48,13 @@ function harness(overrides = {}) {
       url = value;
     },
     playlistImportDestination: () => destination,
+    setPlaylistImportDestination(value) {
+      destination = value;
+    },
     playlistImportName: () => name,
+    setPlaylistImportName(value) {
+      name = value;
+    },
     ...overrides.deps,
   });
   return {
@@ -56,6 +62,8 @@ function harness(overrides = {}) {
     actions,
     calls,
     url: () => url,
+    destination: () => destination,
+    name: () => name,
     setUrl: (value) => {
       url = value;
     },
@@ -68,10 +76,15 @@ function harness(overrides = {}) {
   };
 }
 
-test("the import result is a short count of added, duplicate, and unavailable songs", () => {
+test("the import result lists only the counts that are not zero", () => {
   assert.equal(importResultMessage({ added: 8, duplicates: 3, unavailable: 2 }), "8曲追加、3曲は重複、2曲は非公開か削除");
-  assert.equal(importResultMessage({}), "0曲追加、0曲は重複、0曲は非公開か削除");
-  assert.equal(importResultMessage({ added: -4, duplicates: "nope", unavailable: 1.2 }), "0曲追加、0曲は重複、1曲は非公開か削除");
+  assert.equal(importResultMessage({}), "");
+  assert.equal(importResultMessage({ added: -4, duplicates: "nope", unavailable: 1.2 }), "1曲は非公開か削除");
+  assert.equal(
+    importResultMessage({ added: 2, duplicates: 1, unavailable: 1, overflow: 4 }),
+    "2曲追加、1曲は重複、1曲は非公開か削除、4曲は入りきらない",
+  );
+  assert.equal(importResultMessage({ overflow: 3 }), "3曲は入りきらない");
 });
 
 test("importing into the selected playlist appends and reports the counts", async () => {
@@ -142,8 +155,11 @@ test("importing into a new playlist sends the name and selects that playlist", a
   assert.equal(ui.state.playlists.length, 2);
   assert.equal(ui.state.playlists[0].tracks[0].id, "bbbbbbbbbbb");
   assert.equal(ui.state.playlistIndex, 0);
-  assert.equal(ui.state.playlistImportNote, "1曲追加、0曲は重複、0曲は非公開か削除");
+  assert.equal(ui.state.playlistImportNote, "1曲追加");
+  assert.equal(ui.state.playlistBusy, false);
   assert.equal(ui.url(), "");
+  assert.equal(ui.destination(), "b".repeat(32));
+  assert.equal(ui.name(), "");
 });
 
 test("an empty url or a new playlist without a name does not call the server", async () => {
@@ -185,36 +201,35 @@ test("a failed import leaves the playlist and shows the server message", async (
   assert.equal(ui.url(), "PLaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 });
 
-test("a second import waits until the first one finishes", async () => {
-  let release = () => {};
+test("a second import cancels the first and does not mark the playlist busy", async () => {
   let calls = 0;
-  const gate = new Promise((resolve) => {
-    release = resolve;
-  });
   const ui = harness({
     url: "PLaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     destination: PLAYLIST_ID,
-    importPlaylist: async () => {
-      calls += 1;
-      await gate;
-      return {
-        playlist: { id: PLAYLIST_ID, name: "夜", tracks: [] },
-        added: 0,
-        duplicates: 0,
-        unavailable: 0,
-      };
-    },
+    importPlaylist: (_body, options) =>
+      new Promise((_resolve, reject) => {
+        calls += 1;
+        const abort = () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+        if (options?.signal?.aborted) {
+          abort();
+          return;
+        }
+        options?.signal?.addEventListener("abort", abort);
+      }),
   });
-  ui.state.playlists = [{ id: PLAYLIST_ID, name: "夜", tracks: [] }];
+  ui.state.playlists = [{ id: PLAYLIST_ID, name: "夜", tracks: [track("bbbbbbbbbbb", "先")] }];
   ui.state.playlistId = PLAYLIST_ID;
   const first = ui.actions.importPlaylist();
-  await ui.actions.importPlaylist();
-  assert.equal(calls, 1);
   assert.equal(ui.state.playlistImporting, true);
-  release();
+  assert.equal(ui.state.playlistBusy, false);
+  ui.actions.importPlaylist();
   await first;
+  assert.equal(calls, 1);
   assert.equal(ui.state.playlistImporting, false);
   assert.equal(ui.state.playlistBusy, false);
+  assert.equal(ui.state.playlistImportError, false);
+  assert.equal(ui.state.playlistImportNote, "");
+  assert.equal(ui.state.playlists[0].tracks.length, 1);
 });
 
 test("typing in the import fields does not trigger deck or playlist keys", () => {
@@ -254,4 +269,21 @@ test("the playlist panel has the import form wired like the search box", () => {
   assert.match(css, /#playlist-import-url/);
   assert.match(css, /#search-button, #playlist-import/);
   assert.doesNotMatch(`${html}\n${app}\n${css}`, /googleapis|YOUTUBE_API_KEY|AIza/);
+  assert.doesNotMatch(html, /id="playlist-import-dest"[^>]*aria-labelledby/);
+  assert.match(html, /for="playlist-import-dest">追加先/);
+  const renderImport = app.slice(app.indexOf("function renderImport"), app.indexOf("function renderAddNote"));
+  assert.equal(renderImport.includes("innerHTML"), false);
+  assert.match(renderImport, /option\.textContent = playlist\.name/);
+  assert.match(renderImport, /note\.textContent = state\.playlistImportNote/);
+  assert.match(renderImport, /やめる/);
+  const confirmingAt = app.indexOf("const confirming = pendingRemove");
+  const decks = app.slice(app.lastIndexOf('for (const deck of ["A", "B"])', confirmingAt), confirmingAt);
+  assert.match(decks, /button\.disabled = busy;/);
+  assert.equal(decks.includes("playlistImporting"), false);
+  const playlists = readFileSync(new URL("../../djtube/static/playlists.js", import.meta.url), "utf8");
+  const importer = playlists.slice(playlists.indexOf("function importPlaylist"), playlists.indexOf("function loadPlaylistTrack"));
+  assert.match(importer, /new AbortController/);
+  assert.equal(importer.includes("playlistBusy = true"), false);
+  assert.match(importer, /setPlaylistImportDestination/);
+  assert.match(importer, /setPlaylistImportName/);
 });

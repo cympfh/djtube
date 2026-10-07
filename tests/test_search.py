@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import httpx
 
 from fastapi.testclient import TestClient
@@ -47,7 +49,8 @@ def test_ytdlp_info_parser_keeps_video_ids_only():
     assert tracks[0].thumbnail.startswith("https://")
 
 
-def test_youtube_api_preserves_search_order_and_hides_key():
+def test_youtube_api_preserves_search_order_and_hides_key(caplog):
+    caplog.set_level(logging.INFO)
     seen = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -96,6 +99,7 @@ def test_youtube_api_preserves_search_order_and_hides_key():
     assert [track.title for track in tracks] == ["First", "Second"]
     assert tracks[0].duration == 61
     assert "test-key" not in repr(tracks)
+    assert "test-key" not in caplog.text
 
 
 def test_age_gated_query_is_requested_unfiltered():

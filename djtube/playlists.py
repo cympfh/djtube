@@ -161,11 +161,15 @@ class PlaylistStore:
         name: str | None = None,
         unavailable: int = 0,
         repeated: int = 0,
+        overflow: int = 0,
     ) -> dict:
-        """Append tracks under the playlist lock and save once.
+        """Append tracks that fit under the playlist lock.
 
         Existing tracks stay at the front. A video id already in the playlist,
-        or already seen in `tracks`, is not added again.
+        or already seen in `tracks`, is not added again. Tracks past the
+        playlist's room are counted as overflow and are not stored. Nothing
+        is written when no track is added. A new playlist that cannot hold a
+        single track is not created.
         """
 
         with self._lock:
@@ -184,6 +188,8 @@ class PlaylistStore:
                 raise PlaylistError("追加先を選んでください")
             existing = {item["id"] for item in playlist["tracks"]}
             duplicates = repeated if isinstance(repeated, int) and not isinstance(repeated, bool) else 0
+            carried = overflow if isinstance(overflow, int) and not isinstance(overflow, bool) and overflow > 0 else 0
+            trimmed = 0
             to_add: list[dict] = []
             for track in tracks:
                 if not isinstance(track, Track):
@@ -191,20 +197,28 @@ class PlaylistStore:
                 if track.id in existing:
                     duplicates += 1
                     continue
+                if len(playlist["tracks"]) + len(to_add) >= self.track_limit:
+                    trimmed += 1
+                    existing.add(track.id)
+                    continue
                 existing.add(track.id)
                 to_add.append(track.as_dict())
-            if len(playlist["tracks"]) + len(to_add) > self.track_limit:
+            if not to_add and trimmed:
                 raise PlaylistError("曲数が多すぎます")
+            skipped = carried + trimmed
             if creating is not None:
                 self._playlists.append(creating)
-            playlist["tracks"].extend(to_add)
-            self._save()
+            if to_add:
+                playlist["tracks"].extend(to_add)
+            if to_add or creating is not None:
+                self._save()
             missed = unavailable if isinstance(unavailable, int) and not isinstance(unavailable, bool) else 0
             return {
                 "playlist": _public(playlist),
                 "added": len(to_add),
                 "duplicates": duplicates,
                 "unavailable": missed,
+                "overflow": skipped,
             }
 
     def move_track(self, playlist_id: str, from_index: int, to_index: int) -> dict:

@@ -36,10 +36,16 @@ function importCount(value) {
 }
 
 export function importResultMessage(result) {
+  const parts = [];
   const added = importCount(result?.added);
   const duplicates = importCount(result?.duplicates);
   const unavailable = importCount(result?.unavailable);
-  return `${added}曲追加、${duplicates}曲は重複、${unavailable}曲は非公開か削除`;
+  const overflow = importCount(result?.overflow);
+  if (added) parts.push(`${added}曲追加`);
+  if (duplicates) parts.push(`${duplicates}曲は重複`);
+  if (unavailable) parts.push(`${unavailable}曲は非公開か削除`);
+  if (overflow) parts.push(`${overflow}曲は入りきらない`);
+  return parts.join("、");
 }
 
 export function trackSnapshot(track) {
@@ -490,7 +496,20 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
     });
   }
 
+  let importAbort = null;
+
+  function finishImport(controller) {
+    if (importAbort !== controller) return;
+    importAbort = null;
+    state.playlistImporting = false;
+    scheduleRender();
+  }
+
   function importPlaylist(explicit) {
+    if (state.playlistImporting) {
+      importAbort?.abort();
+      return;
+    }
     const source = (explicit?.url ?? deps.playlistImportUrl?.() ?? "").trim();
     if (!source) {
       rejectImport("プレイリストのURLを入れてください");
@@ -506,34 +525,40 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
     } else body.name = name;
     if (typeof deps.importPlaylist !== "function") return;
     if (state.playlistBusy) return;
+    const controller = new AbortController();
+    importAbort = controller;
     state.playlistImportNote = "";
     state.playlistImportError = false;
     state.playlistImporting = true;
-    const pending = mutate(
-      () => deps.importPlaylist(body),
-      (result) => {
+    scheduleRender();
+    return Promise.resolve()
+      .then(() => deps.importPlaylist(body, { signal: controller.signal }))
+      .then((result) => {
+        if (controller.signal.aborted) return;
         const playlist = result?.playlist;
         if (playlist?.id) {
           const previous = state.playlists.find((item) => item.id === playlist.id);
           adopt(playlist, previous?.tracks?.length || 0);
+          if (!body.playlist_id) {
+            deps.setPlaylistImportDestination?.(playlist.id);
+            deps.setPlaylistImportName?.("");
+          }
         }
         state.playlistImportNote = importResultMessage(result);
         state.playlistImportError = false;
         deps.setPlaylistImportUrl?.("");
-      },
-      (message) => {
+      })
+      .catch((err) => {
+        if (controller.signal.aborted || err?.name === "AbortError") {
+          state.playlistImportNote = "";
+          state.playlistImportError = false;
+          return;
+        }
+        const message = err instanceof Error ? err.message : "";
         state.playlistImportNote = message || "プレイリストを取り込めませんでした";
         state.playlistImportError = true;
-      },
-    );
-    if (pending && typeof pending.finally === "function") {
-      return pending.finally(() => {
-        state.playlistImporting = false;
-        scheduleRender();
-      });
-    }
-    state.playlistImporting = false;
-    return pending;
+      })
+      .finally(() => finishImport(controller));
   }
 
   function loadPlaylistTrack(deck) {
