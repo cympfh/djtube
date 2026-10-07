@@ -15,8 +15,9 @@ from djtube.ids import is_video_id
 from djtube.live import LiveHub, live_seen_path, mount_live
 from djtube.thumbs import thumb_cache
 from djtube.paths import INDEX_PATH, PUBLIC_PREFIX, STATIC_DIR
-from djtube.playlists import PlaylistError, PlaylistStore, playlist_path
+from djtube.playlists import PlaylistError, PlaylistStore, normalize_name, playlist_path
 from djtube.search import SearchError, search_mode, search_tracks
+from djtube.youtube_playlist import PlaylistLookupError, fetch_youtube_playlist, parse_playlist_id
 
 mimetypes.add_type("text/javascript", ".js", strict=True)
 mimetypes.add_type("text/css", ".css", strict=True)
@@ -65,6 +66,18 @@ class MoveTrackBody(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     from_index: int = Field(alias="from")
     to_index: int = Field(alias="to")
+
+
+def _import_destination(payload: dict) -> tuple[str, str]:
+    dest_id = payload.get("playlist_id", "")
+    dest_name = payload.get("name", "")
+    if dest_id is None:
+        dest_id = ""
+    if dest_name is None:
+        dest_name = ""
+    if not isinstance(dest_id, str) or not isinstance(dest_name, str):
+        raise HTTPException(400, "追加先を選んでください")
+    return dest_id.strip(), dest_name.strip()
 
 
 def _default_live() -> LiveHub:
@@ -217,6 +230,49 @@ def create_app(
     def move_playlist_track(playlist_id: str, body: MoveTrackBody) -> dict[str, object]:
         try:
             return store.move_track(playlist_id, body.from_index, body.to_index)
+        except PlaylistError as exc:
+            raise_playlist(exc)
+
+    @app.post("/api/playlists/import")
+    async def import_playlist(request: Request) -> dict[str, object]:
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(400, "プレイリストのURLを入れてください") from None
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "プレイリストのURLを入れてください")
+        source = payload.get("url", "")
+        if not isinstance(source, str) or parse_playlist_id(source) is None:
+            raise HTTPException(400, "プレイリストのURLを入れてください")
+        dest_id, dest_name = _import_destination(payload)
+        if dest_id and dest_name:
+            raise HTTPException(400, "追加先を一つ選んでください")
+        if dest_id:
+            try:
+                store.get(dest_id)
+            except PlaylistError as exc:
+                raise_playlist(exc)
+        elif dest_name:
+            if not normalize_name(dest_name):
+                raise HTTPException(400, "名前を入れてください")
+            if len(store.list_playlists()) >= store.playlist_limit:
+                raise HTTPException(400, "プレイリストが多すぎます")
+        elif "name" in payload:
+            raise HTTPException(400, "名前を入れてください")
+        else:
+            raise HTTPException(400, "追加先を選んでください")
+        try:
+            fetched = fetch_youtube_playlist(source)
+        except PlaylistLookupError as exc:
+            raise HTTPException(exc.status, str(exc)) from None
+        try:
+            return store.import_tracks(
+                fetched.tracks,
+                playlist_id=dest_id or None,
+                name=dest_name if not dest_id else None,
+                unavailable=fetched.unavailable,
+                repeated=fetched.repeated,
+            )
         except PlaylistError as exc:
             raise_playlist(exc)
 

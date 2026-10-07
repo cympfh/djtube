@@ -11,7 +11,7 @@ from pathlib import Path
 
 from djtube.ids import is_video_id
 from djtube.paths import PACKAGE_DIR
-from djtube.search import track_from_payload
+from djtube.search import Track, track_from_payload
 
 log = logging.getLogger(__name__)
 
@@ -148,6 +148,64 @@ class PlaylistStore:
             del tracks[index]
             self._save()
             return _public(playlist)
+
+    def get(self, playlist_id: str) -> dict:
+        with self._lock:
+            return _public(self._find(playlist_id))
+
+    def import_tracks(
+        self,
+        tracks: list[Track],
+        *,
+        playlist_id: str | None = None,
+        name: str | None = None,
+        unavailable: int = 0,
+        repeated: int = 0,
+    ) -> dict:
+        """Append tracks under the playlist lock and save once.
+
+        Existing tracks stay at the front. A video id already in the playlist,
+        or already seen in `tracks`, is not added again.
+        """
+
+        with self._lock:
+            creating = None
+            if playlist_id:
+                playlist = self._find(playlist_id)
+            elif name is not None:
+                cleaned = normalize_name(name)
+                if not cleaned:
+                    raise PlaylistError("名前を入れてください")
+                if len(self._playlists) >= self.playlist_limit:
+                    raise PlaylistError("プレイリストが多すぎます")
+                creating = {"id": uuid.uuid4().hex, "name": cleaned, "tracks": []}
+                playlist = creating
+            else:
+                raise PlaylistError("追加先を選んでください")
+            existing = {item["id"] for item in playlist["tracks"]}
+            duplicates = repeated if isinstance(repeated, int) and not isinstance(repeated, bool) else 0
+            to_add: list[dict] = []
+            for track in tracks:
+                if not isinstance(track, Track):
+                    raise PlaylistError("動画IDが正しくありません")
+                if track.id in existing:
+                    duplicates += 1
+                    continue
+                existing.add(track.id)
+                to_add.append(track.as_dict())
+            if len(playlist["tracks"]) + len(to_add) > self.track_limit:
+                raise PlaylistError("曲数が多すぎます")
+            if creating is not None:
+                self._playlists.append(creating)
+            playlist["tracks"].extend(to_add)
+            self._save()
+            missed = unavailable if isinstance(unavailable, int) and not isinstance(unavailable, bool) else 0
+            return {
+                "playlist": _public(playlist),
+                "added": len(to_add),
+                "duplicates": duplicates,
+                "unavailable": missed,
+            }
 
     def move_track(self, playlist_id: str, from_index: int, to_index: int) -> dict:
         with self._lock:

@@ -9,6 +9,9 @@ export function freshPlaylistState() {
     playlistNaming: "create",
     playlistBusy: false,
     trackBpm: {},
+    playlistImportNote: "",
+    playlistImportError: false,
+    playlistImporting: false,
   };
 }
 
@@ -24,6 +27,19 @@ export function playlistMetaText(track, bpm) {
   const bits = [track?.channel, track?.duration ? formatTime(track.duration) : ""].filter(Boolean);
   if (typeof bpm === "number" && Number.isFinite(bpm)) bits.push(`${bpm.toFixed(1)} BPM`);
   return bits.join(" · ");
+}
+
+function importCount(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) return 0;
+  return Math.floor(number);
+}
+
+export function importResultMessage(result) {
+  const added = importCount(result?.added);
+  const duplicates = importCount(result?.duplicates);
+  const unavailable = importCount(result?.unavailable);
+  return `${added}曲追加、${duplicates}曲は重複、${unavailable}曲は非公開か削除`;
 }
 
 export function trackSnapshot(track) {
@@ -205,7 +221,7 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
     scheduleRender();
   }
 
-  async function mutate(work, apply) {
+  async function mutate(work, apply, onError) {
     if (state.playlistBusy) return;
     const gen = ++revision;
     state.playlistBusy = true;
@@ -218,13 +234,20 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
     } catch (err) {
       if (gen !== revision) return;
       const message = err instanceof Error ? err.message : "";
-      state.playlistError = message || "プレイリストを保存できませんでした";
+      if (typeof onError === "function") onError(message);
+      else state.playlistError = message || "プレイリストを保存できませんでした";
     } finally {
       if (gen === revision) {
         state.playlistBusy = false;
         scheduleRender();
       }
     }
+  }
+
+  function rejectImport(message) {
+    state.playlistImportNote = message;
+    state.playlistImportError = true;
+    scheduleRender();
   }
 
   function focusPlaylistName() {
@@ -467,6 +490,52 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
     });
   }
 
+  function importPlaylist(explicit) {
+    const source = (explicit?.url ?? deps.playlistImportUrl?.() ?? "").trim();
+    if (!source) {
+      rejectImport("プレイリストのURLを入れてください");
+      return;
+    }
+    const dest = explicit?.playlistId ?? deps.playlistImportDestination?.() ?? "new";
+    const name = (explicit?.name ?? deps.playlistImportName?.() ?? "").trim();
+    const body = { url: source };
+    if (dest && dest !== "new") body.playlist_id = dest;
+    else if (!name) {
+      rejectImport("名前を入れてください");
+      return;
+    } else body.name = name;
+    if (typeof deps.importPlaylist !== "function") return;
+    if (state.playlistBusy) return;
+    state.playlistImportNote = "";
+    state.playlistImportError = false;
+    state.playlistImporting = true;
+    const pending = mutate(
+      () => deps.importPlaylist(body),
+      (result) => {
+        const playlist = result?.playlist;
+        if (playlist?.id) {
+          const previous = state.playlists.find((item) => item.id === playlist.id);
+          adopt(playlist, previous?.tracks?.length || 0);
+        }
+        state.playlistImportNote = importResultMessage(result);
+        state.playlistImportError = false;
+        deps.setPlaylistImportUrl?.("");
+      },
+      (message) => {
+        state.playlistImportNote = message || "プレイリストを取り込めませんでした";
+        state.playlistImportError = true;
+      },
+    );
+    if (pending && typeof pending.finally === "function") {
+      return pending.finally(() => {
+        state.playlistImporting = false;
+        scheduleRender();
+      });
+    }
+    state.playlistImporting = false;
+    return pending;
+  }
+
   function loadPlaylistTrack(deck) {
     const playlist = currentPlaylist();
     const track = playlist?.tracks?.[state.playlistIndex];
@@ -492,6 +561,7 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }
     removePlaylistTrack,
     movePlaylistTrack,
     placePlaylistTrack,
+    importPlaylist,
     loadPlaylistTrack,
     publishTrackBpm,
   };

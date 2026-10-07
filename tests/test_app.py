@@ -59,6 +59,13 @@ def test_index_uses_public_asset_prefix():
     assert 'id="playlist-select"' in html
     assert 'id="playlist-edit"' in html
     assert ">編集</button>" in html
+    assert 'id="playlist-import-url"' in html
+    assert 'id="playlist-import-dest"' in html
+    assert 'id="playlist-import-name"' in html
+    assert 'id="playlist-import"' in html
+    assert ">取り込む</button>" in html
+    assert "新しいプレイリスト" in html
+    assert 'id="playlist-import-note"' in html
     assert html.index('id="playlist-select"') < html.index('id="playlist-edit"')
     assert 'id="playlist-edit-dialog"' in html
     assert 'id="playlist-rename"' in html
@@ -238,7 +245,13 @@ def test_readme_and_docker_contract():
     agent = (ROOT / "AGENT.md").read_text(encoding="utf-8")
     for token in ("YOUTUBE_API_KEY", "8098", "/djtube/", "DDJ-FLX4", "docker run", "uv sync", "yt-dlp"):
         assert token in agent
+    assert "/api/playlists/import" in agent
+    assert "fetch_youtube_playlist" in agent
+    assert "playlistItems" in agent
     assert "プレイリスト" in readme
+    assert "「取り込む」" in readme
+    assert "同じ曲は足さない" in readme
+    assert "非公開や削除" in readme
     assert "Shift+A" in readme
     assert "各曲の「Aへ」「Bへ」で、そのデッキに載せる" in readme
     assert "「削除」を一度押すとボタンが「本当に削除？」になり、もう一度押すとその曲だけ外れる" in readme

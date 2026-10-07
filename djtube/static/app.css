@@ -393,6 +393,18 @@ button:hover { border-color: #5c564b; }
 
 #playlist-edit-close { align-self: flex-start; }
 
+.playlist-import {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.playlist-import-label {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .panel-head h1, .deck-head h2, .fader-label {
   margin: 0;
   font-size: 13px;
@@ -402,7 +414,7 @@ button:hover { border-color: #5c564b; }
 
 .search-row { display: flex; gap: 8px; }
 
-#search-input, #playlist-name, #playlist-select, .playlist-add-select {
+#search-input, #playlist-name, #playlist-select, #playlist-import-url, #playlist-import-dest, #playlist-import-name, .playlist-add-select {
   flex: 1;
   min-width: 0;
   background: #100f0c;
@@ -411,13 +423,13 @@ button:hover { border-color: #5c564b; }
   padding: 8px 10px;
 }
 
-#playlist-select, .playlist-add-select { flex: none; width: 100%; }
+#playlist-select, #playlist-import-dest, #playlist-import-name, .playlist-add-select { flex: none; width: 100%; }
 
 .playlist-add-select { grid-column: 1 / -1; grid-row: 3; }
 
 button:disabled { opacity: 0.45; cursor: default; }
 
-#search-button { background: var(--text); color: #16140f; border: 0; font-weight: 700; }
+#search-button, #playlist-import { background: var(--text); color: #16140f; border: 0; font-weight: 700; }
 
 .music-only {
   display: flex;

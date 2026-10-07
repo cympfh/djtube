@@ -110,6 +110,14 @@ BPM はプレイリストの各項目には入れない。同じ曲がいくつ�
 
 プレイリストの行は `チャンネル · 3:45 · 128.0 BPM` の形である。出すのは保存した曲そのものの BPM で、デッキのテンポは掛けない。小数第 1 位で、文字列は `playlistMetaText` が作る。曲をプレイリストへ入れたとき、デッキが同じ曲の BPM を既に持っていれば、それも同じ送り方で送る。デッキ A を先に見て、無ければ B を見る。半分や倍に外れた推定も、そのまま保存する。最後にその曲をプレイリストから外すと、表の行も消える。ブラウザ側の `state.trackBpm` も、どのプレイリストにも残っていない ID は落とす。
 
+YouTube のプレイリストを取り込む入口は `POST /api/playlists/import`。JSON の `url` は `watch?v=` と `playlist?list=`、またはプレイリスト ID そのもの。追加先は、あるプレイリストの `playlist_id` か、新しい `name` のどちらか一つ。取得は `djtube.youtube_playlist.fetch_youtube_playlist`（`parse_playlist_id` もここ）で、保存とは別なので、検索で同じプレイリストを出すときもこの関数を使う。
+
+`parse_playlist_id` を通った ID だけを `https://www.googleapis.com/youtube/v3/playlistItems` と `videos.list` に渡す。それ以外のホストは呼ばない。`playlistItems.list` は `maxResults=50` でページし、見るのは最大 500 件。全体の待ちは 25 秒、1 回のリクエストは 8 秒まで。非公開と削除（`privacyStatus=private`、題名が Private video / Deleted video、`videos.list` に戻ってこないもの）は曲にしない。長さとチャンネルは `videos.list` の `contentDetails.duration` と `snippet.channelTitle` で、検索の曲と同じ項目になる。
+
+キーが無いときは yt-dlp の flat playlist。渡す URL は `https://www.youtube.com/playlist?list=` に検証済みの ID を足したものだけ。失敗したらエラーを返す。キーがあるときの API 失敗は yt-dlp に落とさない。キーはログにもレスポンスにも出さない。
+
+保存はプレイリストのロックの中で一度。すでにある曲は先頭のまま、足す分はその末尾に、YouTube の並びで付ける。同じ動画 ID は、取り込み元で重なったものも、追加先に既にあるものも飛ばす。入りきらないときは何も書かず「曲数が多すぎます」。追加先のプレイリストが無いときは 404。URL や追加先の指定がおかしいときは 400。
+
 ## Cookie
 
 YouTube がボット確認で音源取得を止めるときは、画面から Netscape 形式の Cookie をアップロードするか、同じ形式の中身を貼り付けて保存する。ファイルが無いあいだ、yt-dlp には `cookiefile` を渡さず、player client も JS ランタイムも指定しない。保存したあとの音源取得だけ、そのファイルを渡す。そのときは player client を `web_embedded` と `web_safari` にする。`tv_downgraded` は使わない。同じ取得で、イメージの `/opt/djtube/deno` があればそれだけを JS ランタイムとして渡す。このバイナリは `PATH` に入っていない。差し替えは同じ画面で上書きする。画面上部の丸い Cookie の印から、失敗を待たずにその画面を開ける。ファイル欄と貼り付け欄は、保存してある中身では埋めない。

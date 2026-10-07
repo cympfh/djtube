@@ -111,6 +111,21 @@
             <label class="sr-only" for="playlist-select">プレイリストを選ぶ</label>
             <select id="playlist-select"></select>
             <button type="button" id="playlist-edit" aria-haspopup="dialog" aria-controls="playlist-edit-dialog" aria-expanded="false">編集</button>
+            <div class="playlist-import">
+              <p class="playlist-import-label" id="playlist-import-label">YouTubeから</p>
+              <div class="search-row">
+                <label class="sr-only" for="playlist-import-url">YouTubeのプレイリストURL</label>
+                <input id="playlist-import-url" type="text" placeholder="プレイリストのURL" maxlength="2000" autocomplete="off" spellcheck="false" />
+                <button type="button" id="playlist-import">取り込む</button>
+              </div>
+              <label class="sr-only" for="playlist-import-dest">追加先</label>
+              <select id="playlist-import-dest" aria-labelledby="playlist-import-label">
+                <option value="new">新しいプレイリスト</option>
+              </select>
+              <label class="sr-only" for="playlist-import-name">新しいプレイリストの名前</label>
+              <input id="playlist-import-name" type="text" placeholder="新しいプレイリストの名前" maxlength="80" autocomplete="off" spellcheck="false" hidden />
+              <p class="status" id="playlist-import-note" role="status"></p>
+            </div>
             <p class="status" id="playlist-status" role="status"></p>
             <ol id="playlist-tracks" class="results" role="listbox" aria-label="プレイリストの曲"></ol>
           </div>
