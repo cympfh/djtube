@@ -23,7 +23,7 @@ from PIL import Image
 from starlette.websockets import WebSocketDisconnect
 
 from djtube.app import create_app
-from djtube.compose import VIDEO_FPS, VIDEO_HEIGHT, VIDEO_WIDTH, Composer
+from djtube.compose import VIDEO_FPS, VIDEO_HEIGHT, VIDEO_WIDTH, Composer, deck_card
 from djtube.live import CODE_REPLACED, CODE_TOO_BIG, MAX_TEXT, NOW_IGNORED, LiveHub, parse_now
 from djtube.thumbs import (
     MAX_BYTES,
@@ -32,6 +32,7 @@ from djtube.thumbs import (
     MAX_PIXELS,
     MAX_QUEUED,
     ThumbCache,
+    _crop_letterbox,
     _dimensions_ok,
     _http_get,
     _open_jpeg,
@@ -45,7 +46,10 @@ from djtube.video import (
     MAX_VIDEO_ENCODERS,
     MAX_VIDEO_PER_IP,
     VIDEO_BITRATE,
+    VIDEO_BUFSIZE,
+    VIDEO_MAXRATE,
     VIDEO_MIME,
+    _SYNC_PACKETS,
     FfmpegRelay,
     TsSyncBuffer,
     _Mux,
@@ -237,9 +241,23 @@ def test_composer_keeps_at_most_four_cards():
     assert len(composer._cards) == 4
 
 
+def _letterbox(size: tuple[int, int], band: int, color: tuple[int, int, int]) -> Image.Image:
+    width, height = size
+    image = Image.new("RGB", size, (0, 0, 0))
+    image.paste(Image.new("RGB", (width, max(1, height - 2 * band)), color), (0, band))
+    return image
+
+
+def _jpeg_of(image: Image.Image) -> bytes:
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=85)
+    return buffer.getvalue()
+
+
 def test_thumbnails_come_only_from_ytimg_and_skip_placeholders():
     assert thumb_urls(VIDEO) == (
         f"https://i.ytimg.com/vi/{VIDEO}/maxresdefault.jpg",
+        f"https://i.ytimg.com/vi/{VIDEO}/sddefault.jpg",
         f"https://i.ytimg.com/vi/{VIDEO}/hqdefault.jpg",
     )
     with pytest.raises(ValueError):
@@ -255,18 +273,33 @@ def test_thumbnails_come_only_from_ytimg_and_skip_placeholders():
     assert calls == []
 
     good = _jpeg((480, 360), (8, 8, 8))
-    seen: list[str] = []
+    seen_sd: list[str] = []
 
-    def fallback(url: str) -> tuple[int, bytes]:
-        seen.append(url)
+    def use_sd(url: str) -> tuple[int, bytes]:
+        seen_sd.append(url)
         if url.endswith("maxresdefault.jpg"):
             return 404, b"missing"
-        return 200, good
+        if url.endswith("sddefault.jpg"):
+            return 200, good
+        raise AssertionError(url)
 
-    image = load_youtube_thumb(VIDEO, fallback)
+    image = load_youtube_thumb(VIDEO, use_sd)
     assert image is not None and image.size == (480, 360)
-    assert seen == list(thumb_urls(VIDEO))
-    assert all(url.startswith("https://i.ytimg.com/vi/") for url in seen)
+    assert seen_sd == list(thumb_urls(VIDEO)[:2])
+    assert all(url.startswith("https://i.ytimg.com/vi/") for url in seen_sd)
+
+    seen_hq: list[str] = []
+
+    def use_hq(url: str) -> tuple[int, bytes]:
+        seen_hq.append(url)
+        if url.endswith("hqdefault.jpg"):
+            return 200, good
+        return 404, b"missing"
+
+    image = load_youtube_thumb(VIDEO, use_hq)
+    assert image is not None and image.size == (480, 360)
+    assert seen_hq == list(thumb_urls(VIDEO))
+    assert all(url.startswith("https://i.ytimg.com/vi/") for url in seen_hq)
 
     def tiny_then_real(url: str) -> tuple[int, bytes]:
         if url.endswith("maxresdefault.jpg"):
@@ -292,6 +325,62 @@ def test_thumbnails_come_only_from_ytimg_and_skip_placeholders():
     assert small.warm(OTHER) is made
     assert small.get(VIDEO) is None
     assert small.get(OTHER) is made
+
+
+def test_letterbox_crop_keeps_centered_sixteen_nine_only():
+    sd = _letterbox((640, 480), 60, (200, 40, 50))
+    cropped = _crop_letterbox(sd)
+    assert cropped.size == (640, 360)
+    assert cropped.getpixel((0, 0)) == (200, 40, 50)
+    assert cropped.getpixel((639, 359)) == (200, 40, 50)
+
+    hq = _letterbox((480, 360), 45, (40, 180, 60))
+    hq_cropped = _crop_letterbox(hq)
+    assert hq_cropped.size == (480, 270)
+    assert hq_cropped.getpixel((0, 0)) == (40, 180, 60)
+
+    plain = Image.new("RGB", (640, 480), (180, 70, 40))
+    plain.paste(Image.new("RGB", (220, 140), (20, 140, 200)), (30, 40))
+    assert _crop_letterbox(plain).size == (640, 480)
+
+    uneven = Image.new("RGB", (640, 480), (180, 70, 40))
+    uneven.paste(Image.new("RGB", (640, 120), (0, 0, 0)), (0, 0))
+    assert _crop_letterbox(uneven).size == (640, 480)
+
+    side = Image.new("RGB", (640, 480), (200, 80, 40))
+    side.paste(Image.new("RGB", (320, 480), (0, 0, 0)), (0, 0))
+    assert _crop_letterbox(side).size == (640, 480)
+
+    opened = _open_jpeg(_jpeg_of(sd))
+    assert opened is not None and opened.size == (640, 360)
+
+
+def test_sixteen_nine_card_is_pixel_exact_and_four_three_stays_contained():
+    source = Image.new("RGB", (1280, 720), (8, 16, 24))
+    source.putpixel((640, 360), (201, 19, 77))
+    card = deck_card(source)
+    assert card.size == (1280, 720)
+    assert card.getpixel((640, 360)) == source.getpixel((640, 360))
+    assert card.tobytes() == source.tobytes()
+
+    four_three = Image.new("RGB", (640, 480), (220, 30, 40))
+    contained = deck_card(four_three)
+    assert contained.getpixel((640, 360)) == (220, 30, 40)
+    corner = contained.getpixel((0, 0))
+    assert corner != (220, 30, 40)
+    assert corner[0] < 140
+
+    wide = Image.new("RGB", (320, 180), (240, 10, 10))
+    tall = Image.new("RGB", (160, 120), (10, 10, 240))
+    mixed = Composer((320, 180), fade=0).frame(
+        [(VIDEO, 0.5), (OTHER, 0.5)],
+        {VIDEO: wide, OTHER: tall},
+        now=0,
+    )
+    mix_corner = mixed.getpixel((0, 0))
+    mix_center = mixed.getpixel((160, 90))
+    assert mix_corner[0] > 80
+    assert mix_center[0] > 80 and mix_center[2] > 80
 
 
 def test_sync_buffer_starts_at_the_video_sps():
@@ -325,7 +414,16 @@ def test_ffmpeg_command_encodes_aac_and_one_x264_thread():
     assert MAX_VIDEO_ENCODERS == 3
     assert MAX_VIDEO_PER_IP == 1
     assert VIDEO_MIME == "video/mp2t"
-    assert VIDEO_BITRATE == 350_000
+    assert VIDEO_BITRATE == 800_000
+    assert VIDEO_MAXRATE == 1_000_000
+    assert VIDEO_BUFSIZE == 500_000
+    assert command[command.index("-b:v") + 1] == str(VIDEO_BITRATE)
+    assert command[command.index("-maxrate") + 1] == str(VIDEO_MAXRATE)
+    assert command[command.index("-bufsize") + 1] == str(VIDEO_BUFSIZE)
+    assert command[command.index("-preset") + 1] == "ultrafast"
+    assert command[command.index("-tune") + 1] == "stillimage"
+    assert command[command.index("-g") + 1] == str(VIDEO_FPS)
+    assert _SYNC_PACKETS * 188 > (VIDEO_MAXRATE // 8) * 2
     assert command[command.index("-c:a") + 1] == "aac"
     assert command[command.index("-profile:a") + 1] == "aac_low"
     assert command[command.index("-b:a") + 1] == "128k"

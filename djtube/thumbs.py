@@ -20,9 +20,11 @@ from PIL import Image, UnidentifiedImageError
 
 from djtube.ids import is_video_id
 
-# maxresdefault is 1280x720 when YouTube has it, and 404 otherwise. hqdefault
-# is 480x360 and is there for essentially every video. A 200 response that is
-# smaller than this is the placeholder jpeg, not a picture we should show.
+# maxresdefault is 1280x720 when YouTube has it, and 404 otherwise.
+# sddefault is 640x480 and hqdefault is 480x360. Both are 4:3, usually with
+# black bars around a 16:9 picture. hqdefault is there for essentially every
+# video. A 200 response that is smaller than this is the placeholder jpeg,
+# not a picture we should show.
 MIN_WIDTH = 320
 MIN_HEIGHT = 180
 MAX_BYTES = 2 * 1024 * 1024
@@ -43,13 +45,82 @@ MAX_CACHE_BYTES = 24 * 1024 * 1024
 NEGATIVE_TTL = 30.0
 FETCH_TIMEOUT = 4.0
 
-_NAMES = ("maxresdefault.jpg", "hqdefault.jpg")
+_NAMES = ("maxresdefault.jpg", "sddefault.jpg", "hqdefault.jpg")
+# A letterbox bar is flat and near black. The picture under it is not.
+_BAR_LUMA = 18
+_BAR_SPREAD = 12
+_CONTENT_LIFT = 24
 
 
-def thumb_urls(video_id: str) -> tuple[str, str]:
+def thumb_urls(video_id: str) -> tuple[str, str, str]:
     if not is_video_id(video_id):
         raise ValueError("invalid video id")
-    return tuple(f"https://i.ytimg.com/vi/{video_id}/{name}" for name in _NAMES)
+    maxres, sd, hq = _NAMES
+    base = f"https://i.ytimg.com/vi/{video_id}"
+    return (f"{base}/{maxres}", f"{base}/{sd}", f"{base}/{hq}")
+
+
+def _strip_luma(image: Image.Image, box: tuple[int, int, int, int]) -> tuple[float, float] | None:
+    """Mean luma and the brightest column, or None when the box is empty."""
+
+    left, upper, right, lower = box
+    if right <= left or lower <= upper:
+        return None
+    sample = image.crop(box).resize((16, 4), Image.Resampling.BOX)
+    raw = sample.tobytes()
+    width, height = sample.size
+    bands = len(sample.getbands())
+    columns: list[float] = []
+    values: list[int] = []
+    for x in range(width):
+        total = 0
+        for y in range(height):
+            offset = (y * width + x) * bands
+            red, green, blue = raw[offset], raw[offset + 1], raw[offset + 2]
+            luma = (red * 299 + green * 587 + blue * 114) // 1000
+            values.append(luma)
+            total += luma
+        columns.append(total / height)
+    return sum(values) / len(values), max(columns)
+
+
+def _is_bar(stats: tuple[float, float] | None) -> bool:
+    if stats is None:
+        return False
+    mean, peak = stats
+    return mean <= _BAR_LUMA and peak <= _BAR_LUMA + _BAR_SPREAD
+
+
+def _crop_letterbox(image: Image.Image) -> Image.Image:
+    """Keep the centered 16:9 when sd/hq has symmetric dark bars.
+
+    A 4:3 picture with no bars, and a picture that is dark on only one edge,
+    is returned unchanged. The kept region is the centered 16:9, so 60px and
+    45px are not hardcoded.
+    """
+
+    width, height = image.size
+    content_h = (width * 9) // 16
+    if content_h < 2 or content_h >= height:
+        return image
+    bar = (height - content_h) // 2
+    if bar < 8:
+        return image
+    # Stay off the picture edge. JPEG ringing lightens the last rows of a bar.
+    inset = max(2, bar // 5)
+    if inset * 2 >= bar:
+        inset = 1
+    top = _strip_luma(image, (0, inset, width, bar - inset))
+    bottom = _strip_luma(image, (0, height - bar + inset, width, height - inset))
+    if top is None or bottom is None or not _is_bar(top) or not _is_bar(bottom):
+        return image
+    if abs(top[0] - bottom[0]) > _BAR_SPREAD:
+        return image
+    crop_top = (height - content_h) // 2
+    content = _strip_luma(image, (0, crop_top + content_h // 3, width, crop_top + (2 * content_h) // 3))
+    if content is None or content[0] < max(top[0], bottom[0]) + _CONTENT_LIFT:
+        return image
+    return image.crop((0, crop_top, width, crop_top + content_h))
 
 
 def _dimensions_ok(width: int, height: int, *, minimum: bool) -> bool:
@@ -88,7 +159,7 @@ def _open_jpeg(body: bytes) -> Image.Image | None:
         image.load()
     except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError):
         return None
-    rgb = image.convert("RGB")
+    rgb = _crop_letterbox(image.convert("RGB"))
     edge = max(rgb.width, rgb.height)
     if edge > 1280:
         scale = 1280 / edge
@@ -156,7 +227,7 @@ def thumb_cache() -> ThumbCache:
 
 
 def load_youtube_thumb(video_id: str, get=None) -> Image.Image | None:
-    """Try maxresdefault, then hqdefault. `get` is `(url) -> (status, body)`."""
+    """Try maxresdefault, then sddefault, then hqdefault. `get` is `(url) -> (status, body)`."""
 
     if not is_video_id(video_id):
         return None
