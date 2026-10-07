@@ -367,3 +367,26 @@ test("the playlist panel has the import form wired like the search box", () => {
   assert.match(importer, /setPlaylistImportDestination/);
   assert.match(importer, /setPlaylistImportName/);
 });
+
+test("importPlaylist passes the abort signal through to fetch", async () => {
+  const app = readFileSync(new URL("../../djtube/static/app.js", import.meta.url), "utf8");
+  const call = app.slice(app.indexOf("importPlaylist: (body, options = {})"), app.indexOf("playlistImportUrl:"));
+  assert.match(call, /signal:\s*options\.signal/);
+  const fetchSrc = app.slice(app.indexOf("async function fetchJson"), app.indexOf("async function fetchSearch"));
+  const calls = [];
+  const fetchJson = new Function("fetch", "prefix", `${fetchSrc}\nreturn fetchJson;`)(
+    async (url, options) => {
+      calls.push({ url, options });
+      return { ok: true, status: 200, json: async () => ({ added: 1 }) };
+    },
+    "",
+  );
+  const controller = new AbortController();
+  await fetchJson("/api/playlists/import", {
+    method: "POST",
+    body: "{}",
+    signal: controller.signal,
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.signal, controller.signal);
+});

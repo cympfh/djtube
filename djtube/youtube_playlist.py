@@ -6,10 +6,14 @@ playlist. Import uses the same result, then decides where to save it.
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
+import os
 import re
+import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -86,24 +90,63 @@ class ImportCancelled(Exception):
 
 
 class FetchControl:
-    """Cancel flag plus the HTTP client or yt-dlp process this lookup owns."""
+    """Cancel flag for one lookup. The worker notices it between pages."""
 
     def __init__(self) -> None:
         self.cancel = threading.Event()
-        self.http: httpx.Client | None = None
-        self.proc: subprocess.Popen | None = None
 
     def abort(self) -> None:
         self.cancel.set()
-        proc = self.proc
-        if proc is not None and proc.poll() is None:
-            proc.kill()
-        http = self.http
-        if http is not None:
-            try:
-                http.close()
-            except Exception:
-                pass
+
+
+_YTDLP_LOCK = threading.Lock()
+_YTDLP_PROC: subprocess.Popen | None = None
+
+
+def _scan_cap() -> int:
+    """Playlist items one lookup may read. This is the only 500 cap."""
+
+    return PLAYLIST_ITEM_LIMIT
+
+
+def _watch_ytdlp(proc: subprocess.Popen) -> None:
+    global _YTDLP_PROC
+    with _YTDLP_LOCK:
+        _YTDLP_PROC = proc
+
+
+def _unwatch_ytdlp(proc: subprocess.Popen) -> None:
+    global _YTDLP_PROC
+    with _YTDLP_LOCK:
+        if _YTDLP_PROC is proc:
+            _YTDLP_PROC = None
+
+
+def _kill_ytdlp_group(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.wait()
+
+
+def _reap_ytdlp_at_exit() -> None:
+    with _YTDLP_LOCK:
+        proc = _YTDLP_PROC
+    if proc is not None:
+        _kill_ytdlp_group(proc)
+
+
+atexit.register(_reap_ytdlp_at_exit)
+
+
+def _overflow(playable: int, room: int, reported: object, examined: int) -> int:
+    extra = max(0, playable - room)
+    if isinstance(reported, int) and not isinstance(reported, bool) and reported > examined:
+        extra += reported - examined
+    return extra
 
 
 @dataclass(frozen=True)
@@ -170,10 +213,10 @@ def rejected_playlist_message(source: object) -> str | None:
     return None
 
 
-def _room(limit: int) -> int:
+def _room(limit: int, cap: int) -> int:
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
-        return PLAYLIST_ITEM_LIMIT
-    return min(limit, PLAYLIST_ITEM_LIMIT)
+        return cap
+    return min(limit, cap)
 
 
 def _known_ids(known: set[str] | None) -> set[str]:
@@ -191,7 +234,7 @@ def fetch_youtube_playlist(
     source: str,
     *,
     client: httpx.Client | None = None,
-    limit: int = PLAYLIST_ITEM_LIMIT,
+    limit: int | None = None,
     known: set[str] | None = None,
     control: FetchControl | None = None,
     now=None,
@@ -212,23 +255,20 @@ def fetch_youtube_playlist(
     list_id = parse_playlist_id(source)
     if list_id is None:
         raise PlaylistLookupError("プレイリストのURLを入れてください", 400)
-    room = _room(limit)
+    cap = _scan_cap()
+    room = cap if limit is None else _room(limit, cap)
     present = _known_ids(known)
     cancel = None if control is None else control.cancel
     clock = now or time.monotonic
     key = api_key()
     if not key:
-        return _fetch_ytdlp(list_id, room, present, cancel, control)
+        return _fetch_ytdlp(list_id, room, present, cancel, cap)
     owns = client is None
     http = client or _open_client()
-    if control is not None:
-        control.http = http
     deadline = clock() + DEADLINE_SECONDS
     try:
-        return _fetch_api(http, list_id, key, room, present, cancel, deadline, clock)
+        return _fetch_api(http, list_id, key, room, present, cancel, deadline, clock, cap)
     finally:
-        if control is not None and control.http is http:
-            control.http = None
         if owns:
             http.close()
 
@@ -379,6 +419,7 @@ def _fetch_api(
     cancel: threading.Event | None,
     deadline: float,
     now,
+    cap: int,
 ) -> YouTubePlaylist:
     candidates: list[str] = []
     repeats: list[str] = []
@@ -387,32 +428,26 @@ def _fetch_api(
     repeated = 0
     seen_items = 0
     page_token: str | None = None
-    pages = 0
     total_results: int | None = None
-    hit_cap = False
-    while seen_items < PLAYLIST_ITEM_LIMIT and pages < PLAYLIST_ITEM_LIMIT:
+    while seen_items < cap:
         _cancelled(cancel)
-        pages += 1
         params: dict[str, object] = {
             "part": "snippet,contentDetails,status",
             "playlistId": list_id,
-            "maxResults": min(PAGE_SIZE, PLAYLIST_ITEM_LIMIT - seen_items),
+            "maxResults": min(PAGE_SIZE, cap - seen_items),
             "key": key,
         }
         if page_token:
             params["pageToken"] = page_token
         payload = _read(http, PLAYLIST_ITEMS_URL, params, _budget(deadline, now), playlist=True)
-        _cancelled(cancel)
         reported = _total_results(payload)
         if reported is not None:
             total_results = reported
         items = payload.get("items")
         if not isinstance(items, list) or not items:
+            page_token = None
             break
-        for item in items:
-            if seen_items >= PLAYLIST_ITEM_LIMIT:
-                hit_cap = True
-                break
+        for item in items[: cap - seen_items]:
             seen_items += 1
             video_id = _video_id(item)
             if video_id is None or not isinstance(item, dict) or _unavailable_item(item):
@@ -429,9 +464,7 @@ def _fetch_api(
         page_token = _next_token(payload, page_token)
         if page_token is None:
             break
-        if seen_items >= PLAYLIST_ITEM_LIMIT:
-            hit_cap = True
-            break
+    hit_cap = seen_items >= cap and page_token is not None
     return _hydrate_ordered(
         http,
         list_id,
@@ -477,10 +510,8 @@ def _hydrate_ordered(
             _budget(deadline, now),
             playlist=False,
         )
-        _cancelled(cancel)
         for track in tracks_from_youtube_videos(payload):
             found[track.id] = track
-    _cancelled(cancel)
     playable: list[Track] = []
     for video_id in candidates:
         track = found.get(video_id)
@@ -493,17 +524,18 @@ def _hydrate_ordered(
             repeated += 1
         else:
             unavailable += 1
-    overflow = max(0, len(playable) - room)
+    overflow = _overflow(len(playable), room, total_results if hit_cap else None, seen_items)
     tracks = playable[:room]
-    if hit_cap and total_results is not None and total_results > seen_items:
-        overflow += total_results - seen_items
     return YouTubePlaylist(list_id, tracks, unavailable, repeated, overflow)
 
 
-def _ytdlp_command(list_id: str) -> list[str]:
+def _ytdlp_command(list_id: str, cap: int) -> list[str]:
     url = "https://www.youtube.com/playlist?" + urlencode({"list": list_id})
     return [
-        "yt-dlp",
+        sys.executable,
+        "-m",
+        "yt_dlp",
+        "--ignore-config",
         "-J",
         "--flat-playlist",
         "--no-warnings",
@@ -511,7 +543,7 @@ def _ytdlp_command(list_id: str) -> list[str]:
         "--socket-timeout",
         "20",
         "--playlist-end",
-        str(PLAYLIST_ITEM_LIMIT),
+        str(cap),
         url,
     ]
 
@@ -521,49 +553,51 @@ def _fetch_ytdlp(
     room: int,
     known: set[str],
     cancel: threading.Event | None,
-    control: FetchControl | None,
+    cap: int,
 ) -> YouTubePlaylist:
     deadline = time.monotonic() + DEADLINE_SECONDS
-    command = _ytdlp_command(list_id)
+    command = _ytdlp_command(list_id, cap)
     out = tempfile.TemporaryFile()
     err = tempfile.TemporaryFile()
     try:
-        proc = subprocess.Popen(command, stdout=out, stderr=err, stdin=subprocess.DEVNULL)
-    except OSError:
-        out.close()
-        err.close()
-        log.warning("yt-dlp playlist lookup failed: OSError")
-        raise PlaylistLookupError("プレイリストを取れませんでした", 502) from None
-    if control is not None:
-        control.proc = proc
-    try:
-        while proc.poll() is None:
-            _stop_ytdlp(proc, cancel, deadline)
-            remaining = deadline - time.monotonic()
-            try:
-                proc.wait(timeout=min(0.2, max(0.05, remaining)))
-            except subprocess.TimeoutExpired:
-                continue
-        _stop_ytdlp(proc, cancel, deadline)
-        if proc.returncode != 0:
-            log.warning("yt-dlp playlist lookup failed: exit")
-            raise PlaylistLookupError("プレイリストを取れませんでした", 502) from None
-        out.seek(0)
         try:
-            info = json.loads(out.read().decode("utf-8"))
-        except (UnicodeError, ValueError):
+            proc = subprocess.Popen(
+                command,
+                stdout=out,
+                stderr=err,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            log.warning("yt-dlp playlist lookup failed: OSError")
             raise PlaylistLookupError("プレイリストを取れませんでした", 502) from None
+        _watch_ytdlp(proc)
+        try:
+            while proc.poll() is None:
+                _stop_ytdlp(proc, cancel, deadline)
+                remaining = deadline - time.monotonic()
+                try:
+                    proc.wait(timeout=min(0.2, max(0.05, remaining)))
+                except subprocess.TimeoutExpired:
+                    continue
+            _stop_ytdlp(proc, cancel, deadline)
+            if proc.returncode != 0:
+                log.warning("yt-dlp playlist lookup failed: exit")
+                raise PlaylistLookupError("プレイリストを取れませんでした", 502) from None
+            out.seek(0)
+            try:
+                info = json.loads(out.read().decode("utf-8"))
+            except (UnicodeError, ValueError):
+                raise PlaylistLookupError("プレイリストを取れませんでした", 502) from None
+        finally:
+            _kill_ytdlp_group(proc)
+            _unwatch_ytdlp(proc)
     finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait()
-        if control is not None and control.proc is proc:
-            control.proc = None
         out.close()
         err.close()
     if not isinstance(info, dict):
         raise PlaylistLookupError("プレイリストを取れませんでした", 502)
-    return _playlist_from_ytdlp(list_id, info, room, known)
+    return _playlist_from_ytdlp(list_id, info, room, known, cap)
 
 
 def _stop_ytdlp(proc: subprocess.Popen, cancel: threading.Event | None, deadline: float) -> None:
@@ -574,20 +608,18 @@ def _stop_ytdlp(proc: subprocess.Popen, cancel: threading.Event | None, deadline
         reason = "timeout"
     if reason is None:
         return
-    if proc.poll() is None:
-        proc.kill()
-        proc.wait()
+    _kill_ytdlp_group(proc)
     if reason == "cancel":
         raise ImportCancelled()
     log.warning("yt-dlp playlist lookup failed: TimeoutError")
     raise PlaylistLookupError("プレイリストを取れませんでした", 502) from None
 
 
-def _playlist_from_ytdlp(list_id: str, info: dict, room: int, known: set[str]) -> YouTubePlaylist:
+def _playlist_from_ytdlp(list_id: str, info: dict, room: int, known: set[str], cap: int) -> YouTubePlaylist:
     raw = info.get("entries")
     if not isinstance(raw, list):
         raw = []
-    examined = raw[:PLAYLIST_ITEM_LIMIT]
+    examined = raw[:cap]
     reported = info.get("playlist_count")
     tracks: list[Track] = []
     seen: set[str] = set()
@@ -606,10 +638,8 @@ def _playlist_from_ytdlp(list_id: str, info: dict, room: int, known: set[str]) -
             continue
         seen.add(track.id)
         tracks.append(track)
-    overflow = max(0, len(tracks) - room)
+    overflow = _overflow(len(tracks), room, reported, len(examined))
     kept = tracks[:room]
-    if isinstance(reported, int) and not isinstance(reported, bool) and reported > len(examined):
-        overflow += reported - len(examined)
     return YouTubePlaylist(list_id, kept, unavailable, repeated, overflow)
 
 

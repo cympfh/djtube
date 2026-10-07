@@ -3,14 +3,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import signal
 import subprocess
+import sys
 import threading
 import time
+
+_REAL_POPEN = subprocess.Popen
 
 import anyio
 import httpx
 import pytest
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from djtube.app import create_app
@@ -20,6 +23,7 @@ from djtube.youtube_playlist import (
     PLAYLIST_ITEM_LIMIT,
     ImportCancelled,
     PlaylistLookupError,
+    _unavailable_item,
     fetch_youtube_playlist,
     parse_playlist_id,
     rejected_playlist_message,
@@ -264,6 +268,10 @@ def test_private_and_deleted_videos_are_skipped_and_not_looked_up(monkeypatch):
     assert [track.id for track in fetched.tracks] == [VIDEO, public]
     assert fetched.unavailable == 10
     assert fetched.repeated == 0
+    assert _unavailable_item({"status": {"privacyStatus": "private"}, "snippet": {"title": "普通の題"}}) is True
+    assert _unavailable_item({"status": {"privacyStatus": "public"}, "snippet": {"title": "公開"}}) is False
+    assert _unavailable_item({"snippet": {"title": " Private video "}}) is True
+    assert _unavailable_item({"snippet": {"title": "夜"}}) is False
 
 
 def test_a_video_missing_from_videos_list_counts_as_unavailable_including_repeats(monkeypatch):
@@ -422,11 +430,14 @@ class _Proc:
         self.killed = False
         self.reaped = threading.Event()
         self._dead = threading.Event()
+        self.pid = 424242
 
     def poll(self):
         return self.returncode
 
     def wait(self, timeout=None):
+        if self.reaped.is_set():
+            return self.returncode
         if self.killed:
             time.sleep(0.3)
             self.reaped.set()
@@ -446,11 +457,12 @@ class _Proc:
         self._dead.set()
 
 
-def _install_ytdlp(monkeypatch, entries, *, playlist_count=None, proc=None, err_bytes=b""):
-    seen = {}
+def _install_ytdlp(monkeypatch, entries, *, playlist_count=None, proc=None, err_bytes=b"", ready=None):
+    seen = {"kills": []}
 
-    def popen(cmd, stdout=None, stderr=None, stdin=None, **kwargs):
+    def popen(cmd, stdout=None, stderr=None, stdin=None, start_new_session=False, **kwargs):
         seen["cmd"] = list(cmd)
+        seen["start_new_session"] = start_new_session
         end = int(cmd[cmd.index("--playlist-end") + 1])
         chosen = list(entries)[:end]
         seen["end"] = end
@@ -466,9 +478,18 @@ def _install_ytdlp(monkeypatch, entries, *, playlist_count=None, proc=None, err_
             stderr.write(err_bytes)
             stderr.seek(0)
         seen["proc"] = proc if proc is not None else _Proc(0)
+        if ready is not None:
+            ready.set()
         return seen["proc"]
 
+    def killpg(pid, sig):
+        seen["kills"].append((pid, sig))
+        current = seen.get("proc")
+        if current is not None and pid == getattr(current, "pid", None):
+            current.kill()
+
     monkeypatch.setattr("djtube.youtube_playlist.subprocess.Popen", popen)
+    monkeypatch.setattr("djtube.youtube_playlist.os.killpg", killpg)
     return seen
 
 
@@ -482,6 +503,7 @@ def test_without_a_key_flat_playlist_skips_private_and_repeats(monkeypatch):
             "thumbnail": f"https://i.ytimg.com/vi/{VIDEO}/mqdefault.jpg",
         },
         {"id": OTHER, "title": "[Private video]", "availability": "private"},
+        {"id": "eeeeeeeeeee", "title": "普通の題", "availability": "private", "duration": 10, "channel": "人"},
         {"id": VIDEO, "title": "夜", "duration": 90},
         {"id": THIRD, "title": "[Deleted video]"},
         None,
@@ -489,8 +511,11 @@ def test_without_a_key_flat_playlist_skips_private_and_repeats(monkeypatch):
     seen = _install_ytdlp(monkeypatch, entries)
     fetched = fetch_youtube_playlist(f"https://music.youtube.com/playlist?list={LIST}")
     command = seen["cmd"]
+    assert command[0] == sys.executable
+    assert command[1:4] == ["-m", "yt_dlp", "--ignore-config"]
     assert "-J" in command
     assert "--flat-playlist" in command
+    assert seen["start_new_session"] is True
     assert seen["end"] == PLAYLIST_ITEM_LIMIT
     assert seen["returned"] == len(entries)
     assert f"https://www.youtube.com/playlist?list={LIST}" in command
@@ -498,8 +523,9 @@ def test_without_a_key_flat_playlist_skips_private_and_repeats(monkeypatch):
     assert [track.id for track in fetched.tracks] == [VIDEO]
     assert fetched.tracks[0].channel == "人"
     assert fetched.tracks[0].duration == 90
+    assert "eeeeeeeeeee" not in [track.id for track in fetched.tracks]
     assert fetched.repeated == 1
-    assert fetched.unavailable == 3
+    assert fetched.unavailable == 4
 
 
 def test_ytdlp_failure_is_an_error_without_the_message(monkeypatch, caplog):
@@ -1136,18 +1162,34 @@ def test_imports_are_limited_to_one_hundred_per_day(tmp_path, monkeypatch):
     client.app.state.import_slot.now = lambda: clock["t"]
     for index in range(100):
         clock["t"] = 50_000.0 + index * 61
-        response = client.post("/api/playlists/import", json={"url": LIST, "playlist_id": created["id"]})
+        response = client.post(
+            "/api/playlists/import",
+            json={"url": LIST, "playlist_id": created["id"]},
+            headers={"X-Real-IP": f"203.0.113.{index + 1}"},
+        )
         assert response.status_code == 200, response.text
     clock["t"] = 50_000.0 + 99 * 61
-    blocked = client.post("/api/playlists/import", json={"url": LIST, "playlist_id": created["id"]})
+    blocked = client.post(
+        "/api/playlists/import",
+        json={"url": LIST, "playlist_id": created["id"]},
+        headers={"X-Real-IP": "198.51.100.1"},
+    )
     assert blocked.status_code == 429
-    assert blocked.json()["detail"] == "今日の取り込みの上限に達しました"
+    assert blocked.json()["detail"] == "24時間の取り込みの上限に達しました"
     clock["t"] = 50_000.0 + 86400.0 - 0.001
-    early = client.post("/api/playlists/import", json={"url": LIST, "playlist_id": created["id"]})
+    early = client.post(
+        "/api/playlists/import",
+        json={"url": LIST, "playlist_id": created["id"]},
+        headers={"X-Real-IP": "198.51.100.2"},
+    )
     assert early.status_code == 429
-    assert early.json()["detail"] == "今日の取り込みの上限に達しました"
+    assert early.json()["detail"] == "24時間の取り込みの上限に達しました"
     clock["t"] = 50_000.0 + 86400.0
-    again = client.post("/api/playlists/import", json={"url": LIST, "playlist_id": created["id"]})
+    again = client.post(
+        "/api/playlists/import",
+        json={"url": LIST, "playlist_id": created["id"]},
+        headers={"X-Real-IP": "198.51.100.3"},
+    )
     assert again.status_code == 200
 
 
@@ -1166,22 +1208,6 @@ def test_a_failed_import_releases_the_slot(tmp_path, monkeypatch):
     assert failed.status_code == 502
     again = client.post("/api/playlists/import", json={"url": LIST, "name": "朝"})
     assert again.status_code == 200, again.text
-
-
-def test_an_old_import_cannot_clear_a_newer_slot(tmp_path):
-    _client, _store = _app(tmp_path)
-    slot = _client.app.state.import_slot
-    generation, control = slot.acquire()
-    slot.release(generation)
-    newer, kept = slot.acquire()
-    slot.release(generation)
-    control.abort()
-    assert kept.cancel.is_set() is False
-    with pytest.raises(HTTPException) as caught:
-        slot.acquire()
-    assert caught.value.status_code == 429
-    assert caught.value.detail == "取り込み中です"
-    slot.release(newer)
 
 
 def test_cancel_between_pages_does_not_request_the_next_page(monkeypatch):
@@ -1284,3 +1310,369 @@ def test_a_disconnected_import_writes_nothing_and_frees_the_slot(tmp_path, monke
     again = client.post("/api/playlists/import", json={"url": LIST, "name": "朝"})
     assert again.status_code == 200, again.text
     assert len(store.list_playlists()) == 1
+
+
+def _import_scope(body: bytes) -> dict:
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/playlists/import",
+        "raw_path": b"/api/playlists/import",
+        "query_string": b"",
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+        "client": ("127.0.0.1", 123),
+        "server": ("test", 80),
+        "root_path": "",
+    }
+
+
+def test_overflow_is_counted_after_duplicates_are_removed(tmp_path, monkeypatch):
+    """Importing PLsomemix into a 295-track list adds 5, with K 5.
+
+    113 duplicates come first, then 3 private videos, then 10 new ones.
+    Room is 5, so five new tracks are added and five do not fit.
+    """
+
+    mix = "PL" + "somemix" + "a" * 25
+    store = PlaylistStore(tmp_path / "playlists.json")
+    created = store.create("元")
+    for number in range(295):
+        store.add_track(created["id"], _track(vid(number), "既"))
+    items = [playlist_item(vid(number)) for number in range(113)]
+    items.extend(playlist_item(vid(2000 + number), title="普通の題", private=True) for number in range(3))
+    items.extend(playlist_item(vid(1000 + number)) for number in range(10))
+    looked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/playlistItems"):
+            page = int(request.url.params.get("pageToken") or "0")
+            start = page * 50
+            chunk = items[start : start + 50]
+            body = {"items": chunk, "pageInfo": {"totalResults": len(items)}}
+            if start + 50 < len(items):
+                body["nextPageToken"] = str(page + 1)
+            return httpx.Response(200, json=body)
+        requested = request.url.params["id"].split(",")
+        looked.extend(requested)
+        return httpx.Response(200, json={"items": [video_item(video_id) for video_id in requested]})
+
+    _install(monkeypatch, handler)
+    client = TestClient(create_app(store))
+    response = client.post("/api/playlists/import", json={"url": mix, "playlist_id": created["id"]})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert looked == [vid(1000 + number) for number in range(10)]
+    assert body["added"] == 5
+    assert body["duplicates"] == 113
+    assert body["unavailable"] == 3
+    assert body["overflow"] == 5
+    assert len(body["playlist"]["tracks"]) == 300
+    assert [item["id"] for item in body["playlist"]["tracks"][-5:]] == [vid(1000 + number) for number in range(5)]
+
+
+def test_the_next_import_stays_busy_until_the_cancelled_worker_returns(tmp_path, monkeypatch):
+    pages = {"n": 0}
+    started = threading.Event()
+    release = threading.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/playlistItems"):
+            pages["n"] += 1
+            if pages["n"] == 1:
+                started.set()
+                assert release.wait(5)
+                return httpx.Response(
+                    200,
+                    json={"items": [playlist_item(OTHER)], "nextPageToken": "next", "pageInfo": {"totalResults": 2}},
+                )
+            return httpx.Response(200, json={"items": [playlist_item(THIRD)]})
+        return httpx.Response(200, json={"items": [video_item(request.url.params["id"].split(",")[0])]})
+
+    _install(monkeypatch, handler)
+    store = PlaylistStore(tmp_path / "playlists.json")
+    app = create_app(store)
+    body = json.dumps({"url": LIST, "name": "朝"}).encode()
+
+    async def scenario():
+        sent = False
+        disconnect = asyncio.Event()
+
+        async def receive():
+            nonlocal sent
+            if not sent:
+                sent = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            if disconnect.is_set():
+                return {"type": "http.disconnect"}
+            await disconnect.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(_message):
+            return None
+
+        task = asyncio.create_task(app(_import_scope(body), receive, send))
+        assert await asyncio.to_thread(started.wait, 2)
+        disconnect.set()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            saw_stopping = False
+            for _ in range(40):
+                probe = await asyncio.wait_for(
+                    http.post("/api/playlists/import", json={"url": LIST, "name": "次"}),
+                    1,
+                )
+                if probe.status_code != 429:
+                    raise AssertionError(probe.text)
+                if probe.json()["detail"] == "前の取り込みを止めています":
+                    saw_stopping = True
+                    break
+                await asyncio.sleep(0.05)
+            assert saw_stopping
+            assert release.is_set() is False
+            assert pages["n"] == 1
+            release.set()
+            await asyncio.wait_for(task, 2)
+            assert pages["n"] == 1
+            again = await http.post("/api/playlists/import", json={"url": LIST, "name": "朝"})
+            assert again.status_code == 200, again.text
+
+    anyio.run(scenario)
+    assert len(store.list_playlists()) == 1
+
+
+def test_cancel_kills_the_ytdlp_process_group(tmp_path, monkeypatch):
+    ready = threading.Event()
+    hanging = _Proc(None)
+    seen = _install_ytdlp(monkeypatch, [], proc=hanging, ready=ready)
+    store = PlaylistStore(tmp_path / "playlists.json")
+    app = create_app(store)
+    body = json.dumps({"url": LIST, "name": "朝"}).encode()
+
+    async def scenario():
+        sent = False
+        disconnect = asyncio.Event()
+
+        async def receive():
+            nonlocal sent
+            if not sent:
+                sent = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            if disconnect.is_set():
+                return {"type": "http.disconnect"}
+            await disconnect.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(_message):
+            return None
+
+        task = asyncio.create_task(app(_import_scope(body), receive, send))
+        assert await asyncio.to_thread(ready.wait, 2)
+        disconnect.set()
+        await asyncio.wait_for(task, 2)
+
+    anyio.run(scenario)
+    assert seen["start_new_session"] is True
+    assert (hanging.pid, signal.SIGKILL) in seen["kills"]
+    assert hanging.reaped.is_set()
+    assert store.list_playlists() == []
+
+
+def test_a_busy_rejection_does_not_spend_the_rate_budget(tmp_path, monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    hold = {"on": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/playlistItems") and hold["on"]:
+            started.set()
+            assert release.wait(5)
+            hold["on"] = False
+        return _fast_import_handler(request)
+
+    _install(monkeypatch, handler)
+    app = create_app(PlaylistStore(tmp_path / "playlists.json"))
+    clock = {"t": 5_000.0}
+    app.state.import_slot.now = lambda: clock["t"]
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            created = (await http.post("/api/playlists", json={"name": "夜"})).json()
+            payload = {"url": LIST, "playlist_id": created["id"]}
+            minute_ip = {"X-Real-IP": "203.0.113.7"}
+            hold["on"] = True
+            task = asyncio.create_task(http.post("/api/playlists/import", json=payload, headers=minute_ip))
+            assert await asyncio.to_thread(started.wait, 2)
+            for _ in range(6):
+                busy = await http.post("/api/playlists/import", json=payload, headers=minute_ip)
+                assert busy.status_code == 429
+                assert busy.json()["detail"] == "取り込み中です"
+            release.set()
+            first = await asyncio.wait_for(task, 2)
+            assert first.status_code == 200, first.text
+            for _ in range(5):
+                ok = await http.post("/api/playlists/import", json=payload, headers=minute_ip)
+                assert ok.status_code == 200, ok.text
+            blocked = await http.post("/api/playlists/import", json=payload, headers=minute_ip)
+            assert blocked.status_code == 429
+            assert blocked.json()["detail"] == "取り込みの回数が多いです"
+
+            ip = {"X-Real-IP": "203.0.113.8"}
+            for index in range(10):
+                clock["t"] = 20_000.0 + index * 61
+                ok = await http.post("/api/playlists/import", json=payload, headers=ip)
+                assert ok.status_code == 200, ok.text
+            clock["t"] = 20_000.0 + 9 * 61
+            started.clear()
+            release.clear()
+            hold["on"] = True
+            held = asyncio.create_task(http.post("/api/playlists/import", json=payload, headers=ip))
+            assert await asyncio.to_thread(started.wait, 2)
+            for _ in range(10):
+                busy = await http.post("/api/playlists/import", json=payload, headers=ip)
+                assert busy.status_code == 429
+                assert busy.json()["detail"] == "取り込み中です"
+            release.set()
+            assert (await asyncio.wait_for(held, 2)).status_code == 200
+            followed = await http.post("/api/playlists/import", json=payload, headers=ip)
+            assert followed.status_code == 200, followed.text
+
+    anyio.run(scenario)
+
+
+def test_six_hundred_items_report_the_unscanned_tail(tmp_path, monkeypatch):
+    store = PlaylistStore(tmp_path / "playlists.json")
+    created = store.create("元")
+    store.add_track(created["id"], _track(vid(9000), "先"))
+    store.add_track(created["id"], _track(vid(9001), "次"))
+    pages: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/playlistItems"):
+            page = int(request.url.params.get("pageToken") or "0")
+            pages.append(page)
+            start = page * 50
+            if start >= 600:
+                return httpx.Response(200, json={"items": [], "pageInfo": {"totalResults": 600}})
+            count = min(50, 600 - start)
+            items = [playlist_item(vid(start + offset)) for offset in range(count)]
+            body = {"items": items, "pageInfo": {"totalResults": 600}}
+            if start + count < 600:
+                body["nextPageToken"] = str(page + 1)
+            return httpx.Response(200, json=body)
+        requested = request.url.params["id"].split(",")
+        return httpx.Response(200, json={"items": [video_item(video_id) for video_id in requested]})
+
+    _install(monkeypatch, handler)
+    client = TestClient(create_app(store))
+    response = client.post("/api/playlists/import", json={"url": LIST, "playlist_id": created["id"]})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert pages == list(range(10))
+    assert body["added"] == 298
+    assert body["duplicates"] == 0
+    assert body["unavailable"] == 0
+    assert body["overflow"] == 302
+    assert len(body["playlist"]["tracks"]) == 300
+
+
+def test_ytdlp_skips_ids_the_destination_already_has(tmp_path, monkeypatch):
+    entries = [
+        {"id": VIDEO, "title": "既", "duration": 10, "channel": "人"},
+        {"id": OTHER, "title": "新", "duration": 12, "channel": "人"},
+    ]
+    _install_ytdlp(monkeypatch, entries)
+    fetched = fetch_youtube_playlist(LIST, known={VIDEO})
+    assert [track.id for track in fetched.tracks] == [OTHER]
+    assert fetched.repeated == 1
+
+    store = PlaylistStore(tmp_path / "playlists.json")
+    created = store.create("夜")
+    store.add_track(created["id"], _track(VIDEO, "既"))
+    seen: dict[str, object] = {}
+    real = fetch_youtube_playlist
+
+    def wrapped(source, **kwargs):
+        seen["known"] = kwargs.get("known")
+        return real(source, **kwargs)
+
+    monkeypatch.setattr("djtube.app.fetch_youtube_playlist", wrapped)
+    client = TestClient(create_app(store))
+    response = client.post("/api/playlists/import", json={"url": LIST, "playlist_id": created["id"]})
+    assert response.status_code == 200, response.text
+    assert seen["known"] == {VIDEO}
+    assert response.json()["added"] == 1
+    assert response.json()["duplicates"] == 1
+    assert [item["id"] for item in response.json()["playlist"]["tracks"]] == [VIDEO, OTHER]
+
+
+def test_one_address_cannot_spend_the_day(tmp_path, monkeypatch):
+    _install(monkeypatch, _fast_import_handler)
+    client, _store = _app(tmp_path)
+    created = client.post("/api/playlists", json={"name": "夜"}).json()
+    clock = {"t": 10_000.0}
+    client.app.state.import_slot.now = lambda: clock["t"]
+    payload = {"url": LIST, "playlist_id": created["id"]}
+    ip = {"X-Real-IP": "203.0.113.10"}
+    rejected = client.post("/api/playlists/import", json={"url": "not-a-list", "playlist_id": created["id"]}, headers=ip)
+    assert rejected.status_code == 400
+    for index in range(20):
+        clock["t"] = 10_000.0 + index * 61
+        response = client.post("/api/playlists/import", json=payload, headers={**ip, "X-Forwarded-For": "198.51.100.9"})
+        assert response.status_code == 200, response.text
+    clock["t"] = 10_000.0 + 19 * 61
+    blocked = client.post("/api/playlists/import", json=payload, headers={**ip, "X-Forwarded-For": "198.51.100.50"})
+    assert blocked.status_code == 429
+    assert blocked.json()["detail"] == "24時間の取り込みの上限に達しました"
+    other = client.post("/api/playlists/import", json=payload, headers={"X-Real-IP": "203.0.113.11"})
+    assert other.status_code == 200, other.text
+    spoofed = client.post("/api/playlists/import", json=payload, headers={"X-Forwarded-For": "203.0.113.99"})
+    assert spoofed.status_code == 200, spoofed.text
+    clock["t"] = 10_000.0 + 86400.0 - 0.001
+    early = client.post("/api/playlists/import", json=payload, headers=ip)
+    assert early.status_code == 429
+    clock["t"] = 10_000.0 + 86400.0
+    again = client.post("/api/playlists/import", json=payload, headers=ip)
+    assert again.status_code == 200, again.text
+    for index in range(20):
+        clock["t"] = 200_000.0 + index * 61
+        response = client.post("/api/playlists/import", json=payload, headers={"X-Real-IP": "2001:db8:abcd:1::10"})
+        assert response.status_code == 200, response.text
+    same_prefix = client.post("/api/playlists/import", json=payload, headers={"X-Real-IP": "2001:db8:abcd:1::99"})
+    assert same_prefix.status_code == 429
+    assert same_prefix.json()["detail"] == "24時間の取り込みの上限に達しました"
+    other_prefix = client.post("/api/playlists/import", json=payload, headers={"X-Real-IP": "2001:db8:abcd:2::10"})
+    assert other_prefix.status_code == 200, other_prefix.text
+
+
+def test_process_exit_kills_a_running_ytdlp_group(tmp_path):
+    marker = tmp_path / "killed"
+    script = tmp_path / "reap.py"
+    script.write_text(
+        "from djtube import youtube_playlist\n"
+        "class Proc:\n"
+        "    def __init__(self):\n"
+        "        self.pid = 424242\n"
+        "        self.returncode = None\n"
+        "    def poll(self):\n"
+        "        return self.returncode\n"
+        "    def wait(self, timeout=None):\n"
+        "        return self.returncode\n"
+        "    def kill(self):\n"
+        "        self.returncode = -9\n"
+        "def killpg(pid, sig):\n"
+        f"    open({str(marker)!r}, 'w').write(f'{{pid}} {{int(sig)}}')\n"
+        "    youtube_playlist._YTDLP_PROC.kill()\n"
+        "youtube_playlist.os.killpg = killpg\n"
+        "youtube_playlist._watch_ytdlp(Proc())\n"
+    )
+    completed = _REAL_POPEN([sys.executable, str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    stdout, stderr = completed.communicate(timeout=15)
+    assert completed.returncode == 0, stderr + stdout
+    assert marker.read_text(encoding="utf-8") == f"424242 {int(signal.SIGKILL)}"
