@@ -474,9 +474,10 @@ test("FLX4 PLAY and BEAT SYNC LEDs follow deck state", () => {
   assert.match(app, /addEventListener\("pagehide", \(\) => \{\s*extinguishFlx4Leds\(flx4LedPort\);/);
   assert.match(app, /addEventListener\("pageshow", \(\) => \{\s*resumeFlx4Leds\(flx4LedPort\);/);
   const controller = readFileSync(new URL("../../djtube/static/controller.js", import.meta.url), "utf8");
-  const connect = controller.slice(controller.indexOf("export async function connectController"));
+  const connect = controller.slice(controller.indexOf("export function createMidiControl"));
   assert.match(connect, /isFlx4Port\(output\)/);
-  assert.match(connect, /setFlx4Outputs\(flx4LedPort, outputs\)/);
+  assert.match(connect, /setFlx4Outputs\(ledPort, outputs\)/);
+  assert.match(connect, /options\.ledPort \|\| flx4LedPort/);
 });
 
 test("syncBeat and play light FLX4 lamps from the action, without a frame", () => {
@@ -558,7 +559,8 @@ test("MIDI button is on only after a device connects", () => {
   assert.equal(midiButtonState({ state: "open", names: ["DDJ-FLX4"] }), "on");
 
   const app = readFileSync(new URL("../../djtube/static/app.js", import.meta.url), "utf8");
-  const click = app.slice(app.indexOf('midiButton.addEventListener("click"'));
+  const click = app.slice(app.indexOf("const midiControl = createMidiControl"));
+  assert.match(click, /midiButton\.addEventListener\("click", \(\) => \{\s*midiControl\.toggle\(\);/);
   assert.equal(click.includes('dataset.midi = "wait"'), false);
   assert.equal(click.includes('dataset.midi = "on"'), false);
   assert.match(click, /applyMidiStatus\(midiButton, midiLive,/);
@@ -567,7 +569,7 @@ test("MIDI button is on only after a device connects", () => {
   assert.match(css, /\.midi-button\[data-midi="on"\][\s\S]*background:\s*var\(--a\)/);
 });
 
-test("applyMidiStatus writes a result once and leaves the button name", () => {
+test("applyMidiStatus writes a result once and names what a press does", () => {
   const writes = [];
   let title = "";
   let label = "";
@@ -616,7 +618,7 @@ test("applyMidiStatus writes a result once and leaves the button name", () => {
   applyMidiStatus(button, live, { state: "opening", names: [], connected: false });
   assert.deepEqual(painted(), {
     title: "MIDI を開いています…",
-    label: "MIDI を開く",
+    label: "MIDI を開くのをやめる",
     live: "",
     midi: "off",
   });
@@ -628,18 +630,18 @@ test("applyMidiStatus writes a result once and leaves the button name", () => {
 
   applyMidiStatus(button, live, { state: "open", names: ["DDJ-FLX4"], connected: true });
   assert.deepEqual(painted(), {
-    title: "MIDI接続済み：DDJ-FLX4",
-    label: "MIDI を開く",
+    title: "MIDI接続済み：DDJ-FLX4\n押すと切断します",
+    label: "MIDI を切断",
     live: "MIDI接続済み：DDJ-FLX4",
     midi: "on",
   });
-  assert.deepEqual(writes, ["title", "live", "data-midi"]);
+  assert.deepEqual(writes, ["title", "aria-label", "live", "data-midi"]);
 
   writes.length = 0;
   applyMidiStatus(button, live, { state: "open", names: ["DDJ-FLX4"], connected: true, ignored: 4 });
   assert.deepEqual(painted(), {
-    title: "MIDI接続済み：DDJ-FLX4",
-    label: "MIDI を開く",
+    title: "MIDI接続済み：DDJ-FLX4\n押すと切断します",
+    label: "MIDI を切断",
     live: "MIDI接続済み：DDJ-FLX4",
     midi: "on",
   });
@@ -652,7 +654,7 @@ test("applyMidiStatus writes a result once and leaves the button name", () => {
     live: "MIDI未接続",
     midi: "off",
   });
-  assert.deepEqual(writes, ["title", "live", "data-midi"]);
+  assert.deepEqual(writes, ["title", "aria-label", "live", "data-midi"]);
 
   writes.length = 0;
   applyMidiStatus(button, live, { state: "denied", names: [], connected: false });

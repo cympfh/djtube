@@ -1,7 +1,7 @@
 import { SOURCE_UNAVAILABLE, createActions, freshState, sourcePlaybackBlocked } from "./actions.js";
 import {
   applyMidiStatus,
-  connectController,
+  createMidiControl,
   extinguishFlx4Leds,
   flx4LedPort,
   paintFlx4Leds,
@@ -972,12 +972,11 @@ const liveControl = bindLive({
   prefix,
 });
 
+const midiControl = createMidiControl(actions, (status) => {
+  applyMidiStatus(midiButton, midiLive, status);
+});
 midiButton.addEventListener("click", () => {
-  const opening = { state: "opening", names: [], connected: false };
-  applyMidiStatus(midiButton, midiLive, opening);
-  connectController(actions, (status) => {
-    applyMidiStatus(midiButton, midiLive, status);
-  });
+  midiControl.toggle();
 });
 
 const cookiesUi = bindCookies(prefix);
