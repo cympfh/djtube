@@ -94,7 +94,9 @@ LISTENER_QUEUE = 8
 # once; the extras are dropped and the newest one is applied when a token
 # returns. The publisher is not closed.
 NOW_PER_SECOND = 4
-VIDEO_LISTENER_QUEUE = 32
+# One muxer read. Reads average about 4755 bytes and about 27 a second,
+# so 64 is about 2.4 s, just over the 2 s send timeout.
+VIDEO_LISTENER_QUEUE = 64
 # Starts when the ASGI send is awaited. The kernel accepts writes until the
 # socket buffer fills, so a congested listener is not cut until then and keeps
 # that much delay.

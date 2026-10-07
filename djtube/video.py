@@ -9,9 +9,10 @@ picture, so the bytes handed to a late listener start at the most recent SPS
 
 Measured on a 1280x720 solid frame at 4 fps, ultrafast + stillimage: about
 0.09 s of CPU for 3 s of video, roughly 3% of one core. 5 fps is about 4%.
-A solid frame landed near 150 kbps; the cap is 350 kbps so a detailed still
-stays under about half a megabit per listener, audio included. Three of these
-stay well under one core, which is the cap (429 above that).
+A solid frame landed near 150 kbps. The average is 800 kbps and the peak is
+1 Mbps, so a detailed thumbnail stays sharper. 1080p cost about twice the CPU
+and a lower SSIM at the same bitrate, so the picture stays 1280x720. Three of
+these stay well under one core, which is the cap (429 above that).
 
 The process runs only while at least one video listener is connected, plus a
 short linger so a refresh does not pay to start ffmpeg again.
@@ -35,9 +36,10 @@ from djtube.webm import cluster_timecode, rebase_cluster
 log = logging.getLogger("djtube.live")
 
 VIDEO_MIME = "video/mp2t"
-# See the module note. 350 kbps is the average cap, 400 kbps the peak.
-VIDEO_BITRATE = 350_000
-VIDEO_MAXRATE = 400_000
+# See the module note. 800 kbps average, 1 Mbps peak, 500 kbps VBV window.
+VIDEO_BITRATE = 800_000
+VIDEO_MAXRATE = 1_000_000
+VIDEO_BUFSIZE = 500_000
 MAX_VIDEO_ENCODERS = 3
 # One source opening every video URL would otherwise take the whole cap.
 MAX_VIDEO_PER_IP = 1
@@ -58,9 +60,10 @@ _PRIME_CLUSTERS = 2
 # AAC-LC, 48 kHz, one channel. The video URL is mono because the mix is.
 VIDEO_AUDIO_BITRATE = "128k"
 VIDEO_AUDIO_RATE = "48000"
-# 800 packets is 150KB. A 1 s GOP at the 400 kbps ceiling is about 50KB,
-# so the buffer still holds the last keyframe after a burst.
-_SYNC_PACKETS = 800
+# 1600 packets is 301KB. A 1 s GOP can dump the 1 Mbps cap plus the 500 kbps
+# VBV window (187.5KB) and one second of AAC (16KB). MPEG-TS overhead takes
+# that to about 215KB, so the buffer still holds the last keyframe.
+_SYNC_PACKETS = 1600
 _READ = 188 * 32
 _SPS = 7
 _PAT_PID = 0
@@ -133,7 +136,7 @@ def ffmpeg_command(ffmpeg: str, width: int, height: int, fps: int, audio_fd: int
         "-maxrate",
         str(VIDEO_MAXRATE),
         "-bufsize",
-        str(VIDEO_BITRATE // 2),
+        str(VIDEO_BUFSIZE),
         "-c:a",
         "aac",
         "-profile:a",

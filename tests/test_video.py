@@ -23,8 +23,17 @@ from PIL import Image
 from starlette.websockets import WebSocketDisconnect
 
 from djtube.app import create_app
-from djtube.compose import VIDEO_FPS, VIDEO_HEIGHT, VIDEO_WIDTH, Composer
-from djtube.live import CODE_REPLACED, CODE_TOO_BIG, MAX_TEXT, NOW_IGNORED, LiveHub, parse_now
+from djtube.compose import VIDEO_FPS, VIDEO_HEIGHT, VIDEO_WIDTH, Composer, deck_card
+from djtube.live import (
+    CODE_REPLACED,
+    CODE_TOO_BIG,
+    MAX_TEXT,
+    NOW_IGNORED,
+    SEND_TIMEOUT,
+    VIDEO_LISTENER_QUEUE,
+    LiveHub,
+    parse_now,
+)
 from djtube.thumbs import (
     MAX_BYTES,
     MAX_EDGE,
@@ -32,6 +41,7 @@ from djtube.thumbs import (
     MAX_PIXELS,
     MAX_QUEUED,
     ThumbCache,
+    _crop_letterbox,
     _dimensions_ok,
     _http_get,
     _open_jpeg,
@@ -44,8 +54,12 @@ from djtube.thumbs import (
 from djtube.video import (
     MAX_VIDEO_ENCODERS,
     MAX_VIDEO_PER_IP,
+    VIDEO_AUDIO_BITRATE,
     VIDEO_BITRATE,
+    VIDEO_BUFSIZE,
+    VIDEO_MAXRATE,
     VIDEO_MIME,
+    _SYNC_PACKETS,
     FfmpegRelay,
     TsSyncBuffer,
     _Mux,
@@ -237,9 +251,28 @@ def test_composer_keeps_at_most_four_cards():
     assert len(composer._cards) == 4
 
 
+def _letterbox(
+    size: tuple[int, int],
+    band: int,
+    color: tuple[int, int, int],
+    bar: tuple[int, int, int] = (0, 0, 0),
+) -> Image.Image:
+    width, height = size
+    image = Image.new("RGB", size, bar)
+    image.paste(Image.new("RGB", (width, max(1, height - 2 * band)), color), (0, band))
+    return image
+
+
+def _jpeg_of(image: Image.Image) -> bytes:
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=85)
+    return buffer.getvalue()
+
+
 def test_thumbnails_come_only_from_ytimg_and_skip_placeholders():
     assert thumb_urls(VIDEO) == (
         f"https://i.ytimg.com/vi/{VIDEO}/maxresdefault.jpg",
+        f"https://i.ytimg.com/vi/{VIDEO}/sddefault.jpg",
         f"https://i.ytimg.com/vi/{VIDEO}/hqdefault.jpg",
     )
     with pytest.raises(ValueError):
@@ -255,18 +288,33 @@ def test_thumbnails_come_only_from_ytimg_and_skip_placeholders():
     assert calls == []
 
     good = _jpeg((480, 360), (8, 8, 8))
-    seen: list[str] = []
+    seen_sd: list[str] = []
 
-    def fallback(url: str) -> tuple[int, bytes]:
-        seen.append(url)
+    def use_sd(url: str) -> tuple[int, bytes]:
+        seen_sd.append(url)
         if url.endswith("maxresdefault.jpg"):
             return 404, b"missing"
-        return 200, good
+        if url.endswith("sddefault.jpg"):
+            return 200, good
+        raise AssertionError(url)
 
-    image = load_youtube_thumb(VIDEO, fallback)
+    image = load_youtube_thumb(VIDEO, use_sd)
     assert image is not None and image.size == (480, 360)
-    assert seen == list(thumb_urls(VIDEO))
-    assert all(url.startswith("https://i.ytimg.com/vi/") for url in seen)
+    assert seen_sd == list(thumb_urls(VIDEO)[:2])
+    assert all(url.startswith("https://i.ytimg.com/vi/") for url in seen_sd)
+
+    seen_hq: list[str] = []
+
+    def use_hq(url: str) -> tuple[int, bytes]:
+        seen_hq.append(url)
+        if url.endswith("hqdefault.jpg"):
+            return 200, good
+        return 404, b"missing"
+
+    image = load_youtube_thumb(VIDEO, use_hq)
+    assert image is not None and image.size == (480, 360)
+    assert seen_hq == list(thumb_urls(VIDEO))
+    assert all(url.startswith("https://i.ytimg.com/vi/") for url in seen_hq)
 
     def tiny_then_real(url: str) -> tuple[int, bytes]:
         if url.endswith("maxresdefault.jpg"):
@@ -292,6 +340,125 @@ def test_thumbnails_come_only_from_ytimg_and_skip_placeholders():
     assert small.warm(OTHER) is made
     assert small.get(VIDEO) is None
     assert small.get(OTHER) is made
+
+
+def test_letterbox_crop_keeps_centered_sixteen_nine_only():
+    sd = _letterbox((640, 480), 60, (200, 40, 50))
+    cropped = _crop_letterbox(sd)
+    assert cropped.size == (640, 360)
+    assert cropped.getpixel((0, 0)) == (200, 40, 50)
+    assert cropped.getpixel((639, 359)) == (200, 40, 50)
+
+    hq = _letterbox((480, 360), 45, (40, 180, 60))
+    hq_cropped = _crop_letterbox(hq)
+    assert hq_cropped.size == (480, 270)
+    assert hq_cropped.getpixel((0, 0)) == (40, 180, 60)
+
+    plain = Image.new("RGB", (640, 480), (180, 70, 40))
+    plain.paste(Image.new("RGB", (220, 140), (20, 140, 200)), (30, 40))
+    assert _crop_letterbox(plain).size == (640, 480)
+
+    uneven = Image.new("RGB", (640, 480), (180, 70, 40))
+    uneven.paste(Image.new("RGB", (640, 120), (0, 0, 0)), (0, 0))
+    assert _crop_letterbox(uneven).size == (640, 480)
+
+    side = Image.new("RGB", (640, 480), (200, 80, 40))
+    side.paste(Image.new("RGB", (320, 480), (0, 0, 0)), (0, 0))
+    assert _crop_letterbox(side).size == (640, 480)
+
+    opened = _open_jpeg(_jpeg_of(sd))
+    assert opened is not None and opened.size == (640, 360)
+
+
+def test_letterbox_crop_is_only_a_dark_4_3_bar():
+    # Dark artwork on a black background. The picture itself is dim; the bars are not.
+    cover = _letterbox((640, 480), 60, (16, 12, 10))
+    cropped = _crop_letterbox(cover)
+    assert cropped.size == (640, 360)
+    assert cropped.getpixel((20, 20)) == (16, 12, 10)
+
+    stage = Image.new("RGB", (640, 480), (14, 14, 14))
+    stage.paste(Image.new("RGB", (200, 120), (40, 36, 30)), (220, 180))
+    assert _crop_letterbox(stage).size == (640, 480)
+
+    noisy = Image.new("RGB", (640, 480), (180, 40, 50))
+    pixels = noisy.load()
+    for y in list(range(60)) + list(range(420, 480)):
+        for x in range(640):
+            level = 0 if (x + y) % 3 else 12
+            pixels[x, y] = (level, level, level)
+    assert _crop_letterbox(noisy).size == (640, 360)
+
+    at_threshold = _letterbox((640, 480), 60, (40, 80, 20), bar=(6, 6, 6))
+    assert _crop_letterbox(at_threshold).size == (640, 360)
+    above = _letterbox((640, 480), 60, (40, 80, 20), bar=(7, 7, 7))
+    assert _crop_letterbox(above).size == (640, 480)
+
+    # The rows next to the picture are bright. The sampled part of the bar is black.
+    ringing = Image.new("RGB", (640, 480), (30, 20, 16))
+    ringing.paste(Image.new("RGB", (640, 48), (0, 0, 0)), (0, 0))
+    ringing.paste(Image.new("RGB", (640, 12), (220, 220, 220)), (0, 48))
+    ringing.paste(Image.new("RGB", (640, 12), (220, 220, 220)), (0, 420))
+    ringing.paste(Image.new("RGB", (640, 48), (0, 0, 0)), (0, 432))
+    assert _crop_letterbox(ringing).size == (640, 360)
+
+    wide = _letterbox((1280, 800), 40, (200, 30, 30))
+    assert _crop_letterbox(wide).size == (1280, 800)
+    square = _letterbox((720, 720), 157, (200, 30, 30))
+    assert _crop_letterbox(square).size == (720, 720)
+
+    scope = Image.new("RGB", (1280, 720), (180, 40, 40))
+    scope.paste(Image.new("RGB", (1280, 80), (0, 0, 0)), (0, 0))
+    scope.paste(Image.new("RGB", (1280, 80), (0, 0, 0)), (0, 640))
+    kept = _crop_letterbox(scope)
+    assert kept.size == (1280, 720)
+    assert kept.getpixel((0, 0)) == (0, 0, 0)
+    assert kept.getpixel((640, 360)) == (180, 40, 40)
+
+
+def test_letterbox_crop_needs_both_bars():
+    bottom = Image.new("RGB", (640, 480), (200, 80, 40))
+    bottom.paste(Image.new("RGB", (640, 60), (0, 0, 0)), (0, 420))
+    assert _crop_letterbox(bottom).size == (640, 480)
+
+
+def test_letterbox_crop_uses_full_luma_not_red():
+    green = _letterbox((640, 480), 60, (40, 80, 20), bar=(0, 20, 0))
+    assert _crop_letterbox(green).size == (640, 480)
+
+
+def test_letterbox_crop_sees_a_bright_strip_thirty_rows_into_the_bar():
+    image = Image.new("RGB", (640, 480), (30, 40, 50))
+    image.paste(Image.new("RGB", (640, 60), (0, 0, 0)), (0, 0))
+    image.paste(Image.new("RGB", (640, 60), (0, 0, 0)), (0, 420))
+    image.paste(Image.new("RGB", (640, 18), (240, 240, 240)), (0, 30))
+    image.paste(Image.new("RGB", (640, 18), (240, 240, 240)), (0, 432))
+    assert _crop_letterbox(image).size == (640, 480)
+
+
+def test_letterbox_crop_uses_the_mean_so_a_small_logo_blocks_it():
+    image = Image.new("RGB", (640, 480), (40, 50, 60))
+    image.paste(Image.new("RGB", (640, 60), (0, 0, 0)), (0, 0))
+    image.paste(Image.new("RGB", (640, 60), (0, 0, 0)), (0, 420))
+    image.paste(Image.new("RGB", (128, 48), (250, 250, 250)), (0, 0))
+    image.paste(Image.new("RGB", (128, 48), (250, 250, 250)), (0, 432))
+    assert _crop_letterbox(image).size == (640, 480)
+
+
+def test_letterbox_crop_rejects_a_frame_two_percent_off_4_3():
+    off = _letterbox((652, 480), 57, (200, 40, 40))
+    assert _crop_letterbox(off).size == (652, 480)
+
+
+def test_sixteen_nine_card_stays_padded_on_the_blurred_background():
+    source = Image.new("RGB", (1280, 720), (220, 30, 40))
+    card = deck_card(source)
+    assert card.size == (1280, 720)
+    assert card.getpixel((640, 360)) == (220, 30, 40)
+    corner = card.getpixel((0, 0))
+    assert corner != (220, 30, 40)
+    assert corner[0] < 140
+    assert card.tobytes() != source.tobytes()
 
 
 def test_sync_buffer_starts_at_the_video_sps():
@@ -325,7 +492,20 @@ def test_ffmpeg_command_encodes_aac_and_one_x264_thread():
     assert MAX_VIDEO_ENCODERS == 3
     assert MAX_VIDEO_PER_IP == 1
     assert VIDEO_MIME == "video/mp2t"
-    assert VIDEO_BITRATE == 350_000
+    assert VIDEO_BITRATE == 800_000
+    assert VIDEO_MAXRATE == 1_000_000
+    assert VIDEO_BUFSIZE == 500_000
+    assert command[command.index("-b:v") + 1] == str(VIDEO_BITRATE)
+    assert command[command.index("-maxrate") + 1] == str(VIDEO_MAXRATE)
+    assert command[command.index("-bufsize") + 1] == str(VIDEO_BUFSIZE)
+    assert command[command.index("-preset") + 1] == "ultrafast"
+    assert command[command.index("-tune") + 1] == "stillimage"
+    assert command[command.index("-g") + 1] == str(VIDEO_FPS)
+    audio_bits = int(VIDEO_AUDIO_BITRATE[:-1]) * 1000
+    payload = (VIDEO_MAXRATE + VIDEO_BUFSIZE) // 8 + audio_bits // 8
+    # 4 bytes of TS header per 184 payload bytes, plus about 4% for PES.
+    ts_overhead = payload * 4 // 184 + payload // 25
+    assert _SYNC_PACKETS * 188 > payload + ts_overhead
     assert command[command.index("-c:a") + 1] == "aac"
     assert command[command.index("-profile:a") + 1] == "aac_low"
     assert command[command.index("-b:a") + 1] == "128k"
@@ -341,6 +521,18 @@ def test_ffmpeg_command_encodes_aac_and_one_x264_thread():
     assert copies == 1 + int(9.6 / 0.2)
     assert nxt == copies * 0.2
     assert nxt != 9.6
+
+
+def test_video_listener_queue_covers_one_send_timeout():
+    # Reads average about 4755 bytes, about 27 a second, near 1 Mbps.
+    # 64 is about 2.4 s. 8 and 32 are under one send timeout; 4096 is minutes.
+    item_bytes = 4755
+    per_second = 27
+    hold = VIDEO_LISTENER_QUEUE / per_second
+    assert SEND_TIMEOUT <= hold <= SEND_TIMEOUT * 2
+    measured = item_bytes * per_second * 8
+    audio_bits = int(VIDEO_AUDIO_BITRATE[:-1]) * 1000
+    assert VIDEO_BITRATE < measured <= VIDEO_MAXRATE + audio_bits
 
 
 _FAKE_FFMPEG = """#!/usr/bin/env python3

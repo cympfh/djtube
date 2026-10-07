@@ -16,13 +16,15 @@ from collections import OrderedDict
 from pathlib import Path
 
 import httpx
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageStat, UnidentifiedImageError
 
 from djtube.ids import is_video_id
 
-# maxresdefault is 1280x720 when YouTube has it, and 404 otherwise. hqdefault
-# is 480x360 and is there for essentially every video. A 200 response that is
-# smaller than this is the placeholder jpeg, not a picture we should show.
+# maxresdefault is 1280x720 when YouTube has it, and 404 otherwise.
+# sddefault is 640x480 and hqdefault is 480x360. Both are 4:3, usually with
+# black bars around a 16:9 picture. hqdefault is there for essentially every
+# video. A 200 response that is smaller than this is the placeholder jpeg,
+# not a picture we should show.
 MIN_WIDTH = 320
 MIN_HEIGHT = 180
 MAX_BYTES = 2 * 1024 * 1024
@@ -43,13 +45,60 @@ MAX_CACHE_BYTES = 24 * 1024 * 1024
 NEGATIVE_TTL = 30.0
 FETCH_TIMEOUT = 4.0
 
-_NAMES = ("maxresdefault.jpg", "hqdefault.jpg")
+_NAMES = ("maxresdefault.jpg", "sddefault.jpg", "hqdefault.jpg")
+# Mean luma of a letterbox bar, on the grayscale Pillow uses. 6 is black.
+# A dark stage photo sits near 14 and must stay a 4:3 picture.
+_BAR_LUMA = 6
 
 
-def thumb_urls(video_id: str) -> tuple[str, str]:
+def thumb_urls(video_id: str) -> tuple[str, str, str]:
     if not is_video_id(video_id):
         raise ValueError("invalid video id")
-    return tuple(f"https://i.ytimg.com/vi/{video_id}/{name}" for name in _NAMES)
+    maxres, sd, hq = _NAMES
+    base = f"https://i.ytimg.com/vi/{video_id}"
+    return (f"{base}/{maxres}", f"{base}/{sd}", f"{base}/{hq}")
+
+
+def _is_4_3(width: int, height: int) -> bool:
+    """True within 1%. sddefault and hqdefault are this shape; maxres is not."""
+
+    if width < 1 or height < 1:
+        return False
+    return abs(width * 3 - height * 4) <= width * 3 // 100
+
+
+def _band_luma(image: Image.Image, box: tuple[int, int, int, int]) -> float | None:
+    """Mean grayscale of one strip, or None when the box is empty."""
+
+    left, upper, right, lower = box
+    if right <= left or lower <= upper:
+        return None
+    gray = image.convert("L").crop(box)
+    return float(ImageStat.Stat(gray).mean[0])
+
+
+def _crop_letterbox(image: Image.Image) -> Image.Image:
+    """Cut the centered 16:9 out of a 4:3 frame when both bars are near black.
+
+    Only a 16:9 picture inside a 4:3 frame is cropped. maxres, a square, and a
+    16:9 frame that itself has cinematic bars stay whole. The picture between
+    the bars can be dark. A 4:3 photo with no bars, even a dim one, stays whole.
+    """
+
+    width, height = image.size
+    if not _is_4_3(width, height):
+        return image
+    content_h = (width * 9) // 16
+    bar = (height - content_h) // 2
+    if content_h < 2 or bar < 8:
+        return image
+    # Stay off the picture edge. JPEG ringing lightens the last rows of a bar.
+    inset = max(2, bar // 5)
+    top = _band_luma(image, (0, 0, width, bar - inset))
+    bottom = _band_luma(image, (0, height - bar + inset, width, height))
+    if top is None or bottom is None or top > _BAR_LUMA or bottom > _BAR_LUMA:
+        return image
+    return image.crop((0, bar, width, bar + content_h))
 
 
 def _dimensions_ok(width: int, height: int, *, minimum: bool) -> bool:
@@ -88,7 +137,7 @@ def _open_jpeg(body: bytes) -> Image.Image | None:
         image.load()
     except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError):
         return None
-    rgb = image.convert("RGB")
+    rgb = _crop_letterbox(image.convert("RGB"))
     edge = max(rgb.width, rgb.height)
     if edge > 1280:
         scale = 1280 / edge
@@ -156,7 +205,7 @@ def thumb_cache() -> ThumbCache:
 
 
 def load_youtube_thumb(video_id: str, get=None) -> Image.Image | None:
-    """Try maxresdefault, then hqdefault. `get` is `(url) -> (status, body)`."""
+    """Try maxresdefault, then sddefault, then hqdefault. `get` is `(url) -> (status, body)`."""
 
     if not is_video_id(video_id):
         return None
