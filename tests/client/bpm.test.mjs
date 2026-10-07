@@ -1120,6 +1120,114 @@ test("a BPM from before the track left is sent again when the track is added bac
   assert.equal(state.trackBpm[LISTED.id], 128);
 });
 
+function playlistServer() {
+  const playlists = { [NIGHT]: [], [MORNING]: [] };
+  const bpm = {};
+  const has = (id) => Object.values(playlists).some((tracks) => tracks.some((track) => track.id === id));
+  const prune = () => {
+    for (const id of Object.keys(bpm)) if (!has(id)) delete bpm[id];
+  };
+  const pub = (id) => ({
+    id,
+    name: id === NIGHT ? "夜" : "朝",
+    tracks: playlists[id].map((track) => ({ ...track })),
+  });
+  return { playlists, bpm, has, prune, pub };
+}
+
+async function settle() {
+  for (let i = 0; i < 6; i++) await flush();
+}
+
+test("a retried BPM does not stay pending and overwrite a later value", async () => {
+  const stored = playlistServer();
+  const pendingSaves = [];
+  const { state, actions } = harness({
+    saveBpm(id, bpm) {
+      if (!stored.has(id)) return Promise.reject(new Error("404"));
+      stored.bpm[id] = Math.round(bpm * 100) / 100;
+      const reply = Promise.resolve({ id, bpm: stored.bpm[id] });
+      return new Promise((resolve, reject) => pendingSaves.push(() => reply.then(resolve, reject)));
+    },
+    async addPlaylistTrack(pid, track) {
+      const fields = { ...track };
+      delete fields.index;
+      stored.playlists[pid].push(fields);
+      stored.prune();
+      return stored.pub(pid);
+    },
+  });
+  state.playlists = [stored.pub(NIGHT), stored.pub(MORNING)];
+  state.playlistId = NIGHT;
+  state.decks.A.id = LISTED.id;
+  state.decks.A.bpm = 128;
+  await actions.addTrackToPlaylist(NIGHT, { id: LISTED.id, title: "曲" });
+  state.decks.A.bpm = 130;
+  await actions.addTrackToPlaylist(MORNING, { id: LISTED.id, title: "曲" });
+  pendingSaves.shift()();
+  await settle();
+  pendingSaves.shift()();
+  await settle();
+  state.decks.A.bpm = 140;
+  await actions.addTrackToPlaylist(MORNING, { id: LISTED.id, title: "曲" });
+  pendingSaves.shift()();
+  await settle();
+  while (pendingSaves.length) {
+    pendingSaves.shift()();
+    await settle();
+  }
+  assert.deepEqual(stored.bpm, { [LISTED.id]: 140 });
+});
+
+test("a track loaded from the server ignores a BPM response from before it left", async () => {
+  const stored = playlistServer();
+  stored.playlists[NIGHT].push({ id: LISTED.id, title: "曲" });
+  const saves = [];
+  const held = [];
+  const samples = clickTrack({ bpm: 120, lead: 0.3, seconds: 8 });
+  const { state, actions } = harness({
+    async fetch() {
+      return { ok: true, arrayBuffer: async () => new Uint8Array([1]).buffer };
+    },
+    async decodeAudio() {
+      return { samples, sampleRate: 44100 };
+    },
+    async fetchPlaylists() {
+      return { playlists: [stored.pub(NIGHT), stored.pub(MORNING)], bpm: { ...stored.bpm } };
+    },
+    saveBpm(id, bpm) {
+      saves.push(bpm);
+      if (stored.has(id)) stored.bpm[id] = bpm;
+      return new Promise((resolve) => held.push(() => resolve({ id, bpm })));
+    },
+    async addPlaylistTrack(pid, track) {
+      const fields = { ...track };
+      delete fields.index;
+      stored.playlists[pid].push(fields);
+      stored.prune();
+      return stored.pub(pid);
+    },
+    async removePlaylistTrack(pid, index) {
+      stored.playlists[pid].splice(index, 1);
+      stored.prune();
+      return stored.pub(pid);
+    },
+  });
+  await actions.loadPlaylists();
+  await actions.loadTrack("A", { id: LISTED.id, title: "曲" });
+  state.decks.A.status = "preparing";
+  await actions.onDeckReady("A");
+  assert.equal(saves.length, 1);
+  state.playlistId = NIGHT;
+  state.playlistIndex = 0;
+  await actions.removePlaylistTrack();
+  await actions.loadTrack("A", { id: OTHER.id, title: "別" });
+  await actions.addTrackToPlaylist(NIGHT, { id: LISTED.id, title: "曲" });
+  held.shift()();
+  await settle();
+  assert.deepEqual(state.trackBpm, stored.bpm);
+});
+
 test("playlist meta shows the track BPM to one decimal", () => {
   assert.equal(playlistMetaText({ channel: "チャンネル", duration: 225 }, 128.04), "チャンネル · 3:45 · 128.0 BPM");
   assert.equal(playlistMetaText({ channel: "チャンネル", duration: 225, rate: 1.5 }, 128.04), "チャンネル · 3:45 · 128.0 BPM");
