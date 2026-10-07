@@ -66,8 +66,14 @@ export const JOG_STEP_SECONDS = 0.05;
 export const JOG_SEARCH_STEP_SECONDS = 0.5;
 
 export const MIDI_STATUS_IDLE = "MIDI未接続";
-/** Accessible name of the header button. It does not change with connection state. */
+/** Accessible name of the header button while nothing is connected. */
 export const MIDI_BUTTON_LABEL = "MIDI を開く";
+/** Accessible name while a device is connected. A press disconnects. */
+export const MIDI_BUTTON_LABEL_CLOSE = "MIDI を切断";
+/** Accessible name while requestMIDIAccess is pending. A press cancels. */
+export const MIDI_BUTTON_LABEL_CANCEL = "MIDI を開くのをやめる";
+/** Added to the hover text only, not to role=status. */
+export const MIDI_CLOSE_HINT = "押すと切断します";
 
 function binding(action, args, extra) {
   const spec = { action };
@@ -317,17 +323,27 @@ export function controllerStatusText(status) {
   if (status.state === "insecure") return "MIDI未接続：HTTPS が必要です";
   if (status.state === "denied") return "MIDI が拒否されました";
   if (status.state === "open" && status.names?.length) return `MIDI接続済み：${status.names.join("、")}`;
+  if (status.state === "open") return "MIDI接続済み：機器なし（挿すと使えます）";
   if (status.state === "opening") return "MIDI を開いています…";
   return MIDI_STATUS_IDLE;
+}
+
+/** Accessible name for the header button in this state. */
+export function midiButtonLabel(status) {
+  if (status?.state === "opening") return MIDI_BUTTON_LABEL_CANCEL;
+  if (status?.state === "open") return MIDI_BUTTON_LABEL_CLOSE;
+  return MIDI_BUTTON_LABEL;
 }
 
 /** Paint the header button and the hidden result. Skip a write when the value is unchanged. */
 export function applyMidiStatus(button, live, status) {
   const text = controllerStatusText(status);
-  if (button.title !== text) button.title = text;
-  if (button.getAttribute("aria-label") !== MIDI_BUTTON_LABEL) button.setAttribute("aria-label", MIDI_BUTTON_LABEL);
-  if (status?.state !== "opening" && live.textContent !== text) live.textContent = text;
   const face = midiButtonState(status);
+  const hover = status?.state === "open" ? `${text}\n${MIDI_CLOSE_HINT}` : text;
+  if (button.title !== hover) button.title = hover;
+  const label = midiButtonLabel(status);
+  if (button.getAttribute("aria-label") !== label) button.setAttribute("aria-label", label);
+  if (status?.state !== "opening" && live.textContent !== text) live.textContent = text;
   if (button.dataset.midi !== face) button.dataset.midi = face;
 }
 
@@ -337,63 +353,139 @@ export function midiButtonState(status) {
   return connected ? "on" : "off";
 }
 
-export async function connectController(actions, onStatus) {
-  const nav = typeof navigator === "undefined" ? undefined : navigator;
-  const secure = typeof window === "undefined" || window.isSecureContext !== false;
-  if (!nav?.requestMIDIAccess) {
-    onStatus?.({
-      state: secure ? "unsupported" : "insecure",
-      names: [],
-      ignored: 0,
-      connected: false,
-      mapped: Object.keys(FLX4_MAP).length,
-    });
-    return;
+/** Turn the driven lamps off and stop sending. The cache stays for the next connect. */
+function releaseFlx4Outputs(port) {
+  if (!port) return;
+  if (!port.suspended) {
+    const messages = [];
+    for (const deck of ["A", "B"]) {
+      messages.push(...flx4LedMessages("play", deck, false));
+      messages.push(...flx4LedMessages("sync", deck, false));
+    }
+    sendMidiMessages(port.outputs, messages);
   }
+  port.outputs = [];
+}
+
+/**
+ * One MIDI connection for the page. `toggle` matches the stream icon:
+ * a session stops, otherwise start. The session covers the wait for
+ * requestMIDIAccess and an open access with no devices plugged in.
+ * Unplugging leaves that session up so a replug keeps one handler, and a
+ * press while it is up disconnects.
+ * connect is idempotent. At most one MIDIAccess is held, and each MIDIInput
+ * gets one handler. A second press while requestMIDIAccess is pending cancels
+ * it, and the access that arrives late is not bound.
+ */
+export function createMidiControl(actions, onStatus, options = {}) {
+  const ledPort = options.ledPort || flx4LedPort;
+  const mapped = Object.keys(FLX4_MAP).length;
+  let session = null;
   let ignored = 0;
-  try {
-    const access = await nav.requestMIDIAccess();
-    const bind = () => {
-      const names = [];
-      const outputs = [];
-      for (const output of access.outputs.values()) {
-        if (isFlx4Port(output)) outputs.push(output);
-      }
-      setFlx4Outputs(flx4LedPort, outputs);
-      for (const input of access.inputs.values()) {
-        names.push(input.name || "MIDI");
-        input.onmidimessage = (event) => {
-          const msg = messageFromMidi(event.data);
-          if (!msg) return;
-          const handled = dispatchControllerEvent(msg, actions);
-          if (!handled) ignored += 1;
-          onStatus?.({
-            state: "open",
-            names,
-            ignored,
-            connected: names.length > 0,
-            mapped: Object.keys(FLX4_MAP).length,
-          });
-        };
-      }
-      onStatus?.({
-        state: "open",
-        names,
-        ignored,
-        connected: names.length > 0,
-        mapped: Object.keys(FLX4_MAP).length,
-      });
-    };
-    bind();
-    access.onstatechange = bind;
-  } catch {
-    setFlx4Outputs(flx4LedPort, []);
-    onStatus?.({
-      state: "denied",
-      names: [],
-      ignored: 0,
-      connected: false,
-      mapped: Object.keys(FLX4_MAP).length,
-    });
+
+  function report(state, names = []) {
+    onStatus?.({ state, names, ignored, connected: names.length > 0, mapped });
   }
+
+  function currentNavigator() {
+    if (options.navigator) return options.navigator;
+    return typeof navigator === "undefined" ? undefined : navigator;
+  }
+
+  function bind(mine) {
+    if (session !== mine) return;
+    const access = mine.access;
+    const outputs = [];
+    for (const output of access.outputs.values()) {
+      if (output?.state !== "disconnected" && isFlx4Port(output)) outputs.push(output);
+    }
+    setFlx4Outputs(ledPort, outputs);
+    const names = [];
+    const live = new Set();
+    for (const input of access.inputs.values()) {
+      if (!input || input.state === "disconnected") continue;
+      live.add(input);
+      names.push(input.name || "MIDI");
+      const handler = (event) => {
+        if (session !== mine) return;
+        const msg = messageFromMidi(event.data);
+        if (!msg) return;
+        if (!dispatchControllerEvent(msg, actions)) ignored += 1;
+        report("open", mine.names);
+      };
+      input.onmidimessage = handler;
+      mine.bound.set(input, handler);
+    }
+    for (const [input, handler] of mine.bound) {
+      if (live.has(input)) continue;
+      if (input.onmidimessage === handler) input.onmidimessage = null;
+      mine.bound.delete(input);
+    }
+    mine.names = names;
+    report("open", names);
+  }
+
+  function connect() {
+    if (session) return session.ready;
+    const nav = currentNavigator();
+    const secure = typeof window === "undefined" || window.isSecureContext !== false;
+    if (!nav?.requestMIDIAccess) {
+      report(secure ? "unsupported" : "insecure");
+      return Promise.resolve();
+    }
+    const mine = { access: null, bound: new Map(), names: [], onstate: null, ready: null };
+    session = mine;
+    report("opening");
+    mine.ready = (async () => {
+      let access;
+      try {
+        access = await nav.requestMIDIAccess();
+      } catch {
+        if (session !== mine) return;
+        session = null;
+        setFlx4Outputs(ledPort, []);
+        report("denied");
+        return;
+      }
+      if (session !== mine) return;
+      mine.access = access;
+      mine.onstate = () => bind(mine);
+      bind(mine);
+      access.onstatechange = mine.onstate;
+    })();
+    return mine.ready;
+  }
+
+  function disconnect() {
+    const mine = session;
+    if (!mine) return;
+    session = null;
+    const access = mine.access;
+    if (access && access.onstatechange === mine.onstate) access.onstatechange = null;
+    for (const [input, handler] of mine.bound) {
+      if (input.onmidimessage === handler) input.onmidimessage = null;
+    }
+    mine.bound.clear();
+    releaseFlx4Outputs(ledPort);
+    ignored = 0;
+    report("idle");
+  }
+
+  return {
+    connect,
+    disconnect,
+    toggle() {
+      if (session) {
+        disconnect();
+        return Promise.resolve();
+      }
+      return connect();
+    },
+    get active() {
+      return session !== null;
+    },
+    get connected() {
+      return session?.access != null && session.names.length > 0;
+    },
+  };
 }
