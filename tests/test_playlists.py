@@ -190,6 +190,8 @@ def test_invalid_bpm_is_rejected(tmp_path):
     _playlist_with(client, TRACK)
     before = store.path.read_bytes()
     inode = store.path.stat().st_ino
+    # True is 1 and False is 0. Both sit outside 20–500, and a bool cannot be
+    # subclassed, so this 400 is also what the range check alone would return.
     bodies = [
         {"id": VIDEO_ID, "bpm": True},
         {"id": VIDEO_ID, "bpm": "128"},
@@ -197,11 +199,11 @@ def test_invalid_bpm_is_rejected(tmp_path):
         {"id": VIDEO_ID, "bpm": 500.01},
         {"id": "watch?v=abcdefghijk", "bpm": 128},
         {"id": VIDEO_ID},
-        ["not-an-object"],
     ]
     for body in bodies:
         response = client.post("/api/bpm", json=body)
         assert response.status_code == 400, body
+    assert client.post("/api/bpm", json=["not-an-object"]).status_code == 422
     for literal in ("NaN", "Infinity", "-Infinity"):
         response = client.post(
             "/api/bpm",
@@ -212,6 +214,59 @@ def test_invalid_bpm_is_rejected(tmp_path):
     assert store.path.read_bytes() == before
     assert store.path.stat().st_ino == inode
     assert client.get("/api/playlists").json()["bpm"] == {}
+
+
+def test_bpm_bounds_include_20_and_500(tmp_path):
+    client, store = _client(tmp_path)
+    _playlist_with(client, TRACK)
+    for bpm in (20, 500):
+        saved = client.post("/api/bpm", json={"id": VIDEO_ID, "bpm": bpm})
+        assert saved.status_code == 200
+        assert saved.json() == {"id": VIDEO_ID, "bpm": float(bpm)}
+        assert json.loads(store.path.read_text(encoding="utf-8"))["bpm"] == {VIDEO_ID: float(bpm)}
+
+
+def test_huge_bpm_integer_is_rejected_and_dropped_on_load(tmp_path):
+    client, store = _client(tmp_path)
+    other = {**TRACK, "id": OTHER_ID, "title": "昼"}
+    _playlist_with(client, TRACK, other)
+    before = store.path.read_bytes()
+    inode = store.path.stat().st_ino
+    huge = int("9" * 400)
+    rejected = client.post("/api/bpm", json={"id": VIDEO_ID, "bpm": huge})
+    assert rejected.status_code == 400
+    assert store.path.read_bytes() == before
+    assert store.path.stat().st_ino == inode
+
+    raw = json.loads(store.path.read_text(encoding="utf-8"))
+    raw["bpm"] = {VIDEO_ID: 128.04, OTHER_ID: huge}
+    store.path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+    loaded = PlaylistStore(store.path)
+    snapshot = loaded.snapshot()
+    assert snapshot["bpm"] == {VIDEO_ID: 128.04}
+    listed = [track["id"] for playlist in snapshot["playlists"] for track in playlist["tracks"]]
+    assert listed == [VIDEO_ID, OTHER_ID]
+
+
+def test_bpm_plain_text_is_rejected(tmp_path):
+    client, store = _client(tmp_path)
+    _playlist_with(client, TRACK)
+    before = store.path.read_bytes()
+    inode = store.path.stat().st_ino
+    plain = client.post(
+        "/api/bpm",
+        content=f'{{"id":"{VIDEO_ID}","bpm":128}}'.encode(),
+        headers={"content-type": "text/plain"},
+    )
+    other = client.post(
+        "/api/playlists",
+        content=b'{"name":"night"}',
+        headers={"content-type": "text/plain"},
+    )
+    assert plain.status_code == other.status_code
+    assert plain.status_code in (415, 422)
+    assert store.path.read_bytes() == before
+    assert store.path.stat().st_ino == inode
 
 
 def test_same_rounded_bpm_does_not_rewrite(tmp_path):

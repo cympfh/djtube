@@ -40,8 +40,12 @@ export function trackSnapshot(track) {
   };
 }
 
-export function createPlaylistActions({ deps, state, scheduleRender, loadTrack, publishTrackBpm }) {
+export function createPlaylistActions({ deps, state, scheduleRender, loadTrack }) {
   let revision = 0;
+  const bpmInflight = new Set();
+  const bpmPending = new Map();
+  const bpmGeneration = new Map();
+  let listedGeneration = new Set();
 
   function currentPlaylist() {
     return state.playlists.find((item) => item.id === state.playlistId) || null;
@@ -54,6 +58,7 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack, 
     state.playlistId = playlist.id;
     const count = playlist.tracks?.length || 0;
     state.playlistIndex = count ? Math.min(Math.max(0, index), count - 1) : 0;
+    syncListed();
   }
 
   function forget(playlistId) {
@@ -62,6 +67,7 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack, 
       state.playlistId = state.playlists[0]?.id || "";
       state.playlistIndex = 0;
     }
+    syncListed();
   }
 
   function listedIds() {
@@ -85,15 +91,77 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack, 
     return next;
   }
 
-  function retainTrackBpm() {
+  function trackBpmMap() {
     if (!state.trackBpm || typeof state.trackBpm !== "object" || Array.isArray(state.trackBpm)) {
       state.trackBpm = {};
+    }
+    return state.trackBpm;
+  }
+
+  function syncListed() {
+    const ids = listedIds();
+    for (const id of listedGeneration) {
+      if (!ids.has(id)) bpmGeneration.set(id, (bpmGeneration.get(id) || 0) + 1);
+    }
+    listedGeneration = ids;
+  }
+
+  function retainTrackBpm() {
+    syncListed();
+    const map = trackBpmMap();
+    const ids = listedIds();
+    for (const id of Object.keys(map)) {
+      if (!ids.has(id)) delete map[id];
+    }
+  }
+
+  function roundBpm(bpm) {
+    const value = Number(bpm);
+    if (!Number.isFinite(value)) return null;
+    return Math.round(value * 100) / 100;
+  }
+
+  function publishTrackBpm(id, bpm) {
+    if (typeof deps.saveBpm !== "function") return;
+    if (!playlistHasTrack(state.playlists, id)) return;
+    const rounded = roundBpm(bpm);
+    if (rounded == null) return;
+    if (bpmInflight.has(id)) {
+      bpmPending.set(id, rounded);
       return;
     }
-    const ids = listedIds();
-    for (const id of Object.keys(state.trackBpm)) {
-      if (!ids.has(id)) delete state.trackBpm[id];
+    if (trackBpmMap()[id] === rounded) return;
+    sendTrackBpm(id, rounded);
+  }
+
+  function sendTrackBpm(id, rounded) {
+    if (!playlistHasTrack(state.playlists, id)) return;
+    if (trackBpmMap()[id] === rounded) return;
+    const generation = bpmGeneration.get(id) || 0;
+    bpmInflight.add(id);
+    let pending;
+    try {
+      pending = deps.saveBpm(id, rounded);
+    } catch {
+      bpmInflight.delete(id);
+      return;
     }
+    Promise.resolve(pending)
+      .then((body) => {
+        if ((bpmGeneration.get(id) || 0) !== generation) return;
+        if (!playlistHasTrack(state.playlists, id)) return;
+        const reported = body && typeof body.bpm === "number" ? roundBpm(body.bpm) : null;
+        trackBpmMap()[id] = reported == null ? rounded : reported;
+        scheduleRender();
+      })
+      .catch(() => {})
+      .finally(() => {
+        bpmInflight.delete(id);
+        if (!bpmPending.has(id)) return;
+        const next = bpmPending.get(id);
+        bpmPending.delete(id);
+        publishTrackBpm(id, next);
+      });
   }
 
   function deckBpm(id) {
@@ -127,6 +195,7 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack, 
         state.playlistId = state.playlists[0]?.id || "";
         state.playlistIndex = 0;
       }
+      syncListed();
       state.trackBpm = bpmMapFrom(data?.bpm);
     } catch (err) {
       if (gen !== revision) return;
@@ -424,5 +493,6 @@ export function createPlaylistActions({ deps, state, scheduleRender, loadTrack, 
     movePlaylistTrack,
     placePlaylistTrack,
     loadPlaylistTrack,
+    publishTrackBpm,
   };
 }

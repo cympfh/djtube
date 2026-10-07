@@ -247,7 +247,10 @@ def _track_ids(playlists: list[dict]) -> set[str]:
 def _rounded_bpm(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
     if not math.isfinite(number) or number < BPM_MIN or number > BPM_MAX:
         return None
     return round(number, 2)
