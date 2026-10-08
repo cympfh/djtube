@@ -203,10 +203,38 @@ export function createActions(deps) {
 
   let searchGen = 0;
 
-  async function submitSearch() {
-    const query = deps.queryValue().trim();
+  const playlistPageHosts = new Set([
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
+    "youtube-nocookie.com",
+    "www.youtube-nocookie.com",
+  ]);
+
+  function isPlaylistPageQuery(text) {
+    const raw = String(text || "").trim();
+    if (!raw || /\s/.test(raw)) return false;
+    let candidate = raw;
+    if (candidate.startsWith("//")) candidate = `https:${candidate}`;
+    else if (!/^[a-z][a-z0-9+.-]*:/i.test(candidate)) candidate = `https://${candidate}`;
+    let url;
+    try {
+      url = new URL(candidate);
+    } catch {
+      return false;
+    }
+    const host = url.hostname.replace(/\.$/, "").toLowerCase();
+    if (!playlistPageHosts.has(host)) return false;
+    if (url.pathname.replace(/\/+$/, "").toLowerCase() !== "/playlist") return false;
+    return !!url.searchParams.get("list");
+  }
+
+  async function submitSearch(again = "") {
+    const query = again || deps.queryValue().trim();
     if (!query) {
       state.searchError = "検索語を入れてください";
+      state.searching = false;
       scheduleRender();
       return;
     }
@@ -215,26 +243,33 @@ export function createActions(deps) {
     state.searching = true;
     state.searchError = "";
     scheduleRender();
+    let retry = false;
     try {
       const data = await deps.fetchSearch(query, musicOnly);
-      if (gen !== searchGen) return;
-      state.lastQuery = query;
-      state.results = Array.isArray(data?.tracks) ? data.tracks : [];
-      state.selected = 0;
-      state.source = data?.source || "";
-      state.searchError = state.results.length ? "" : "見つかりませんでした";
+      if (gen === searchGen) {
+        state.lastQuery = query;
+        state.results = Array.isArray(data?.tracks) ? data.tracks : [];
+        state.selected = 0;
+        state.source = data?.source || "";
+        state.searchError = state.results.length ? "" : "見つかりませんでした";
+      }
     } catch (err) {
-      if (gen !== searchGen) return;
-      state.results = [];
-      state.source = "";
-      const message = err instanceof Error ? err.message : "";
-      state.searchError = message && !/^failed to fetch$/i.test(message) ? message : "検索できませんでした";
+      if (gen === searchGen) {
+        state.results = [];
+        state.source = "";
+        const message = err instanceof Error ? err.message : "";
+        state.searchError = message && !/^failed to fetch$/i.test(message) ? message : "検索できませんでした";
+      }
     } finally {
       if (gen === searchGen) {
-        state.searching = false;
-        scheduleRender();
+        retry = state.musicOnly !== musicOnly && !isPlaylistPageQuery(query);
+        if (!retry) {
+          state.searching = false;
+          scheduleRender();
+        }
       }
     }
+    if (retry && gen === searchGen) return submitSearch(query);
   }
 
   function setMusicOnly(value) {
@@ -242,6 +277,7 @@ export function createActions(deps) {
     if (next === state.musicOnly) return;
     state.musicOnly = next;
     scheduleRender();
+    if (state.searching) return;
     if (state.lastQuery || deps.queryValue().trim()) return submitSearch();
   }
 
@@ -250,9 +286,10 @@ export function createActions(deps) {
   }
 
   function onEnter() {
+    if (state.searching) return;
     const query = deps.queryValue().trim();
     const focused = !!deps.isSearchFocused?.();
-    if (focused && (state.searching || query !== state.lastQuery || state.results.length === 0)) {
+    if (focused && (query !== state.lastQuery || state.results.length === 0)) {
       return submitSearch();
     }
   }

@@ -6,7 +6,7 @@ import logging
 import mimetypes
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -16,18 +16,19 @@ from pydantic import BaseModel, ConfigDict, Field
 from djtube.assets import DOCUMENT_CACHE, VersionedStaticFiles, asset_version, stamp_document
 from djtube.audio import AudioError, audio_needs_cookies, clear_audio_cache, open_audio
 from djtube.cookies import MAX_COOKIE_BYTES, CookieError, CookieStore, cookie_path, install_store
-from djtube.ids import is_video_id
+from djtube.ids import is_video_id, video_id_from_query
 from djtube.live import LiveHub, _publisher_address, live_seen_path, mount_live
 from djtube.thumbs import thumb_cache
 from djtube.paths import INDEX_PATH, PUBLIC_PREFIX, STATIC_DIR
 from djtube.playlists import PlaylistError, PlaylistStore, normalize_name, playlist_path
-from djtube.search import SearchError, search_mode, search_tracks
+from djtube.search import SearchError, api_key, search_mode, search_tracks
 from djtube.youtube_playlist import (
     FetchControl,
     ImportCancelled,
     PlaylistLookupError,
     fetch_youtube_playlist,
     parse_playlist_id,
+    parse_playlist_url,
     rejected_playlist_message,
 )
 
@@ -86,6 +87,10 @@ IMPORTS_PER_DAY = 100
 IMPORTS_PER_IP = 20
 IMPORT_DAY_SECONDS = 86400.0
 _DAY_LIMIT = "24時間の取り込みの上限に達しました"
+# Same length as a playlist source. Keywords are still cut to 120 in normalize_query.
+SEARCH_QUERY_MAX = 2000
+PLAYLIST_SEARCH_TTL = 600.0
+PLAYLIST_SEARCH_CACHE_MAX = 32
 
 # One worker for the process. Two uvicorn workers would run two imports at once.
 _IMPORT_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="djtube-import")
@@ -101,16 +106,20 @@ class ImportSlot:
         self._minute: deque[float] = deque()
         self._day: deque[float] = deque()
         self._by_ip: dict[str, deque[float]] = {}
+        self._kind = "import"
         self.now = time.monotonic
 
-    def acquire(self, ip: str) -> FetchControl:
+    def acquire(self, ip: str, *, kind: str = "import") -> FetchControl:
         with self._lock:
             if self._busy:
+                if self._kind == "search":
+                    raise HTTPException(429, "プレイリストを取得中です")
                 stopping = self._control is not None and self._control.cancel.is_set()
                 raise HTTPException(429, "前の取り込みを止めています" if stopping else "取り込み中です")
             self._charge(ip)
             control = FetchControl()
             self._busy = True
+            self._kind = kind
             self._control = control
             return control
 
@@ -137,6 +146,47 @@ class ImportSlot:
         with self._lock:
             self._busy = False
             self._control = None
+            self._kind = "import"
+
+
+class PlaylistSearchCache:
+    """Playlist id to tracks. Entries expire, and the oldest is dropped past the cap."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._items: OrderedDict[str, tuple[float, str, list[dict[str, object]]]] = OrderedDict()
+        self.ttl = PLAYLIST_SEARCH_TTL
+        self.limit = PLAYLIST_SEARCH_CACHE_MAX
+        self.now = time.monotonic
+
+    def get(self, list_id: str) -> tuple[str, list[dict[str, object]]] | None:
+        with self._lock:
+            item = self._items.get(list_id)
+            if item is None:
+                return None
+            stamp, source, tracks = item
+            if self.now() - stamp >= self.ttl:
+                del self._items[list_id]
+                return None
+            self._items.move_to_end(list_id)
+            return source, [dict(track) for track in tracks]
+
+    def put(self, list_id: str, source: str, tracks: list[dict[str, object]]) -> None:
+        with self._lock:
+            self._items[list_id] = (self.now(), source, [dict(track) for track in tracks])
+            self._items.move_to_end(list_id)
+            while len(self._items) > self.limit:
+                self._items.popitem(last=False)
+
+
+def _playlist_search_job(source: str, control: FetchControl):
+    """Playlist contents for the search box. The scan cap is the display cap."""
+
+    fetched = fetch_youtube_playlist(source, control=control)
+    if control.cancel.is_set():
+        raise ImportCancelled()
+    origin = "youtube" if api_key() else "ytdlp"
+    return origin, [track.as_dict() for track in fetched.tracks]
 
 
 def _import_job(store, source, room, known, control, dest_id, dest_name):
@@ -214,7 +264,9 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(title="djtube")
     slot = ImportSlot()
+    cache = PlaylistSearchCache()
     app.state.import_slot = slot
+    app.state.playlist_search_cache = cache
     store = playlist_store if playlist_store is not None else PlaylistStore(playlist_path())
     jar = cookies if cookies is not None else CookieStore(cookie_path())
     install_store(jar)
@@ -254,10 +306,43 @@ def create_app(
             headers=upstream.response_headers(),
         )
 
-    @app.get("/api/search")
-    def search(q: str = Query(min_length=1, max_length=120), music: bool = True) -> dict[str, object]:
+    async def search_playlist(source: str, list_id: str, request: Request) -> dict[str, object] | Response:
+        cached = cache.get(list_id)
+        if cached is not None:
+            origin, tracks = cached
+            return {"source": origin, "tracks": tracks}
+        control = slot.acquire(_publisher_address(request), kind="search")
         try:
-            tracks, source = search_tracks(q, music=music)
+            loaded = await _run_import(
+                request,
+                control,
+                lambda: _playlist_search_job(source, control),
+            )
+            if loaded is None:
+                return Response(status_code=499)
+            origin, tracks = loaded
+            cache.put(list_id, origin, tracks)
+            return {"source": origin, "tracks": tracks}
+        except ImportCancelled:
+            return Response(status_code=499)
+        except PlaylistLookupError as exc:
+            if control.cancel.is_set():
+                return Response(status_code=499)
+            raise HTTPException(exc.status, str(exc)) from None
+        finally:
+            slot.release()
+
+    @app.get("/api/search")
+    async def search(
+        request: Request,
+        q: str = Query(min_length=1, max_length=SEARCH_QUERY_MAX),
+        music: bool = True,
+    ) -> dict[str, object]:
+        list_id = parse_playlist_url(q)
+        if list_id is not None and video_id_from_query(q) is None:
+            return await search_playlist(q, list_id, request)
+        try:
+            tracks, source = await asyncio.to_thread(search_tracks, q, music=music)
         except SearchError as exc:
             raise HTTPException(400 if str(exc) == "検索語を入れてください" else 502, str(exc)) from None
         return {"source": source, "tracks": [track.as_dict() for track in tracks]}
