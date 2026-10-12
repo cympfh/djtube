@@ -1190,6 +1190,9 @@ setInterval(() => {
 }, 250);
 render();
 paintControllerLeds();
+window.addEventListener("resize", () => {
+  pokeWaves();
+});
 window.addEventListener("pagehide", () => {
   extinguishFlx4Leds(flx4LedPort);
 });

@@ -39,13 +39,17 @@ def test_waveforms_are_stacked_above_the_decks():
     assert "grid-template-rows: 72px 72px" in detail
     overview = css.split(".wave-overview {", 1)[1].split("}", 1)[0]
     assert "grid-template-rows: 20px 20px" in overview
+    app_css = css.split(".app {", 1)[1].split("}", 1)[0]
+    assert "height: auto" in app_css
+    assert "min-height: 100dvh" in app_css
     mixer = css.split(".mixer {", 1)[1].split("}", 1)[0]
-    assert "auto minmax(0, 1fr) auto" in mixer
+    assert "auto minmax(340px, 1fr) auto" in mixer
+    assert 'addEventListener("resize"' in app_js
 
     short = css.split("@media (max-height: 900px)", 1)[1].split("@media", 1)[0]
     assert "grid-template-rows: 40px 40px" in short
     assert ".wave-overview { display: none; }" in short
-    assert "minmax(340px, 1fr)" in short
+    assert "minmax(340px, 1fr)" not in short
     assert "上下の縦線が揃うと拍が合っている" in readme
     assert "波形を準備中" in readme
     assert "再生位置" in readme
