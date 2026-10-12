@@ -21,6 +21,7 @@ import { createDeckPlayer, startDeckAudio } from "./player.js";
 import { bindCookies, cookiePanelOpen } from "./cookies.js";
 import { discRotationDegrees, discSpinning, discVisible } from "./disc.js";
 import { publicPrefix } from "./prefix.js";
+import { paintDeckWaves, waveStatusText } from "./waveform.js";
 
 const prefix = publicPrefix();
 const state = freshState();
@@ -311,14 +312,17 @@ function renderResults() {
     list.append(li);
   });
   const selected = list.children[state.selected];
-  if (selected) {
-    const top = selected.offsetTop;
-    const bottom = top + selected.offsetHeight;
-    if (top < list.scrollTop) list.scrollTop = top;
-    else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
-  }
+  if (selected) revealRow(list, selected);
   if (selected) list.setAttribute("aria-activedescendant", selected.id);
   else list.removeAttribute("aria-activedescendant");
+}
+
+function revealRow(list, selected) {
+  const top = selected.offsetTop;
+  const bottom = top + selected.offsetHeight;
+  if (top < list.scrollTop) list.scrollTop = top;
+  else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
+  selected.scrollIntoView?.({ block: "nearest" });
 }
 
 function renderDeck(deck) {
@@ -777,10 +781,7 @@ function renderPlaylists() {
   });
   const selected = list.children[state.playlistIndex];
   if (selected) {
-    const top = selected.offsetTop;
-    const bottom = top + selected.offsetHeight;
-    if (top < list.scrollTop) list.scrollTop = top;
-    else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
+    revealRow(list, selected);
     list.setAttribute("aria-activedescendant", selected.id);
   } else {
     list.removeAttribute("aria-activedescendant");
@@ -841,6 +842,51 @@ function showLibrary(name) {
   if (!search && document.activeElement === searchInput) searchInput.blur();
 }
 
+const WAVE_COLOR = { A: "#ffb000", B: "#ff4d2e" };
+
+function syncWaveNotes() {
+  for (const deck of ["A", "B"]) {
+    const note = document.getElementById(`wave-note-${deck}`);
+    if (!note) return;
+    const text = waveStatusText(state.decks[deck]);
+    note.textContent = text;
+    note.hidden = !text;
+  }
+}
+
+function paintWaves() {
+  const detail = {};
+  const overview = {};
+  const position = {};
+  for (const deck of ["A", "B"]) {
+    detail[deck] = document.getElementById(`wave-${deck}`);
+    overview[deck] = document.getElementById(`wave-overview-${deck}`);
+    position[deck] = Number(audios[deck].currentTime) || 0;
+  }
+  paintDeckWaves({ detail, overview }, { decks: state.decks, position, color: WAVE_COLOR });
+}
+
+let waveFrame = 0;
+
+function wavesMoving() {
+  return ["A", "B"].some((deck) => state.decks[deck].playing || state.decks[deck].wavePreparing);
+}
+
+function tickWaves() {
+  waveFrame = 0;
+  paintWaves();
+  if (wavesMoving()) waveFrame = requestAnimationFrame(tickWaves);
+}
+
+function pokeWaves() {
+  syncWaveNotes();
+  if (typeof requestAnimationFrame !== "function") {
+    paintWaves();
+    return;
+  }
+  if (!waveFrame) waveFrame = requestAnimationFrame(tickWaves);
+}
+
 function render() {
   renderSearchStatus();
   renderAddNote();
@@ -849,6 +895,7 @@ function render() {
   renderDeck("A");
   renderDeck("B");
   renderFader();
+  pokeWaves();
   cookiesUi.setOpen(cookiePanelOpen(state.decks));
   liveControl.refresh();
   document.getElementById("search-button").disabled = state.searching;
@@ -1139,9 +1186,13 @@ startDeckAudio(audios, {
 setInterval(() => {
   if (state.decks.A.playing) updateTime("A");
   if (state.decks.B.playing) updateTime("B");
+  if (state.decks.A.playing || state.decks.B.playing) pokeWaves();
 }, 250);
 render();
 paintControllerLeds();
+window.addEventListener("resize", () => {
+  pokeWaves();
+});
 window.addEventListener("pagehide", () => {
   extinguishFlx4Leds(flx4LedPort);
 });

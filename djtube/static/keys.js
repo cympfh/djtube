@@ -300,7 +300,17 @@ export function handleKeydown(event, actions, library = "search") {
     return false;
   }
   if (isTypingTarget(event.target)) return false;
-  if (event.target?.tagName === "INPUT" && event.target.type === "range") return false;
+  if (
+    event.target?.tagName === "INPUT" &&
+    (event.target.type || "").toLowerCase() === "checkbox" &&
+    (event.key === " " || event.key === "Spacebar")
+  ) {
+    return false;
+  }
+  if (event.target?.tagName === "INPUT" && event.target.type === "range") {
+    if (event.key === " " || event.key === "Spacebar") event.preventDefault();
+    return false;
+  }
   if (
     typeof event.target?.closest === "function" &&
     event.target.closest("button") &&
@@ -309,7 +319,10 @@ export function handleKeydown(event, actions, library = "search") {
     return false;
   }
   const binding = bindingFor(event, library);
-  if (!binding) return false;
+  if (!binding) {
+    if (event.key === " " || event.key === "Spacebar") event.preventDefault();
+    return false;
+  }
   event.preventDefault();
   const fn = actions[binding.action];
   if (typeof fn === "function") fn(...(binding.args || []));
