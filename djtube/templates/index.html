@@ -116,14 +116,8 @@
               <div class="search-row">
                 <label class="sr-only" for="playlist-import-url">YouTubeのプレイリストURL</label>
                 <input id="playlist-import-url" type="text" placeholder="プレイリストのURL" maxlength="2000" autocomplete="off" spellcheck="false" />
-                <button type="button" id="playlist-import">取り込む</button>
+                <button type="button" id="playlist-import" aria-haspopup="dialog" aria-controls="playlist-import-dialog" aria-expanded="false">取り込む</button>
               </div>
-              <label class="sr-only" for="playlist-import-dest">追加先</label>
-              <select id="playlist-import-dest">
-                <option value="new">新しいプレイリスト</option>
-              </select>
-              <label class="sr-only" for="playlist-import-name">新しいプレイリストの名前</label>
-              <input id="playlist-import-name" type="text" placeholder="新しいプレイリストの名前" maxlength="80" autocomplete="off" spellcheck="false" hidden />
               <p class="status" id="playlist-import-note" role="status"></p>
             </div>
             <p class="status" id="playlist-status" role="status"></p>
@@ -316,6 +310,22 @@
           <button type="button" id="playlist-delete">プレイリスト削除</button>
         </div>
         <button type="button" id="playlist-edit-close">閉じる</button>
+      </div>
+    </dialog>
+    <dialog id="playlist-import-dialog" aria-labelledby="playlist-import-title">
+      <div class="playlist-edit-body">
+        <h2 id="playlist-import-title">取り込み先</h2>
+        <label for="playlist-import-dest">追加先</label>
+        <select id="playlist-import-dest">
+          <option value="new">新しいプレイリスト</option>
+        </select>
+        <label id="playlist-import-name-label" for="playlist-import-name" hidden>新しいプレイリストの名前</label>
+        <input id="playlist-import-name" type="text" placeholder="新しいプレイリストの名前" maxlength="80" autocomplete="off" spellcheck="false" hidden />
+        <p class="status" id="playlist-import-dialog-note" role="status"></p>
+        <div class="playlist-edit-actions">
+          <button type="button" id="playlist-import-run">取り込む</button>
+        </div>
+        <button type="button" id="playlist-import-cancel">キャンセル</button>
       </div>
     </dialog>
     <script type="module" src="__PUBLIC_PREFIX__/static/app.js"></script>

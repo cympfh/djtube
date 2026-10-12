@@ -48,6 +48,25 @@ export function importResultMessage(result) {
   return parts.join("、");
 }
 
+export function playlistImportLaunch(url, { importing = false, busy = false, open = false } = {}) {
+  if (importing) return "abort";
+  if (busy || open) return "ignore";
+  if (!String(url ?? "").trim()) return "need-url";
+  return "open";
+}
+
+export function playlistImportCommit({
+  open = false,
+  importing = false,
+  busy = false,
+  destination = "new",
+  name = "",
+} = {}) {
+  if (!open || importing || busy) return "ignore";
+  if ((destination || "new") === "new" && !String(name ?? "").trim()) return "need-name";
+  return "import";
+}
+
 export function trackSnapshot(track) {
   if (!track || typeof track.id !== "string" || !track.id) return null;
   const duration = Number(track.duration);

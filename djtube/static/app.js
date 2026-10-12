@@ -11,7 +11,7 @@ import { deckGains } from "./gains.js";
 import { eqGainDb, formatEqDb } from "./eq.js";
 import { formatFilter } from "./filter.js";
 import { formatTime } from "./format.js";
-import { playlistMetaText } from "./playlists.js";
+import { playlistImportCommit, playlistImportLaunch, playlistMetaText } from "./playlists.js";
 import { bpmText, tempoValueText } from "./bpm.js";
 import { formatRate } from "./rate.js";
 import { handleKeydown, isSearchTarget, isTypingTarget, legendGroups } from "./keys.js";
@@ -787,6 +787,14 @@ function renderPlaylists() {
   }
 }
 
+let importDialogError = "";
+
+function syncImportNameField() {
+  const showName = playlistImportDest.value === "new";
+  playlistImportName.hidden = !showName;
+  document.getElementById("playlist-import-name-label").hidden = !showName;
+}
+
 function renderImport() {
   const dest = document.getElementById("playlist-import-dest");
   const signature = state.playlists.map((item) => `${item.id}\t${item.name}`).join("\n");
@@ -810,18 +818,22 @@ function renderImport() {
     else if (state.playlistId && state.playlists.some((item) => item.id === state.playlistId)) dest.value = state.playlistId;
     else dest.value = "new";
   }
-  const name = document.getElementById("playlist-import-name");
-  name.hidden = dest.value !== "new";
+  syncImportNameField();
   const note = document.getElementById("playlist-import-note");
   note.textContent = state.playlistImportNote || "";
   note.classList.toggle("is-error", !!state.playlistImportError);
+  const dialog = document.getElementById("playlist-import-dialog");
+  const dialogNote = document.getElementById("playlist-import-dialog-note");
+  dialogNote.textContent = dialog.open ? importDialogError : "";
+  dialogNote.classList.toggle("is-error", dialog.open && !!importDialogError);
   const button = document.getElementById("playlist-import");
   const importing = !!state.playlistImporting;
   button.disabled = state.playlistBusy && !importing;
   button.textContent = importing ? "やめる" : "取り込む";
+  button.setAttribute("aria-expanded", dialog.open ? "true" : "false");
   dest.disabled = state.playlistBusy || importing;
   document.getElementById("playlist-import-url").disabled = state.playlistBusy || importing;
-  name.disabled = state.playlistBusy || importing;
+  playlistImportName.disabled = state.playlistBusy || importing;
 }
 
 function renderAddNote() {
@@ -864,11 +876,12 @@ document.getElementById("tab-search").addEventListener("click", () => showLibrar
 document.getElementById("tab-playlist").addEventListener("click", () => showLibrary("playlist"));
 document.getElementById("playlist-create").addEventListener("click", () => actions.createPlaylist());
 const playlistEditDialog = document.getElementById("playlist-edit-dialog");
+const playlistImportDialog = document.getElementById("playlist-import-dialog");
 const playlistRenameName = document.getElementById("playlist-rename-name");
 
 function openPlaylistEdit() {
   const playlist = state.playlists.find((item) => item.id === state.playlistId);
-  if (!playlist || state.playlistBusy || playlistEditDialog.open) return;
+  if (!playlist || state.playlistBusy || playlistEditDialog.open || playlistImportDialog.open) return;
   playlistRenameName.value = playlist.name;
   state.playlistError = "";
   playlistEditDialog.showModal();
@@ -913,26 +926,81 @@ playlistRenameName.addEventListener("keydown", (event) => {
 document.getElementById("playlist-select").addEventListener("change", (event) => {
   actions.selectPlaylist(event.target.value);
 });
-document.getElementById("playlist-import").addEventListener("click", () => actions.importPlaylist());
+function openPlaylistImportDialog() {
+  const launch = playlistImportLaunch(playlistImportUrl.value, {
+    importing: state.playlistImporting,
+    busy: state.playlistBusy,
+    open: playlistImportDialog.open || playlistEditDialog.open,
+  });
+  if (launch === "abort") {
+    actions.importPlaylist();
+    return;
+  }
+  if (launch === "need-url") {
+    actions.importPlaylist();
+    return;
+  }
+  if (launch !== "open") return;
+  importDialogError = "";
+  syncImportNameField();
+  playlistImportDialog.showModal();
+  playlistImportDest.focus();
+  document.getElementById("playlist-import").setAttribute("aria-expanded", "true");
+}
+
+function submitPlaylistImport() {
+  const commit = playlistImportCommit({
+    open: playlistImportDialog.open,
+    importing: state.playlistImporting,
+    busy: state.playlistBusy,
+    destination: playlistImportDest.value,
+    name: playlistImportName.value,
+  });
+  if (commit === "need-name") {
+    importDialogError = "名前を入れてください";
+    syncImportNameField();
+    scheduleRender();
+    playlistImportName.focus();
+    return;
+  }
+  if (commit !== "import") return;
+  importDialogError = "";
+  playlistImportDialog.close();
+  actions.importPlaylist();
+}
+
+document.getElementById("playlist-import").addEventListener("click", () => openPlaylistImportDialog());
+document.getElementById("playlist-import-run").addEventListener("click", () => submitPlaylistImport());
+document.getElementById("playlist-import-cancel").addEventListener("click", () => playlistImportDialog.close());
+playlistImportDialog.addEventListener("click", (event) => {
+  if (event.target === playlistImportDialog) playlistImportDialog.close();
+});
+playlistImportDialog.addEventListener("close", () => {
+  importDialogError = "";
+  document.getElementById("playlist-import").setAttribute("aria-expanded", "false");
+  scheduleRender();
+});
 playlistImportDest.addEventListener("change", () => {
   playlistImportDest.dataset.touched = "1";
-  playlistImportName.hidden = playlistImportDest.value !== "new";
+  importDialogError = "";
+  syncImportNameField();
   if (playlistImportDest.value === "new") playlistImportName.focus();
+  scheduleRender();
 });
 playlistImportUrl.addEventListener("keydown", (event) => {
   if (event.key !== "Enter") return;
   event.preventDefault();
-  if (playlistImportDest.value === "new" && !playlistImportName.value.trim()) {
-    playlistImportName.hidden = false;
-    playlistImportName.focus();
-    return;
-  }
-  actions.importPlaylist();
+  openPlaylistImportDialog();
 });
 playlistImportName.addEventListener("keydown", (event) => {
   if (event.key !== "Enter") return;
   event.preventDefault();
-  actions.importPlaylist();
+  submitPlaylistImport();
+});
+playlistImportName.addEventListener("input", () => {
+  if (!importDialogError) return;
+  importDialogError = "";
+  scheduleRender();
 });
 playlistName.addEventListener("blur", () => {
   if (state.playlistNaming !== "create") {
@@ -1018,7 +1086,7 @@ for (const deck of ["A", "B"]) {
 window.addEventListener(
   "keydown",
   (event) => {
-    if (playlistEditDialog.open) return;
+    if (playlistEditDialog.open || playlistImportDialog.open) return;
     if (
       sortingTrack &&
       (event.key === "5" || event.key === "6") &&

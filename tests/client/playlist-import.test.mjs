@@ -4,7 +4,7 @@ import test from "node:test";
 
 import { createActions, freshState } from "../../djtube/static/actions.js";
 import { handleKeydown } from "../../djtube/static/keys.js";
-import { importResultMessage } from "../../djtube/static/playlists.js";
+import { importResultMessage, playlistImportCommit, playlistImportLaunch } from "../../djtube/static/playlists.js";
 
 const PLAYLIST_ID = "a".repeat(32);
 
@@ -327,27 +327,74 @@ test("typing in the import fields does not trigger deck or playlist keys", () =>
   assert.equal(played, false);
 });
 
-test("the playlist panel has the import form wired like the search box", () => {
+test("an empty url does not ask for the import dialog", () => {
+  assert.equal(playlistImportLaunch(""), "need-url");
+  assert.equal(playlistImportLaunch("   "), "need-url");
+  assert.equal(playlistImportLaunch(null), "need-url");
+  assert.equal(
+    playlistImportLaunch(" https://www.youtube.com/playlist?list=PLaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "),
+    "open",
+  );
+  assert.equal(playlistImportLaunch("PLaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", { importing: true }), "abort");
+  assert.equal(playlistImportLaunch("PLaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", { busy: true }), "ignore");
+  assert.equal(playlistImportLaunch("PLaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", { open: true }), "ignore");
+});
+
+test("the import dialog commits only after a destination is ready", () => {
+  assert.equal(playlistImportCommit({ open: true, destination: "new", name: "  " }), "need-name");
+  assert.equal(playlistImportCommit({ open: true, destination: "new", name: " 朝のセット " }), "import");
+  assert.equal(playlistImportCommit({ open: true, destination: PLAYLIST_ID, name: "" }), "import");
+  assert.equal(playlistImportCommit({ open: false, destination: PLAYLIST_ID, name: "朝" }), "ignore");
+  assert.equal(playlistImportCommit({ open: true, importing: true, destination: PLAYLIST_ID, name: "朝" }), "ignore");
+  assert.equal(playlistImportCommit({ open: true, busy: true, destination: "new", name: "朝" }), "ignore");
+});
+
+test("the playlist panel keeps the url field and opens a destination dialog", () => {
   const html = readFileSync(new URL("../../djtube/templates/index.html", import.meta.url), "utf8");
   const app = readFileSync(new URL("../../djtube/static/app.js", import.meta.url), "utf8");
   const css = readFileSync(new URL("../../djtube/static/app.css", import.meta.url), "utf8");
   const panel = html.slice(html.indexOf('id="playlist-panel"'), html.indexOf('id="playlist-tracks"'));
+  const dialog = html.slice(html.indexOf('id="playlist-import-dialog"'), html.indexOf("</dialog>", html.indexOf('id="playlist-import-dialog"')));
   assert.match(panel, /id="playlist-import-url"/);
   assert.match(panel, /placeholder="プレイリストのURL"/);
-  assert.match(panel, /id="playlist-import-dest"/);
-  assert.match(panel, /新しいプレイリスト/);
-  assert.match(panel, /id="playlist-import-name"/);
   assert.match(panel, /id="playlist-import"/);
+  assert.match(panel, /aria-haspopup="dialog"/);
+  assert.match(panel, /aria-controls="playlist-import-dialog"/);
   assert.match(panel, />取り込む</);
   assert.match(panel, /id="playlist-import-note"/);
+  assert.doesNotMatch(panel, /id="playlist-import-dest"/);
+  assert.doesNotMatch(panel, /id="playlist-import-name"/);
   assert.ok(panel.indexOf('id="playlist-edit"') < panel.indexOf('id="playlist-import-url"'));
+  assert.match(dialog, /id="playlist-import-dest"/);
+  assert.match(dialog, /新しいプレイリスト/);
+  assert.match(dialog, /id="playlist-import-name"/);
+  assert.match(dialog, /id="playlist-import-run"/);
+  assert.match(dialog, /id="playlist-import-cancel"/);
+  assert.match(dialog, />キャンセル</);
   assert.match(app, /\/api\/playlists\/import/);
   assert.match(app, /playlistImportUrl\.addEventListener\("keydown"/);
   assert.match(app, /playlistImportName\.addEventListener\("keydown"/);
   assert.match(app, /actions\.importPlaylist\(\)/);
   assert.match(app, /function renderImport\(\)/);
+  assert.match(app, /function openPlaylistImportDialog\(\)/);
+  assert.match(app, /function submitPlaylistImport\(\)/);
+  assert.match(app, /playlistImportLaunch\(/);
+  assert.match(app, /playlistImportCommit\(/);
+  assert.match(app, /showModal\(\)/);
+  const keys = app.slice(app.indexOf('window.addEventListener(\n  "keydown"'), app.indexOf("const midiButton"));
+  assert.match(keys, /playlistEditDialog\.open \|\| playlistImportDialog\.open/);
+  assert.ok(keys.indexOf("playlistImportDialog.open") < keys.indexOf("handleKeydown("));
+  const openFn = app.slice(app.indexOf("function openPlaylistImportDialog"), app.indexOf("function submitPlaylistImport"));
+  assert.ok(openFn.indexOf('launch === "need-url"') < openFn.indexOf("showModal()"));
+  assert.match(openFn, /actions\.importPlaylist\(\)/);
+  const submitAt = app.indexOf("function submitPlaylistImport");
+  const submitFn = app.slice(submitAt, app.indexOf('document.getElementById("playlist-import")', submitAt));
+  assert.match(submitFn, /commit === "need-name"/);
+  assert.match(submitFn, /名前を入れてください/);
+  assert.ok(submitFn.indexOf("playlistImportDialog.close()") < submitFn.indexOf("actions.importPlaylist()"));
   assert.match(css, /#playlist-import-url/);
-  assert.match(css, /#search-button, #playlist-import/);
+  assert.match(css, /#playlist-import-dialog/);
+  assert.match(css, /#search-button, #playlist-import, #playlist-import-run/);
   assert.doesNotMatch(`${html}\n${app}\n${css}`, /googleapis|YOUTUBE_API_KEY|AIza/);
   assert.doesNotMatch(html, /id="playlist-import-dest"[^>]*aria-labelledby/);
   assert.match(html, /for="playlist-import-dest">追加先/);
