@@ -169,6 +169,12 @@ function platterTouch(channel, number) {
   return (channel === DECK_A || channel === DECK_B) && number === JOG_TOUCH;
 }
 
+/** A hold control's release (platter top, velocity 0). Presses are value > 0. */
+export function isHoldRelease(msg, map = FLX4_MAP) {
+  if (!msg || Number(msg.value) > 0) return false;
+  return !!map[controllerEventKey(msg)]?.hold;
+}
+
 export function dispatchControllerEvent(msg, actions, map = FLX4_MAP) {
   if (!msg) return false;
   const spec = map[controllerEventKey(msg)];
@@ -410,6 +416,7 @@ export function createMidiControl(actions, onStatus, options = {}) {
         if (session !== mine) return;
         const msg = messageFromMidi(event.data);
         if (!msg) return;
+        if (typeof options.blocked === "function" && options.blocked() && !isHoldRelease(msg)) return;
         if (!dispatchControllerEvent(msg, actions)) ignored += 1;
         report("open", mine.names);
       };

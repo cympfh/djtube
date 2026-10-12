@@ -48,6 +48,42 @@ export function importResultMessage(result) {
   return parts.join("、");
 }
 
+export const IMPORT_DIALOG_POINTER_SHIELD_MS = 400;
+
+export function createPointerShield(ms = IMPORT_DIALOG_POINTER_SHIELD_MS, now = () => performance.now()) {
+  let until = 0;
+  return {
+    arm() {
+      until = now() + ms;
+    },
+    swallow(event) {
+      if (now() >= until) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
+    },
+  };
+}
+
+export function playlistImportLaunch(url, { importing = false, busy = false, open = false } = {}) {
+  if (importing) return "abort";
+  if (busy || open) return "ignore";
+  if (!String(url ?? "").trim()) return "need-url";
+  return "open";
+}
+
+export function playlistImportCommit({
+  open = false,
+  importing = false,
+  busy = false,
+  destination = "new",
+  name = "",
+} = {}) {
+  if (!open || importing || busy) return "ignore";
+  if ((destination || "new") === "new" && !String(name ?? "").trim()) return "need-name";
+  return "import";
+}
+
 export function trackSnapshot(track) {
   if (!track || typeof track.id !== "string" || !track.id) return null;
   const duration = Number(track.duration);

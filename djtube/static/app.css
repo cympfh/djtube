@@ -336,7 +336,8 @@ button:hover { border-color: #5c564b; }
 
 #playlist-edit { align-self: flex-start; }
 
-#playlist-edit-dialog {
+#playlist-edit-dialog,
+#playlist-import-dialog {
   margin: auto;
   padding: 16px;
   width: min(320px, calc(100vw - 32px));
@@ -346,8 +347,17 @@ button:hover { border-color: #5c564b; }
   color: var(--text);
 }
 
-#playlist-edit-dialog::backdrop {
+#playlist-edit-dialog::backdrop,
+#playlist-import-dialog::backdrop {
   background: rgba(16, 15, 12, 0.72);
+}
+
+#playlist-import-shield {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: transparent;
+  touch-action: none;
 }
 
 .playlist-edit-body {
@@ -392,7 +402,8 @@ button:hover { border-color: #5c564b; }
   border-color: #ff4d3a;
 }
 
-#playlist-edit-close { align-self: flex-start; }
+#playlist-edit-close,
+#playlist-import-cancel { align-self: flex-start; }
 
 .playlist-import {
   display: flex;
@@ -430,7 +441,7 @@ button:hover { border-color: #5c564b; }
 
 button:disabled { opacity: 0.45; cursor: default; }
 
-#search-button, #playlist-import { background: var(--text); color: #16140f; border: 0; font-weight: 700; }
+#search-button, #playlist-import, #playlist-import-run { background: var(--text); color: #16140f; border: 0; font-weight: 700; }
 
 .music-only {
   display: flex;

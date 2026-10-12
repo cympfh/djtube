@@ -63,9 +63,21 @@ def test_index_uses_public_asset_prefix():
     assert 'id="playlist-import-dest"' in html
     assert 'id="playlist-import-name"' in html
     assert 'id="playlist-import"' in html
+    assert 'id="playlist-import" aria-haspopup="dialog" aria-controls="playlist-import-dialog"' in html
     assert ">取り込む</button>" in html
     assert "新しいプレイリスト" in html
     assert 'id="playlist-import-note"' in html
+    panel = html.split('id="playlist-panel"', 1)[1].split('id="playlist-tracks"', 1)[0]
+    assert 'id="playlist-import-dest"' not in panel
+    assert 'id="playlist-import-name"' not in panel
+    assert 'id="playlist-import-dialog"' in html
+    dialog = html.split('id="playlist-import-dialog"', 1)[1].split("</dialog>", 1)[0]
+    assert 'id="playlist-import-dest"' in dialog
+    assert "新しいプレイリスト" in dialog
+    assert 'id="playlist-import-name"' in dialog
+    assert 'id="playlist-import-run"' in dialog
+    assert 'id="playlist-import-cancel"' in dialog
+    assert ">キャンセル</button>" in dialog
     assert html.index('id="playlist-select"') < html.index('id="playlist-edit"')
     assert 'id="playlist-edit-dialog"' in html
     assert 'id="playlist-rename"' in html
@@ -246,10 +258,21 @@ def test_readme_and_docker_contract():
     for token in ("YOUTUBE_API_KEY", "8098", "/djtube/", "DDJ-FLX4", "docker run", "uv sync", "yt-dlp"):
         assert token in agent
     assert "/api/playlists/import" in agent
+    assert "playlist-import-dialog" in agent
+    assert "playlistImportLaunch" in agent
+    assert "createPointerShield" in agent
+    assert "playlist-import-shield" in agent
+    assert "touchstart" in agent
+    assert "discHeld" in agent
+    assert "dispatchControllerEvent" in agent
+    assert "playlistImportCommit" in agent
     assert "fetch_youtube_playlist" in agent
     assert "playlistItems" in agent
     assert "プレイリスト" in readme
     assert "「取り込む」" in readme
+    assert "追加先を選ぶ画面が出る" in readme
+    assert "キャンセル、または `Esc` で閉じる" in readme
+    assert "URLが空のときは、その画面は出ない" in readme
     assert "同じ曲は足さない" in readme
     assert "非公開や削除" in readme
     assert "Shift+A" in readme
