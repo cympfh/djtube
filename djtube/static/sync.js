@@ -3,6 +3,9 @@
  * rate. Phase is applied when sync starts and when the leader jumps, not on
  * every tick. Nothing here starts, stops, or seeks.
  *
+ * `beatSnapPlan` is the separate play-start nudge. It does not change rate.
+ * The caller seeks only when the nearest beats are already close.
+ *
  * The follower rate makes its heard BPM half, the same, or double the master
  * heard tempo. Closeness is |ln(currentHeard / targetHeard)| against the
  * pre-sync heard BPM. The caller stores that factor for the whole lock.
@@ -183,4 +186,92 @@ export function beatSyncPlan(own, other, factor) {
   const time = placeSyncTime(own.time + deltaWall * rate, period);
   if (!Number.isFinite(time) || !(period > 0)) return null;
   return { rate, time, period, factor: chosen };
+}
+
+/**
+ * Play-start snap window, in wall-clock seconds.
+ * 80 ms is enough to close a flamming kick and too small to abandon a cue
+ * the DJ placed off the beat. 20% of the shorter heard beat keeps a fast
+ * grid from jumping by a large fraction of its own pulse (above ~150 BPM,
+ * 20% is under 80 ms). A half-beat is 50% of that pulse, so it never snaps.
+ */
+export const BEAT_SNAP_MAX_SECONDS = 0.08;
+export const BEAT_SNAP_MAX_FRACTION = 0.2;
+
+function heardBeat(bpm, rate) {
+  const heard = 60 / (bpm * rate);
+  return heard > 0 && Number.isFinite(heard) ? heard : 0;
+}
+
+function beatSnapLimit(ownHeard, otherHeard) {
+  const pulse = Math.min(ownHeard, otherHeard);
+  if (!(pulse > 0)) return 0;
+  return Math.min(BEAT_SNAP_MAX_SECONDS, BEAT_SNAP_MAX_FRACTION * pulse);
+}
+
+/** Beat instants near now. Negative is in the past. `wall` is seconds since the last beat. */
+function beatInstants(wall, heard) {
+  const instants = [];
+  if (!(heard > 0) || !Number.isFinite(wall)) return instants;
+  const reach = heard + 1;
+  const first = Math.floor((-reach + wall) / heard) - 1;
+  const last = Math.ceil((reach + wall) / heard) + 1;
+  const stop = Math.min(last, first + 64);
+  for (let k = first; k <= stop; k += 1) instants.push(k * heard - wall);
+  return instants;
+}
+
+/** Beat instant nearest to now. Negative is in the past. Exact half keeps the previous beat. */
+function nearestBeatToNow(wall, heard) {
+  if (!(heard > 0) || !Number.isFinite(wall)) return null;
+  const previous = -wall;
+  const next = heard - wall;
+  if (Math.abs(next) < Math.abs(previous) - 1e-12) return next;
+  return previous;
+}
+
+/**
+ * Wall-clock seconds to seek `own` so the beat of `own` nearest to now lands
+ * on the nearest beat of `other`. Positive seeks forward.
+ * A closer pair that sits far from the playhead is not the drop: 120 against
+ * 128 can put two future beats 9 ms apart while the kicks at now are 40 ms
+ * apart. Half and double tempos still meet on the nearer grid point.
+ */
+function nearestBeatShift(ownWall, ownHeard, otherWall, otherHeard) {
+  const ownAt = nearestBeatToNow(ownWall, ownHeard);
+  if (ownAt == null) return null;
+  let best = null;
+  for (const otherAt of beatInstants(otherWall, otherHeard)) {
+    const delta = ownAt - otherAt;
+    if (!Number.isFinite(delta)) continue;
+    if (best == null || Math.abs(delta) < Math.abs(best) - 1e-12) best = delta;
+  }
+  return best;
+}
+
+/**
+ * File time for the deck that is starting, or null when it should stay.
+ * Null when either grid is missing or still measuring, the nearest beat is
+ * outside the snap window, the decks are already together, or the corrected
+ * time would leave the file. Unlike sync, an out-of-range target does not
+ * step by a whole beat. `other` is the deck already playing.
+ */
+export function beatSnapPlan(own, other, duration = Number.POSITIVE_INFINITY) {
+  if (!usableDeck(own) || !usableDeck(other)) return null;
+  const ownHeard = heardBeat(own.bpm, own.rate);
+  const otherHeard = heardBeat(other.bpm, other.rate);
+  const limit = beatSnapLimit(ownHeard, otherHeard);
+  if (!(limit > 0)) return null;
+  const ownWall = wallSinceBeat(own.time, own.beatOffset, own.bpm, own.rate);
+  const otherWall = wallSinceBeat(other.time, other.beatOffset, other.bpm, other.rate);
+  const deltaWall = nearestBeatShift(ownWall, ownHeard, otherWall, otherHeard);
+  // 1 ns keeps an error that lands on the limit from falling outside via rounding.
+  if (deltaWall == null || Math.abs(deltaWall) > limit + 1e-9) return null;
+  if (Math.abs(deltaWall) < 1e-4) return null;
+  const shifted = own.time + deltaWall * own.rate;
+  if (!Number.isFinite(shifted) || shifted < -1e-6) return null;
+  const time = shifted < 0 ? 0 : shifted;
+  const end = Number(duration);
+  if (Number.isFinite(end) && end > 0 && time > end + 1e-9) return null;
+  return { time, deltaWall };
 }
