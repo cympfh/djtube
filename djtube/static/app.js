@@ -312,14 +312,17 @@ function renderResults() {
     list.append(li);
   });
   const selected = list.children[state.selected];
-  if (selected) {
-    const top = selected.offsetTop;
-    const bottom = top + selected.offsetHeight;
-    if (top < list.scrollTop) list.scrollTop = top;
-    else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
-  }
+  if (selected) revealRow(list, selected);
   if (selected) list.setAttribute("aria-activedescendant", selected.id);
   else list.removeAttribute("aria-activedescendant");
+}
+
+function revealRow(list, selected) {
+  const top = selected.offsetTop;
+  const bottom = top + selected.offsetHeight;
+  if (top < list.scrollTop) list.scrollTop = top;
+  else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
+  selected.scrollIntoView?.({ block: "nearest" });
 }
 
 function renderDeck(deck) {
@@ -778,10 +781,7 @@ function renderPlaylists() {
   });
   const selected = list.children[state.playlistIndex];
   if (selected) {
-    const top = selected.offsetTop;
-    const bottom = top + selected.offsetHeight;
-    if (top < list.scrollTop) list.scrollTop = top;
-    else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
+    revealRow(list, selected);
     list.setAttribute("aria-activedescendant", selected.id);
   } else {
     list.removeAttribute("aria-activedescendant");

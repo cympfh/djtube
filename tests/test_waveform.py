@@ -53,6 +53,7 @@ def test_waveforms_are_stacked_above_the_decks():
     assert "grid-template-rows: 40px 40px" in short
     assert ".wave-overview { display: none; }" in short
     assert "minmax(340px, 1fr)" not in short
+    assert "min-height: 920px" in short
     assert "上下の縦線が揃うと拍が合っている" in readme
     assert "波形を準備中" in readme
     assert "再生位置" in readme

@@ -947,6 +947,7 @@ kbd {
 }
 
 @media (max-height: 900px) {
+  .app { min-height: 920px; }
   .mixer { gap: 6px; }
   .wave-stack { gap: 0; }
   .wave-detail { grid-template-rows: 40px 40px; }
