@@ -40,8 +40,11 @@ def test_waveforms_are_stacked_above_the_decks():
     overview = css.split(".wave-overview {", 1)[1].split("}", 1)[0]
     assert "grid-template-rows: 20px 20px" in overview
     app_css = css.split(".app {", 1)[1].split("}", 1)[0]
-    assert "height: auto" in app_css
-    assert "min-height: 100dvh" in app_css
+    assert "height: 100dvh" in app_css
+    assert "min-height: 1120px" in app_css
+    results = css.split(".results {", 1)[1].split("}", 1)[0]
+    assert "overflow: auto" in results
+    assert "min-height: 0" in results
     mixer = css.split(".mixer {", 1)[1].split("}", 1)[0]
     assert "auto minmax(340px, 1fr) auto" in mixer
     assert 'addEventListener("resize"' in app_js

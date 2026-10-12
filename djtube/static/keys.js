@@ -300,6 +300,13 @@ export function handleKeydown(event, actions, library = "search") {
     return false;
   }
   if (isTypingTarget(event.target)) return false;
+  if (
+    event.target?.tagName === "INPUT" &&
+    (event.target.type || "").toLowerCase() === "checkbox" &&
+    (event.key === " " || event.key === "Spacebar")
+  ) {
+    return false;
+  }
   if (event.target?.tagName === "INPUT" && event.target.type === "range") {
     if (event.key === " " || event.key === "Spacebar") event.preventDefault();
     return false;

@@ -51,8 +51,8 @@ button:hover { border-color: #5c564b; }
 }
 
 .app {
-  height: auto;
-  min-height: 100dvh;
+  height: 100dvh;
+  min-height: 1120px;
   max-width: 1180px;
   margin: 0 auto;
   padding: 12px 16px 10px;

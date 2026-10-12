@@ -49,6 +49,10 @@ test("space and deck keys do not scroll the page unless a field is being typed i
   assert.equal(handleKeydown(named, actions), false);
   assert.equal(named.defaultPrevented, false);
 
+  const music = keyEvent(" ", target("INPUT", { id: "music-only", type: "checkbox" }));
+  assert.equal(handleKeydown(music, actions), false);
+  assert.equal(music.defaultPrevented, false);
+
   const down = keyEvent("ArrowDown", target("BODY"));
   assert.equal(handleKeydown(down, actions), true);
   assert.equal(down.defaultPrevented, true);
