@@ -13,7 +13,7 @@ import { createPlaylistActions, freshPlaylistState, trackSnapshot } from "./play
 import { publicPrefix } from "./prefix.js";
 import { clampRate, rateFromMidi } from "./rate.js";
 import { commandedSeekLanded } from "./seekland.js";
-import { beatSyncPlan, placeSyncTime } from "./sync.js";
+import { beatSnapPlan, beatSyncPlan, placeSyncTime } from "./sync.js";
 import { peaksFromChannels, usablePeaks } from "./waveform.js";
 
 export function freshDeck() {
@@ -609,7 +609,10 @@ export function createActions(deps) {
     deckState.status = "ready";
     const pending = audio.play();
     deckState.playing = true;
-    if (wasPaused) alignSyncOnPlay(deck);
+    if (wasPaused) {
+      alignSyncOnPlay(deck);
+      snapBeatOnPlay(deck);
+    }
     if (pending && typeof pending.catch === "function") {
       pending.catch(() => {
         if (mediaPaused(audio)) {
@@ -1012,6 +1015,45 @@ export function createActions(deps) {
       const leaderName = otherDeck(name);
       if (!leaderName || !alignSync(name, leaderName, 0)) releaseDeckSync(name);
     }
+  }
+
+  // Nudge only the deck that just left pause, and only onto a nearby beat.
+  // Sync has already run; while either deck is locked, that alignment stands.
+  function snapBeatOnPlay(deck) {
+    const otherName = otherDeck(deck);
+    const own = deckOf(state, deck);
+    const other = otherName ? deckOf(state, otherName) : null;
+    const ownAudio = audios[deck];
+    const otherAudio = otherName ? audios[otherName] : null;
+    if (!own || !other || !ownAudio || !otherAudio) return;
+    if (own.syncing || other.syncing) return;
+    if (mediaPaused(otherAudio)) return;
+    if (own.status !== "ready" || other.status !== "ready") return;
+    const plan = beatSnapPlan(
+      {
+        bpm: own.bpm,
+        beatOffset: own.beatOffset,
+        rate: own.rate,
+        time: Number(ownAudio.currentTime),
+        measuring: own.bpmMeasuring,
+      },
+      {
+        bpm: other.bpm,
+        beatOffset: other.beatOffset,
+        rate: other.rate,
+        time: Number(otherAudio.currentTime),
+        measuring: other.bpmMeasuring,
+      },
+      Number(ownAudio.duration),
+    );
+    if (!plan) return;
+    const next = plan.time;
+    if (!Number.isFinite(next) || next < 0) return;
+    if (Math.abs(next - (Number(ownAudio.currentTime) || 0)) < 0.0005) return;
+    own.jogCommand = null;
+    ownAudio.cancelPendingSeek?.();
+    ownAudio.currentTime = next;
+    scheduleRender();
   }
 
   function setEq(deck, band, value) {
