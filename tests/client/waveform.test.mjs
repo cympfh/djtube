@@ -8,8 +8,10 @@ import {
   beatLines,
   fileTimeToX,
   overviewPlayheadX,
+  paintDeckWaves,
   peaksFromChannels,
   reducePeaks,
+  waveStatusText,
   xToFileTime,
 } from "../../djtube/static/waveform.js";
 
@@ -291,6 +293,8 @@ test("loading a track rebuilds peaks from the same decode and drops a stale resu
   assert.equal(replacement.state.decks.A.id, "zzzzzzzzzzz");
   assert.equal(replacement.state.decks.A.wave, null);
   assert.equal(replacement.state.decks.A.bpm, null);
+  assert.equal(replacement.state.decks.A.wavePreparing, true);
+  assert.equal(waveStatusText(replacement.state.decks.A), "波形を準備中");
 });
 
 test("a track past the decode limit never stays on the preparing waveform", async () => {
@@ -306,5 +310,114 @@ test("a track past the decode limit never stays on the preparing waveform", asyn
   await actions.onDeckReady("A");
   assert.equal(state.decks.A.wave, null);
   assert.equal(state.decks.A.wavePreparing, false);
+  assert.equal(state.decks.A.waveLong, true);
   assert.equal(state.decks.A.bpm, null);
+  assert.equal(waveStatusText(state.decks.A), "長いので波形なし");
+  assert.equal(waveStatusText(state.decks.B), "");
+});
+
+test("peak building returns nothing once the signal aborts between slices", async () => {
+  const sampleRate = 8000;
+  const samples = new Float32Array(sampleRate * 12);
+  samples[100] = 1;
+  const kept = await peaksFromChannels([samples], sampleRate, {
+    yield() {
+      return Promise.resolve();
+    },
+  });
+  assert.ok(kept?.columns > 10);
+
+  let yields = 0;
+  const controller = new AbortController();
+  const dropped = await peaksFromChannels([samples], sampleRate, {
+    signal: controller.signal,
+    yield() {
+      yields += 1;
+      controller.abort();
+      return Promise.resolve();
+    },
+  });
+  assert.ok(yields >= 1);
+  assert.equal(dropped, null);
+});
+
+function recordingCanvas(width = 400, height = 72) {
+  const rects = [];
+  return {
+    width: 0,
+    height: 0,
+    clientWidth: width,
+    clientHeight: height,
+    rects,
+    getBoundingClientRect() {
+      return { width, height };
+    },
+    getContext() {
+      const ctx = {
+        fillStyle: "",
+        setTransform() {},
+        fillRect(x, y, w, h) {
+          rects.push({ x, y, w, h, style: ctx.fillStyle });
+        },
+      };
+      return ctx;
+    },
+  };
+}
+
+function thinMarks(rects, height) {
+  return rects.filter((rect) => rect.y === 0 && rect.h === height && rect.w <= 2).map((rect) => rect.x);
+}
+
+test("tempo and playback position move the painted beat lines", () => {
+  const samples = clicks({ bpm: 120, seconds: 30, lead: 0 });
+  const peaks = reducePeaks([samples], 44100);
+  const deck = {
+    wave: peaks,
+    rate: 1,
+    bpm: 120,
+    beatOffset: 0,
+    duration: 32,
+  };
+  const surfaces = () => ({
+    detail: { A: recordingCanvas(), B: recordingCanvas() },
+    overview: { A: recordingCanvas(400, 20), B: recordingCanvas(400, 20) },
+  });
+
+  const mid = peaks.duration / 2;
+  const slow = surfaces();
+  paintDeckWaves(slow, { decks: { A: deck, B: { ...deck, rate: 1 } }, position: { A: mid, B: mid } });
+  const fast = surfaces();
+  paintDeckWaves(fast, {
+    decks: { A: { ...deck, rate: 2 }, B: deck },
+    position: { A: mid, B: mid },
+  });
+  const slowMarks = thinMarks(slow.detail.A.rects, slow.detail.A.height);
+  const fastMarks = thinMarks(fast.detail.A.rects, fast.detail.A.height);
+  const medianGap = (marks) => {
+    const gaps = [];
+    for (let index = 1; index < marks.length; index += 1) {
+      const gap = marks[index] - marks[index - 1];
+      if (gap > 0) gaps.push(gap);
+    }
+    gaps.sort((left, right) => left - right);
+    return gaps[Math.floor(gaps.length / 2)];
+  };
+  assert.ok(slowMarks.length > 4);
+  assert.ok(medianGap(slowMarks) > medianGap(fastMarks) * 1.5);
+
+  const shifted = surfaces();
+  paintDeckWaves(shifted, { decks: { A: deck, B: deck }, position: { A: mid + 0.25, B: mid } });
+  const shiftedMarks = thinMarks(shifted.detail.A.rects, shifted.detail.A.height);
+  assert.notDeepEqual(shiftedMarks, slowMarks);
+
+  const head = (box) => {
+    const marks = box.rects.filter((rect) => rect.w === 1 && rect.h === box.height && rect.y === 0 && rect.x > 0);
+    return marks.at(-1).x;
+  };
+  const early = head(slow.overview.A);
+  const later = surfaces();
+  paintDeckWaves(later, { decks: { A: deck, B: deck }, position: { A: mid + peaks.duration / 4, B: mid } });
+  assert.ok(Math.abs(early - slow.overview.A.width / 2) <= 1);
+  assert.ok(head(later.overview.A) > early + 80);
 });

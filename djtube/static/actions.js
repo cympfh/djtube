@@ -35,6 +35,7 @@ export function freshDeck() {
     bpmMeasuring: false,
     wave: null,
     wavePreparing: false,
+    waveLong: false,
     syncing: false,
     volume: 1,
     eq: { high: 0.5, mid: 0.5, low: 0.5 },
@@ -341,6 +342,7 @@ export function createActions(deps) {
     deckState.bpmMeasuring = false;
     deckState.wave = null;
     deckState.wavePreparing = false;
+    deckState.waveLong = false;
   }
 
   function applyBpmResult(deck, token, gen, result) {
@@ -350,6 +352,7 @@ export function createActions(deps) {
     watch.controller = null;
     deckState.bpmMeasuring = false;
     deckState.wavePreparing = false;
+    deckState.waveLong = false;
     deckState.wave = usablePeaks(result?.peaks);
     const bpm = Number(result?.bpm);
     const beatOffset = Number(result?.beatOffset);
@@ -508,6 +511,7 @@ export function createActions(deps) {
       deckState.bpmMeasuring = false;
       deckState.wave = null;
       deckState.wavePreparing = false;
+      deckState.waveLong = true;
       forgetSync(deck);
       scheduleRender();
       return Promise.resolve();
@@ -517,6 +521,7 @@ export function createActions(deps) {
     deckState.bpmMeasuring = true;
     deckState.wave = null;
     deckState.wavePreparing = true;
+    deckState.waveLong = false;
     forgetSync(deck);
     scheduleRender();
     return Promise.resolve()
@@ -574,6 +579,7 @@ export function createActions(deps) {
     deckState.status = loaded === false ? "preparing" : "ready";
     deckState.wave = null;
     deckState.wavePreparing = true;
+    deckState.waveLong = false;
     audio.playbackRate = deckState.rate;
     let eqLive = true;
     for (const band of EQ_BANDS) {

@@ -362,6 +362,35 @@ export function paintDetailWave(canvas, view = {}) {
   }
 }
 
+/** Shown on the lane while peaks are missing. Long tracks stay without a wave. */
+export function waveStatusText(deck) {
+  if (deck?.waveLong) return "長いので波形なし";
+  if (deck?.wavePreparing) return "波形を準備中";
+  return "";
+}
+
+/**
+ * Paints one deck pair. `position` is each deck's playback position and
+ * `decks[deck].rate` is its tempo. The overview length is the peak duration.
+ */
+export function paintDeckWaves(surfaces, input = {}) {
+  const decks = input.decks || {};
+  for (const deck of ["A", "B"]) {
+    const source = decks[deck] || {};
+    const position = Number(input.position?.[deck]);
+    const view = {
+      peaks: source.wave,
+      position: Number.isFinite(position) ? position : 0,
+      rate: source.rate,
+      bpm: source.bpm,
+      beatOffset: source.beatOffset,
+      color: input.color?.[deck],
+    };
+    paintDetailWave(surfaces?.detail?.[deck], view);
+    paintOverviewWave(surfaces?.overview?.[deck], view);
+  }
+}
+
 export function paintOverviewWave(canvas, view = {}) {
   const surface = prepare(canvas);
   if (!surface) return;

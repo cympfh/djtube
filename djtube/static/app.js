@@ -21,7 +21,7 @@ import { createDeckPlayer, startDeckAudio } from "./player.js";
 import { bindCookies, cookiePanelOpen } from "./cookies.js";
 import { discRotationDegrees, discSpinning, discVisible } from "./disc.js";
 import { publicPrefix } from "./prefix.js";
-import { paintDetailWave, paintOverviewWave } from "./waveform.js";
+import { paintDeckWaves, waveStatusText } from "./waveform.js";
 
 const prefix = publicPrefix();
 const state = freshState();
@@ -848,30 +848,22 @@ function syncWaveNotes() {
   for (const deck of ["A", "B"]) {
     const note = document.getElementById(`wave-note-${deck}`);
     if (!note) return;
-    note.hidden = !state.decks[deck].wavePreparing;
+    const text = waveStatusText(state.decks[deck]);
+    note.textContent = text;
+    note.hidden = !text;
   }
 }
 
 function paintWaves() {
+  const detail = {};
+  const overview = {};
+  const position = {};
   for (const deck of ["A", "B"]) {
-    const deckState = state.decks[deck];
-    const position = Number(audios[deck].currentTime) || 0;
-    const duration = Number(audios[deck].duration);
-    paintDetailWave(document.getElementById(`wave-${deck}`), {
-      peaks: deckState.wave,
-      position,
-      rate: deckState.rate,
-      bpm: deckState.bpm,
-      beatOffset: deckState.beatOffset,
-      color: WAVE_COLOR[deck],
-    });
-    paintOverviewWave(document.getElementById(`wave-overview-${deck}`), {
-      peaks: deckState.wave,
-      position,
-      duration: Number.isFinite(duration) && duration > 0 ? duration : deckState.wave?.duration,
-      color: WAVE_COLOR[deck],
-    });
+    detail[deck] = document.getElementById(`wave-${deck}`);
+    overview[deck] = document.getElementById(`wave-overview-${deck}`);
+    position[deck] = Number(audios[deck].currentTime) || 0;
   }
+  paintDeckWaves({ detail, overview }, { decks: state.decks, position, color: WAVE_COLOR });
 }
 
 let waveFrame = 0;

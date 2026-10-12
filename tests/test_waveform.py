@@ -30,7 +30,7 @@ def test_waveforms_are_stacked_above_the_decks():
     assert html.index('class="wave-stack"') < html.index('class="deck-row"')
     assert 'class="wave-playhead"' in html
     assert "./waveform.js" in app_js
-    assert "paintDetailWave" in app_js
+    assert "paintDeckWaves" in app_js
     assert "peaksFromChannels" in actions
     assert "export const WAVE_HALF_SECONDS = 4" in wave_js.text
     assert "requestAnimationFrame" in app_js
@@ -42,8 +42,17 @@ def test_waveforms_are_stacked_above_the_decks():
     mixer = css.split(".mixer {", 1)[1].split("}", 1)[0]
     assert "auto minmax(0, 1fr) auto" in mixer
 
+    short = css.split("@media (max-height: 900px)", 1)[1].split("@media", 1)[0]
+    assert "grid-template-rows: 40px 40px" in short
+    assert ".wave-overview { display: none; }" in short
+    assert "minmax(340px, 1fr)" in short
     assert "上下の縦線が揃うと拍が合っている" in readme
     assert "波形を準備中" in readme
+    assert "再生位置" in readme
+    assert "今聞こえている位置" not in readme
+    assert "長いので波形なし" in readme
     assert "WAVE_HALF_SECONDS" in agent
     assert "10ms" in agent
+    assert "長いので波形なし" in agent
+    assert "minmax(340px, 1fr)" in agent
     assert "YOUTUBE_API_KEY" not in wave_js.text

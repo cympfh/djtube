@@ -945,6 +945,16 @@ kbd {
   .deck.is-busy .pos-bar { animation: none; }
 }
 
+@media (max-height: 900px) {
+  .app { height: auto; min-height: 100dvh; }
+  .mixer { grid-template-rows: auto minmax(340px, 1fr) auto; gap: 6px; }
+  .wave-stack { gap: 0; }
+  .wave-detail { grid-template-rows: 40px 40px; }
+  .wave-overview { display: none; }
+  .fader-panel { padding: 4px 12px; gap: 0; }
+  .fader-panel input[type="range"] { height: 22px; }
+}
+
 @media (max-width: 980px) {
   .app { height: auto; min-height: 100dvh; grid-template-rows: auto auto auto; }
   .legend-wrap { overflow: visible; }
