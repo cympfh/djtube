@@ -48,6 +48,23 @@ export function importResultMessage(result) {
   return parts.join("、");
 }
 
+export const IMPORT_DIALOG_POINTER_SHIELD_MS = 400;
+
+export function createPointerShield(ms = IMPORT_DIALOG_POINTER_SHIELD_MS, now = () => performance.now()) {
+  let until = 0;
+  return {
+    arm() {
+      until = now() + ms;
+    },
+    swallow(event) {
+      if (now() >= until) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
+    },
+  };
+}
+
 export function playlistImportLaunch(url, { importing = false, busy = false, open = false } = {}) {
   if (importing) return "abort";
   if (busy || open) return "ignore";

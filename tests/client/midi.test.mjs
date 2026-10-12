@@ -79,6 +79,39 @@ function harness() {
   return { midi, presses, statuses, control, ledPort };
 }
 
+test("deck MIDI does nothing while a dialog blocks it", async () => {
+  const midi = fakeMidi();
+  const calls = [];
+  let blocked = true;
+  const control = createMidiControl(
+    {
+      togglePlay: (deck) => calls.push(["play", deck]),
+      cue: (deck) => calls.push(["cue", deck]),
+      setRateFromController: (deck, value) => calls.push(["rate", deck, value]),
+      setEqFromController: (deck, band, value) => calls.push(["eq", deck, band, value]),
+    },
+    () => {},
+    {
+      navigator: midi.navigator,
+      ledPort: createFlx4LedPort(),
+      blocked: () => blocked,
+    },
+  );
+  await control.connect();
+  midi.emit(PLAY_A);
+  midi.emit(new Uint8Array([0x90, 0x0c, 0x7f]));
+  midi.emit(new Uint8Array([0xb0, 0x00, 96]));
+  midi.emit(new Uint8Array([0xb0, 0x07, 100]));
+  assert.deepEqual(calls, []);
+  blocked = false;
+  midi.emit(new Uint8Array([0x90, 0x0c, 0x7f]));
+  midi.emit(new Uint8Array([0xb0, 0x00, 96]));
+  assert.deepEqual(calls, [
+    ["cue", "A"],
+    ["rate", "A", 96],
+  ]);
+});
+
 test("one MIDI press runs the action once after one connect", async () => {
   const { midi, presses, control } = harness();
   await control.toggle();

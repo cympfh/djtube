@@ -4,7 +4,13 @@ import test from "node:test";
 
 import { createActions, freshState } from "../../djtube/static/actions.js";
 import { handleKeydown } from "../../djtube/static/keys.js";
-import { importResultMessage, playlistImportCommit, playlistImportLaunch } from "../../djtube/static/playlists.js";
+import {
+  IMPORT_DIALOG_POINTER_SHIELD_MS,
+  createPointerShield,
+  importResultMessage,
+  playlistImportCommit,
+  playlistImportLaunch,
+} from "../../djtube/static/playlists.js";
 
 const PLAYLIST_ID = "a".repeat(32);
 
@@ -340,6 +346,56 @@ test("an empty url does not ask for the import dialog", () => {
   assert.equal(playlistImportLaunch("PLaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", { open: true }), "ignore");
 });
 
+function pointerEvent(type) {
+  return {
+    type,
+    defaultPrevented: false,
+    stopped: false,
+    preventDefault() {
+      this.defaultPrevented = true;
+    },
+    stopPropagation() {
+      this.stopped = true;
+    },
+  };
+}
+
+test("the second click after the import dialog closes does not reach the deck", () => {
+  assert.equal(IMPORT_DIALOG_POINTER_SHIELD_MS, 400);
+  let now = 10_000;
+  const shield = createPointerShield(IMPORT_DIALOG_POINTER_SHIELD_MS, () => now);
+  const deck = { cue: 0, rate: 100, eqHigh: 500 };
+  function deliver(type) {
+    const event = pointerEvent(type);
+    if (!shield.swallow(event)) {
+      deck.cue += type === "click" || type === "dblclick" ? 1 : 0;
+      if (type === "pointerdown" || type === "mousedown" || type === "click") {
+        deck.rate = 130;
+        deck.eqHigh = 800;
+      }
+    }
+    return event;
+  }
+
+  const closing = pointerEvent("click");
+  assert.equal(shield.swallow(closing), false);
+  shield.arm();
+  for (const type of ["pointerdown", "mousedown", "click", "dblclick"]) {
+    const event = deliver(type);
+    assert.equal(event.defaultPrevented, true, type);
+    assert.equal(event.stopped, true, type);
+  }
+  assert.deepEqual(deck, { cue: 0, rate: 100, eqHigh: 500 });
+
+  now += 399;
+  assert.equal(deliver("click").stopped, true);
+  assert.equal(deck.rate, 100);
+  now += 1;
+  assert.equal(deliver("click").stopped, false);
+  assert.equal(deck.cue, 1);
+  assert.equal(deck.rate, 130);
+});
+
 test("the import dialog commits only after a destination is ready", () => {
   assert.equal(playlistImportCommit({ open: true, destination: "new", name: "  " }), "need-name");
   assert.equal(playlistImportCommit({ open: true, destination: "new", name: " 朝のセット " }), "import");
@@ -391,7 +447,23 @@ test("the playlist panel keeps the url field and opens a destination dialog", ()
   const submitFn = app.slice(submitAt, app.indexOf('document.getElementById("playlist-import")', submitAt));
   assert.match(submitFn, /commit === "need-name"/);
   assert.match(submitFn, /名前を入れてください/);
+  assert.ok(submitFn.indexOf("importPointerShield.arm()") < submitFn.indexOf("playlistImportDialog.close()"));
   assert.ok(submitFn.indexOf("playlistImportDialog.close()") < submitFn.indexOf("actions.importPlaylist()"));
+  const dismissAt = app.indexOf('document.getElementById("playlist-import-cancel")');
+  const dismissFn = app.slice(dismissAt, app.indexOf('playlistImportDialog.addEventListener("close"', dismissAt));
+  assert.equal(dismissFn.match(/importPointerShield\.arm\(\);\n\s*playlistImportDialog\.close\(\)/g).length, 2);
+  const closeAt = app.indexOf('playlistImportDialog.addEventListener("close"');
+  const closeFn = app.slice(closeAt, app.indexOf("playlistImportDest.addEventListener", closeAt));
+  assert.match(closeFn, /importPointerShield\.arm\(\)/);
+  assert.ok(closeFn.indexOf("importPointerShield.arm()") < closeFn.indexOf("scheduleRender()"));
+  assert.match(closeFn, /pointerdown/);
+  assert.match(closeFn, /mousedown/);
+  assert.match(closeFn, /"click"/);
+  assert.match(closeFn, /dblclick/);
+  assert.match(closeFn, /importPointerShield\.swallow\(event\)/);
+  assert.match(closeFn, /true\)/);
+  const midi = app.slice(app.indexOf("const midiControl = createMidiControl"));
+  assert.match(midi, /blocked:\s*\(\)\s*=>\s*playlistEditDialog\.open \|\| playlistImportDialog\.open/);
   assert.match(css, /#playlist-import-url/);
   assert.match(css, /#playlist-import-dialog/);
   assert.match(css, /#search-button, #playlist-import, #playlist-import-run/);

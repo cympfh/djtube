@@ -11,7 +11,7 @@ import { deckGains } from "./gains.js";
 import { eqGainDb, formatEqDb } from "./eq.js";
 import { formatFilter } from "./filter.js";
 import { formatTime } from "./format.js";
-import { playlistImportCommit, playlistImportLaunch, playlistMetaText } from "./playlists.js";
+import { createPointerShield, playlistImportCommit, playlistImportLaunch, playlistMetaText } from "./playlists.js";
 import { bpmText, tempoValueText } from "./bpm.js";
 import { formatRate } from "./rate.js";
 import { handleKeydown, isSearchTarget, isTypingTarget, legendGroups } from "./keys.js";
@@ -877,6 +877,7 @@ document.getElementById("tab-playlist").addEventListener("click", () => showLibr
 document.getElementById("playlist-create").addEventListener("click", () => actions.createPlaylist());
 const playlistEditDialog = document.getElementById("playlist-edit-dialog");
 const playlistImportDialog = document.getElementById("playlist-import-dialog");
+const importPointerShield = createPointerShield();
 const playlistRenameName = document.getElementById("playlist-rename-name");
 
 function openPlaylistEdit() {
@@ -965,21 +966,33 @@ function submitPlaylistImport() {
   }
   if (commit !== "import") return;
   importDialogError = "";
+  importPointerShield.arm();
   playlistImportDialog.close();
   actions.importPlaylist();
 }
 
 document.getElementById("playlist-import").addEventListener("click", () => openPlaylistImportDialog());
 document.getElementById("playlist-import-run").addEventListener("click", () => submitPlaylistImport());
-document.getElementById("playlist-import-cancel").addEventListener("click", () => playlistImportDialog.close());
+document.getElementById("playlist-import-cancel").addEventListener("click", () => {
+  importPointerShield.arm();
+  playlistImportDialog.close();
+});
 playlistImportDialog.addEventListener("click", (event) => {
-  if (event.target === playlistImportDialog) playlistImportDialog.close();
+  if (event.target !== playlistImportDialog) return;
+  importPointerShield.arm();
+  playlistImportDialog.close();
 });
 playlistImportDialog.addEventListener("close", () => {
+  importPointerShield.arm();
   importDialogError = "";
   document.getElementById("playlist-import").setAttribute("aria-expanded", "false");
   scheduleRender();
 });
+for (const type of ["pointerdown", "mousedown", "click", "dblclick"]) {
+  window.addEventListener(type, (event) => {
+    importPointerShield.swallow(event);
+  }, true);
+}
 playlistImportDest.addEventListener("change", () => {
   playlistImportDest.dataset.touched = "1";
   importDialogError = "";
@@ -1122,9 +1135,13 @@ const liveControl = bindLive({
   prefix,
 });
 
-const midiControl = createMidiControl(actions, (status) => {
-  applyMidiStatus(midiButton, midiLive, status);
-});
+const midiControl = createMidiControl(
+  actions,
+  (status) => {
+    applyMidiStatus(midiButton, midiLive, status);
+  },
+  { blocked: () => playlistEditDialog.open || playlistImportDialog.open },
+);
 midiButton.addEventListener("click", () => {
   midiControl.toggle();
 });

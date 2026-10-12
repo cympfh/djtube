@@ -260,6 +260,8 @@ def test_readme_and_docker_contract():
     assert "/api/playlists/import" in agent
     assert "playlist-import-dialog" in agent
     assert "playlistImportLaunch" in agent
+    assert "createPointerShield" in agent
+    assert "dispatchControllerEvent" in agent
     assert "playlistImportCommit" in agent
     assert "fetch_youtube_playlist" in agent
     assert "playlistItems" in agent

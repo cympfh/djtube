@@ -408,6 +408,7 @@ export function createMidiControl(actions, onStatus, options = {}) {
       names.push(input.name || "MIDI");
       const handler = (event) => {
         if (session !== mine) return;
+        if (typeof options.blocked === "function" && options.blocked()) return;
         const msg = messageFromMidi(event.data);
         if (!msg) return;
         if (!dispatchControllerEvent(msg, actions)) ignored += 1;
