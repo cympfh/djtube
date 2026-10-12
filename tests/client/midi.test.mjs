@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { controllerStatusText, createFlx4LedPort, createMidiControl, paintFlx4Leds } from "../../djtube/static/controller.js";
+import { createActions, freshState } from "../../djtube/static/actions.js";
 
 const PLAY_A = new Uint8Array([0x90, 0x0b, 0x7f]);
 
@@ -110,6 +111,71 @@ test("deck MIDI does nothing while a dialog blocks it", async () => {
     ["cue", "A"],
     ["rate", "A", 96],
   ]);
+});
+
+test("releasing the jog top while a dialog is open resumes the deck", async () => {
+  const midi = fakeMidi();
+  const state = freshState();
+  const audios = {
+    A: {
+      paused: false,
+      play() {
+        this.paused = false;
+        return Promise.resolve();
+      },
+      pause() {
+        this.paused = true;
+      },
+    },
+    B: {
+      paused: true,
+      play() {
+        this.paused = false;
+        return Promise.resolve();
+      },
+      pause() {
+        this.paused = true;
+      },
+    },
+  };
+  const actions = createActions({
+    state,
+    audios,
+    prefix: "/djtube",
+    scheduleRender() {},
+    queryValue: () => "",
+    isSearchFocused: () => false,
+    focusSearchElement() {},
+    blurSearchElement() {},
+    async fetchSearch() {
+      return { tracks: [] };
+    },
+    async prepareTrack() {},
+  });
+  state.decks.A.id = "abcdefghijk";
+  state.decks.A.status = "ready";
+  state.decks.A.playing = true;
+  let blocked = false;
+  const control = createMidiControl(actions, () => {}, {
+    navigator: midi.navigator,
+    ledPort: createFlx4LedPort(),
+    blocked: () => blocked,
+  });
+  await control.connect();
+  midi.emit(new Uint8Array([0x90, 0x36, 0x7f]));
+  assert.equal(state.decks.A.discHeld, true);
+  assert.equal(state.decks.A.playing, false);
+  assert.equal(audios.A.paused, true);
+  blocked = true;
+  midi.emit(new Uint8Array([0x90, 0x36, 0x00]));
+  assert.equal(state.decks.A.discHeld, false);
+  assert.equal(audios.A.paused, false);
+  assert.equal(state.decks.A.playing, true);
+  midi.emit(new Uint8Array([0x90, 0x36, 0x7f]));
+  midi.emit(new Uint8Array([0x90, 0x0b, 0x7f]));
+  midi.emit(new Uint8Array([0xb0, 0x00, 96]));
+  assert.equal(state.decks.A.discHeld, false);
+  assert.equal(state.decks.A.playing, true);
 });
 
 test("one MIDI press runs the action once after one connect", async () => {

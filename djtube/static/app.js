@@ -11,7 +11,13 @@ import { deckGains } from "./gains.js";
 import { eqGainDb, formatEqDb } from "./eq.js";
 import { formatFilter } from "./filter.js";
 import { formatTime } from "./format.js";
-import { createPointerShield, playlistImportCommit, playlistImportLaunch, playlistMetaText } from "./playlists.js";
+import {
+  IMPORT_DIALOG_POINTER_SHIELD_MS,
+  createPointerShield,
+  playlistImportCommit,
+  playlistImportLaunch,
+  playlistMetaText,
+} from "./playlists.js";
 import { bpmText, tempoValueText } from "./bpm.js";
 import { formatRate } from "./rate.js";
 import { handleKeydown, isSearchTarget, isTypingTarget, legendGroups } from "./keys.js";
@@ -878,6 +884,18 @@ document.getElementById("playlist-create").addEventListener("click", () => actio
 const playlistEditDialog = document.getElementById("playlist-edit-dialog");
 const playlistImportDialog = document.getElementById("playlist-import-dialog");
 const importPointerShield = createPointerShield();
+const importShield = document.getElementById("playlist-import-shield");
+let importShieldTimer = 0;
+
+function armImportPointerShield() {
+  importPointerShield.arm();
+  importShield.hidden = false;
+  window.clearTimeout(importShieldTimer);
+  importShieldTimer = window.setTimeout(() => {
+    importShield.hidden = true;
+  }, IMPORT_DIALOG_POINTER_SHIELD_MS);
+}
+
 const playlistRenameName = document.getElementById("playlist-rename-name");
 
 function openPlaylistEdit() {
@@ -966,7 +984,7 @@ function submitPlaylistImport() {
   }
   if (commit !== "import") return;
   importDialogError = "";
-  importPointerShield.arm();
+  armImportPointerShield();
   playlistImportDialog.close();
   actions.importPlaylist();
 }
@@ -974,24 +992,29 @@ function submitPlaylistImport() {
 document.getElementById("playlist-import").addEventListener("click", () => openPlaylistImportDialog());
 document.getElementById("playlist-import-run").addEventListener("click", () => submitPlaylistImport());
 document.getElementById("playlist-import-cancel").addEventListener("click", () => {
-  importPointerShield.arm();
+  armImportPointerShield();
   playlistImportDialog.close();
 });
 playlistImportDialog.addEventListener("click", (event) => {
   if (event.target !== playlistImportDialog) return;
-  importPointerShield.arm();
+  armImportPointerShield();
   playlistImportDialog.close();
 });
 playlistImportDialog.addEventListener("close", () => {
-  importPointerShield.arm();
+  armImportPointerShield();
   importDialogError = "";
   document.getElementById("playlist-import").setAttribute("aria-expanded", "false");
   scheduleRender();
 });
-for (const type of ["pointerdown", "mousedown", "click", "dblclick"]) {
+for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click", "dblclick"]) {
   window.addEventListener(type, (event) => {
     importPointerShield.swallow(event);
   }, true);
+}
+for (const type of ["touchstart", "touchmove"]) {
+  window.addEventListener(type, (event) => {
+    importPointerShield.swallow(event);
+  }, { capture: true, passive: false });
 }
 playlistImportDest.addEventListener("change", () => {
   playlistImportDest.dataset.touched = "1";

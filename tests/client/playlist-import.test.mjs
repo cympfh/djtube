@@ -396,6 +396,65 @@ test("the second click after the import dialog closes does not reach the deck", 
   assert.equal(deck.rate, 130);
 });
 
+test("a touch after the import dialog closes does not move a slider", () => {
+  let now = 5_000;
+  const shield = createPointerShield(IMPORT_DIALOG_POINTER_SHIELD_MS, () => now);
+  const deck = { rate: 100, eqHigh: 500 };
+  function deliver(type) {
+    const event = pointerEvent(type);
+    if (!shield.swallow(event)) {
+      if (type === "touchstart") deck.rate = 89;
+      if (type === "touchmove") {
+        deck.rate = 56;
+        deck.eqHigh = 230;
+      }
+      if (type === "pointerup" || type === "mouseup") deck.rate = 111;
+    }
+    return event;
+  }
+
+  shield.arm();
+  now += 60;
+  for (const type of ["touchstart", "touchmove", "pointerup", "mouseup"]) {
+    const event = deliver(type);
+    assert.equal(event.defaultPrevented, true, type);
+    assert.equal(event.stopped, true, type);
+  }
+  assert.deepEqual(deck, { rate: 100, eqHigh: 500 });
+
+  now += 20;
+  assert.equal(deliver("touchstart").stopped, true);
+  assert.equal(deliver("touchmove").stopped, true);
+  assert.equal(deck.rate, 100);
+  assert.equal(deck.eqHigh, 500);
+
+  now = 5_000 + IMPORT_DIALOG_POINTER_SHIELD_MS;
+  assert.equal(deliver("touchstart").stopped, false);
+  assert.equal(deck.rate, 89);
+});
+
+test("submitting the import dialog arms the shield before it closes", () => {
+  const app = readFileSync(new URL("../../djtube/static/app.js", import.meta.url), "utf8");
+  const html = readFileSync(new URL("../../djtube/templates/index.html", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../../djtube/static/app.css", import.meta.url), "utf8");
+  const submitAt = app.indexOf("function submitPlaylistImport");
+  const submitFn = app.slice(submitAt, app.indexOf('document.getElementById("playlist-import")', submitAt));
+  const armAt = submitFn.indexOf("armImportPointerShield()");
+  const closeAt = submitFn.indexOf("playlistImportDialog.close()");
+  assert.ok(armAt >= 0);
+  assert.ok(closeAt > armAt);
+  const helperAt = app.indexOf("function armImportPointerShield");
+  const helper = app.slice(helperAt, app.indexOf("function openPlaylistEdit", helperAt));
+  assert.match(helper, /importPointerShield\.arm\(\)/);
+  assert.match(helper, /importShield\.hidden = false/);
+  assert.match(helper, /importShield\.hidden = true/);
+  assert.match(helper, /IMPORT_DIALOG_POINTER_SHIELD_MS/);
+  assert.match(html, /id="playlist-import-shield"/);
+  const shieldCss = css.slice(css.indexOf("#playlist-import-shield"));
+  assert.match(shieldCss, /position:\s*fixed/);
+  assert.match(shieldCss, /inset:\s*0/);
+});
+
 test("the import dialog commits only after a destination is ready", () => {
   assert.equal(playlistImportCommit({ open: true, destination: "new", name: "  " }), "need-name");
   assert.equal(playlistImportCommit({ open: true, destination: "new", name: " 朝のセット " }), "import");
@@ -447,19 +506,25 @@ test("the playlist panel keeps the url field and opens a destination dialog", ()
   const submitFn = app.slice(submitAt, app.indexOf('document.getElementById("playlist-import")', submitAt));
   assert.match(submitFn, /commit === "need-name"/);
   assert.match(submitFn, /名前を入れてください/);
-  assert.ok(submitFn.indexOf("importPointerShield.arm()") < submitFn.indexOf("playlistImportDialog.close()"));
+  assert.ok(submitFn.indexOf("armImportPointerShield()") >= 0);
+  assert.ok(submitFn.indexOf("armImportPointerShield()") < submitFn.indexOf("playlistImportDialog.close()"));
   assert.ok(submitFn.indexOf("playlistImportDialog.close()") < submitFn.indexOf("actions.importPlaylist()"));
   const dismissAt = app.indexOf('document.getElementById("playlist-import-cancel")');
   const dismissFn = app.slice(dismissAt, app.indexOf('playlistImportDialog.addEventListener("close"', dismissAt));
-  assert.equal(dismissFn.match(/importPointerShield\.arm\(\);\n\s*playlistImportDialog\.close\(\)/g).length, 2);
+  assert.equal(dismissFn.match(/armImportPointerShield\(\);\n\s*playlistImportDialog\.close\(\)/g).length, 2);
   const closeAt = app.indexOf('playlistImportDialog.addEventListener("close"');
   const closeFn = app.slice(closeAt, app.indexOf("playlistImportDest.addEventListener", closeAt));
-  assert.match(closeFn, /importPointerShield\.arm\(\)/);
-  assert.ok(closeFn.indexOf("importPointerShield.arm()") < closeFn.indexOf("scheduleRender()"));
+  assert.match(closeFn, /armImportPointerShield\(\)/);
+  assert.ok(closeFn.indexOf("armImportPointerShield()") < closeFn.indexOf("scheduleRender()"));
   assert.match(closeFn, /pointerdown/);
   assert.match(closeFn, /mousedown/);
+  assert.match(closeFn, /pointerup/);
+  assert.match(closeFn, /mouseup/);
   assert.match(closeFn, /"click"/);
   assert.match(closeFn, /dblclick/);
+  assert.match(closeFn, /touchstart/);
+  assert.match(closeFn, /touchmove/);
+  assert.match(closeFn, /passive:\s*false/);
   assert.match(closeFn, /importPointerShield\.swallow\(event\)/);
   assert.match(closeFn, /true\)/);
   const midi = app.slice(app.indexOf("const midiControl = createMidiControl"));

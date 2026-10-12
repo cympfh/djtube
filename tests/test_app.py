@@ -261,6 +261,9 @@ def test_readme_and_docker_contract():
     assert "playlist-import-dialog" in agent
     assert "playlistImportLaunch" in agent
     assert "createPointerShield" in agent
+    assert "playlist-import-shield" in agent
+    assert "touchstart" in agent
+    assert "discHeld" in agent
     assert "dispatchControllerEvent" in agent
     assert "playlistImportCommit" in agent
     assert "fetch_youtube_playlist" in agent

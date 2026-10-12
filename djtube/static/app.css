@@ -351,6 +351,14 @@ button:hover { border-color: #5c564b; }
   background: rgba(16, 15, 12, 0.72);
 }
 
+#playlist-import-shield {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: transparent;
+  touch-action: none;
+}
+
 .playlist-edit-body {
   display: flex;
   flex-direction: column;
