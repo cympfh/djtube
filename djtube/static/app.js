@@ -21,6 +21,7 @@ import { createDeckPlayer, startDeckAudio } from "./player.js";
 import { bindCookies, cookiePanelOpen } from "./cookies.js";
 import { discRotationDegrees, discSpinning, discVisible } from "./disc.js";
 import { publicPrefix } from "./prefix.js";
+import { paintDetailWave, paintOverviewWave } from "./waveform.js";
 
 const prefix = publicPrefix();
 const state = freshState();
@@ -841,6 +842,59 @@ function showLibrary(name) {
   if (!search && document.activeElement === searchInput) searchInput.blur();
 }
 
+const WAVE_COLOR = { A: "#ffb000", B: "#ff4d2e" };
+
+function syncWaveNotes() {
+  for (const deck of ["A", "B"]) {
+    const note = document.getElementById(`wave-note-${deck}`);
+    if (!note) return;
+    note.hidden = !state.decks[deck].wavePreparing;
+  }
+}
+
+function paintWaves() {
+  for (const deck of ["A", "B"]) {
+    const deckState = state.decks[deck];
+    const position = Number(audios[deck].currentTime) || 0;
+    const duration = Number(audios[deck].duration);
+    paintDetailWave(document.getElementById(`wave-${deck}`), {
+      peaks: deckState.wave,
+      position,
+      rate: deckState.rate,
+      bpm: deckState.bpm,
+      beatOffset: deckState.beatOffset,
+      color: WAVE_COLOR[deck],
+    });
+    paintOverviewWave(document.getElementById(`wave-overview-${deck}`), {
+      peaks: deckState.wave,
+      position,
+      duration: Number.isFinite(duration) && duration > 0 ? duration : deckState.wave?.duration,
+      color: WAVE_COLOR[deck],
+    });
+  }
+}
+
+let waveFrame = 0;
+
+function wavesMoving() {
+  return ["A", "B"].some((deck) => state.decks[deck].playing || state.decks[deck].wavePreparing);
+}
+
+function tickWaves() {
+  waveFrame = 0;
+  paintWaves();
+  if (wavesMoving()) waveFrame = requestAnimationFrame(tickWaves);
+}
+
+function pokeWaves() {
+  syncWaveNotes();
+  if (typeof requestAnimationFrame !== "function") {
+    paintWaves();
+    return;
+  }
+  if (!waveFrame) waveFrame = requestAnimationFrame(tickWaves);
+}
+
 function render() {
   renderSearchStatus();
   renderAddNote();
@@ -849,6 +903,7 @@ function render() {
   renderDeck("A");
   renderDeck("B");
   renderFader();
+  pokeWaves();
   cookiesUi.setOpen(cookiePanelOpen(state.decks));
   liveControl.refresh();
   document.getElementById("search-button").disabled = state.searching;
@@ -1139,6 +1194,7 @@ startDeckAudio(audios, {
 setInterval(() => {
   if (state.decks.A.playing) updateTime("A");
   if (state.decks.B.playing) updateTime("B");
+  if (state.decks.A.playing || state.decks.B.playing) pokeWaves();
 }, 250);
 render();
 paintControllerLeds();

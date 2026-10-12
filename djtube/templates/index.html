@@ -133,6 +133,25 @@
         </div>
 
         <section class="mixer" aria-label="ミキサー">
+          <section class="wave-stack" aria-label="波形">
+            <div class="wave-detail">
+              <div class="wave-lane" data-deck="A">
+                <canvas id="wave-A"></canvas>
+                <span class="wave-tag">A</span>
+                <p class="wave-note" id="wave-note-A" role="status" hidden>波形を準備中</p>
+              </div>
+              <div class="wave-lane" data-deck="B">
+                <canvas id="wave-B"></canvas>
+                <span class="wave-tag">B</span>
+                <p class="wave-note" id="wave-note-B" role="status" hidden>波形を準備中</p>
+              </div>
+              <div class="wave-playhead" aria-hidden="true"></div>
+            </div>
+            <div class="wave-overview">
+              <canvas id="wave-overview-A" aria-hidden="true"></canvas>
+              <canvas id="wave-overview-B" aria-hidden="true"></canvas>
+            </div>
+          </section>
           <div class="deck-row">
             <article class="deck deck-a" id="deck-A" data-deck="A">
               <header class="deck-head">

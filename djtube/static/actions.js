@@ -14,6 +14,7 @@ import { publicPrefix } from "./prefix.js";
 import { clampRate, rateFromMidi } from "./rate.js";
 import { commandedSeekLanded } from "./seekland.js";
 import { beatSyncPlan, placeSyncTime } from "./sync.js";
+import { peaksFromChannels, usablePeaks } from "./waveform.js";
 
 export function freshDeck() {
   return {
@@ -32,6 +33,8 @@ export function freshDeck() {
     bpm: null,
     beatOffset: null,
     bpmMeasuring: false,
+    wave: null,
+    wavePreparing: false,
     syncing: false,
     volume: 1,
     eq: { high: 0.5, mid: 0.5, low: 0.5 },
@@ -336,6 +339,8 @@ export function createActions(deps) {
     deckState.bpm = null;
     deckState.beatOffset = null;
     deckState.bpmMeasuring = false;
+    deckState.wave = null;
+    deckState.wavePreparing = false;
   }
 
   function applyBpmResult(deck, token, gen, result) {
@@ -344,6 +349,8 @@ export function createActions(deps) {
     if (!watch || !deckState || watch.token !== token || deckState.gen !== gen) return;
     watch.controller = null;
     deckState.bpmMeasuring = false;
+    deckState.wavePreparing = false;
+    deckState.wave = usablePeaks(result?.peaks);
     const bpm = Number(result?.bpm);
     const beatOffset = Number(result?.beatOffset);
     if (Number.isFinite(bpm) && bpm > 0 && Number.isFinite(beatOffset) && beatOffset >= 0) {
@@ -422,10 +429,24 @@ export function createActions(deps) {
     return response.arrayBuffer();
   }
 
+  function bufferChannels(buffer) {
+    const count = Number(buffer?.numberOfChannels) || 0;
+    if (!count || typeof buffer.getChannelData !== "function") return null;
+    const channels = [];
+    for (let index = 0; index < count; index += 1) channels.push(buffer.getChannelData(index));
+    const sampleRate = Number(buffer.sampleRate);
+    if (!(sampleRate > 0) || !channels[0]?.length) return null;
+    return { channels, sampleRate };
+  }
+
   async function decodeAudioBytes(bytes, signal) {
     if (typeof deps.decodeAudio === "function") {
       const decoded = await deps.decodeAudio(bytes);
       if (signal?.aborted || !decoded) return null;
+      if (!decoded.peaks && decoded.channels) {
+        decoded.peaks = await peaksFromChannels(decoded.channels, decoded.sampleRate, { signal });
+        if (signal?.aborted) return null;
+      }
       return decoded;
     }
     let context = null;
@@ -435,7 +456,13 @@ export function createActions(deps) {
       if (!context || typeof context.decodeAudioData !== "function") return null;
       const decoded = await context.decodeAudioData(copyAudioBytes(bytes));
       if (signal?.aborted) return null;
-      return pcmFromDecoded(decoded);
+      const full = bufferChannels(decoded);
+      if (!full) return pcmFromDecoded(decoded);
+      const peaks = await peaksFromChannels(full.channels, full.sampleRate, { signal });
+      if (signal?.aborted) return null;
+      const windowed = analysisWindow(full.channels, full.sampleRate);
+      if (!windowed) return peaks ? { samples: new Float32Array(0), sampleRate: full.sampleRate, peaks } : null;
+      return { ...windowed, peaks };
     } finally {
       if (context && typeof context.close === "function") {
         try {
@@ -452,12 +479,15 @@ export function createActions(deps) {
     if (signal?.aborted || !bytes) return null;
     const decoded = await decodeAudioBytes(bytes, signal);
     if (!decoded || signal?.aborted) return null;
-    const result = analyzeBpm(decoded.samples, decoded.sampleRate);
+    const result = decoded.samples?.length ? analyzeBpm(decoded.samples, decoded.sampleRate) : null;
     const origin = Number(decoded.origin);
     if (result && Number.isFinite(origin) && origin > 0) {
       result.beatOffset = Math.round((result.beatOffset + origin) * 1e5) / 1e5;
     }
-    return result;
+    if (!result && !decoded.peaks) return null;
+    const payload = result ? { ...result } : {};
+    if (decoded.peaks) payload.peaks = decoded.peaks;
+    return payload;
   }
 
   function beginBpm(deck) {
@@ -476,6 +506,8 @@ export function createActions(deps) {
       deckState.bpm = null;
       deckState.beatOffset = null;
       deckState.bpmMeasuring = false;
+      deckState.wave = null;
+      deckState.wavePreparing = false;
       forgetSync(deck);
       scheduleRender();
       return Promise.resolve();
@@ -483,6 +515,8 @@ export function createActions(deps) {
     deckState.bpm = null;
     deckState.beatOffset = null;
     deckState.bpmMeasuring = true;
+    deckState.wave = null;
+    deckState.wavePreparing = true;
     forgetSync(deck);
     scheduleRender();
     return Promise.resolve()
@@ -538,6 +572,8 @@ export function createActions(deps) {
     const loaded = audio.loadVideo(track.id);
     if (deckState.gen !== gen) return;
     deckState.status = loaded === false ? "preparing" : "ready";
+    deckState.wave = null;
+    deckState.wavePreparing = true;
     audio.playbackRate = deckState.rate;
     let eqLive = true;
     for (const band of EQ_BANDS) {

@@ -579,8 +579,85 @@ button:disabled { opacity: 0.45; cursor: default; }
 .mixer {
   min-height: 0;
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 10px;
+}
+
+.wave-stack {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.wave-detail {
+  position: relative;
+  display: grid;
+  grid-template-rows: 72px 72px;
+  gap: 1px;
+  background: #2a261f;
+  border: 1px solid var(--line);
+}
+
+.wave-lane {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  background: #0d0c0a;
+}
+
+.wave-lane canvas,
+.wave-overview canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.wave-tag {
+  position: absolute;
+  top: 4px;
+  left: 8px;
+  z-index: 1;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  pointer-events: none;
+}
+
+.wave-lane[data-deck="A"] .wave-tag { color: var(--a); }
+.wave-lane[data-deck="B"] .wave-tag { color: var(--b); }
+
+.wave-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  margin-left: -0.5px;
+  background: #f3efe6;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.wave-note {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  margin: 0;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.wave-note[hidden] { display: none; }
+
+.wave-overview {
+  display: grid;
+  grid-template-rows: 20px 20px;
+  gap: 1px;
+  background: #2a261f;
+  border: 1px solid var(--line);
 }
 
 .deck-row {
