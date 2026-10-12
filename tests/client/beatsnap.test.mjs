@@ -76,11 +76,12 @@ test("beat snap follows beatOffset and rate, and lines up unequal tempos", () =>
   assert.ok(Math.abs(ratedPlan.deltaWall + 0.04) < 1e-9);
   assert.equal(ratedPlan.rate, undefined);
 
-  // 120 against 128. The kicks are 40 ms apart in wall time, not a phase fraction.
-  const slow = deck(120, 0, 8.04, 1);
-  const fast = deck(128, 0, 8, 1);
+  // 120 against 128, both measured from a beat at time 0. The kicks are 40 ms apart.
+  const slow = deck(120, 0, 0.04, 1);
+  const fast = deck(128, 0, 0, 1);
   const mixed = beatSnapPlan(slow, fast);
-  assert.ok(Math.abs(mixed.time - 8) < 1e-9);
+  assert.ok(Math.abs(mixed.time) < 1e-9);
+  assert.ok(Math.abs(mixed.deltaWall + 0.04) < 1e-6);
   assert.ok(nearestBeatGap(mixed.time, slow, fast) < 1e-6);
 
   // Double-time grid. 220 ms past the slow beat is only 30 ms from the fast beat

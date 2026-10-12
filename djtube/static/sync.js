@@ -221,22 +221,30 @@ function beatInstants(wall, heard) {
   return instants;
 }
 
+/** Beat instant nearest to now. Negative is in the past. Exact half keeps the previous beat. */
+function nearestBeatToNow(wall, heard) {
+  if (!(heard > 0) || !Number.isFinite(wall)) return null;
+  const previous = -wall;
+  const next = heard - wall;
+  if (Math.abs(next) < Math.abs(previous) - 1e-12) return next;
+  return previous;
+}
+
 /**
- * Wall-clock seconds to seek `own` so one of its beats lands on a beat of
- * `other`. Positive seeks forward. The smallest absolute shift wins.
- * Equal-tempo, half, and double grids all use the same nearest pair: phase
- * fraction is not scaled, because this nudge does not change rate.
+ * Wall-clock seconds to seek `own` so the beat of `own` nearest to now lands
+ * on the nearest beat of `other`. Positive seeks forward.
+ * A closer pair that sits far from the playhead is not the drop: 120 against
+ * 128 can put two future beats 9 ms apart while the kicks at now are 40 ms
+ * apart. Half and double tempos still meet on the nearer grid point.
  */
 function nearestBeatShift(ownWall, ownHeard, otherWall, otherHeard) {
-  const ownInstants = beatInstants(ownWall, ownHeard);
-  const otherInstants = beatInstants(otherWall, otherHeard);
+  const ownAt = nearestBeatToNow(ownWall, ownHeard);
+  if (ownAt == null) return null;
   let best = null;
-  for (const ownAt of ownInstants) {
-    for (const otherAt of otherInstants) {
-      const delta = ownAt - otherAt;
-      if (!Number.isFinite(delta)) continue;
-      if (best == null || Math.abs(delta) < Math.abs(best) - 1e-12) best = delta;
-    }
+  for (const otherAt of beatInstants(otherWall, otherHeard)) {
+    const delta = ownAt - otherAt;
+    if (!Number.isFinite(delta)) continue;
+    if (best == null || Math.abs(delta) < Math.abs(best) - 1e-12) best = delta;
   }
   return best;
 }
@@ -257,7 +265,8 @@ export function beatSnapPlan(own, other, duration = Number.POSITIVE_INFINITY) {
   const ownWall = wallSinceBeat(own.time, own.beatOffset, own.bpm, own.rate);
   const otherWall = wallSinceBeat(other.time, other.beatOffset, other.bpm, other.rate);
   const deltaWall = nearestBeatShift(ownWall, ownHeard, otherWall, otherHeard);
-  if (deltaWall == null || !(Math.abs(deltaWall) <= limit)) return null;
+  // 1 ns keeps an error that lands on the limit from falling outside via rounding.
+  if (deltaWall == null || Math.abs(deltaWall) > limit + 1e-9) return null;
   if (Math.abs(deltaWall) < 1e-4) return null;
   const shifted = own.time + deltaWall * own.rate;
   if (!Number.isFinite(shifted) || shifted < -1e-6) return null;
